@@ -82,8 +82,50 @@ interface ApiList<T> {
 }
 
 // ---------------------------------------------------------------------------
+// Strategy runner / Audit / Feed types
+// ---------------------------------------------------------------------------
+
+export interface RunningStrategyInfo {
+  name: string;
+  description: string;
+  params: Record<string, unknown>;
+  codes: string[];
+  total_codes: number;
+  signals_today: number;
+  total_signals: number;
+  started_at: string;
+}
+
+export interface StrategyRunnerStatus {
+  listening: boolean;
+  strategies: RunningStrategyInfo[];
+}
+
+export interface AuditEvent {
+  action: string;
+  order_id: string | null;
+  ts_code: string;
+  detail: string;
+  timestamp: string;
+}
+
+export interface FeedStatus {
+  running: boolean;
+  trading_time: boolean;
+  watch_codes: number;
+  codes: string[];
+}
+
+// ---------------------------------------------------------------------------
 // Trading types (match backend Pydantic models)
 // ---------------------------------------------------------------------------
+
+export interface StockSearchResult {
+  ts_code: string;
+  name: string;
+  industry: string;
+  list_status: string;
+}
 
 export interface SimOrder {
   order_id: string;
@@ -160,6 +202,10 @@ export const api = {
   swClassify: (level = '') =>
     fetchJson<ApiList<SwClassify>>(`/api/v1/classify/sw?level=${level}`),
 
+  // Stock search
+  searchStocks: (q: string) =>
+    fetchJson<ApiList<StockSearchResult>>(`/api/v1/stock/search?q=${encodeURIComponent(q)}`),
+
   // Trading (Phase 3)
   submitOrder: (body: SubmitOrderBody) =>
     postJson<SimOrder>('/api/v1/orders', body),
@@ -186,4 +232,113 @@ export const api = {
 
   deactivateKillSwitch: () =>
     deleteJson('/api/v1/risk/kill-switch'),
+
+  resetAccount: () =>
+    postJson<{ status: string; message: string }>('/api/v1/account/reset', {}),
+
+  // Strategy runner
+  getRunningStrategies: () =>
+    fetchJson<StrategyRunnerStatus>('/api/v1/strategy/running'),
+
+  startStrategy: (body: { strategy_name: string; params?: Record<string, unknown>; codes?: string[] }) =>
+    postJson<RunningStrategyInfo>('/api/v1/strategy/start', body),
+
+  stopStrategy: (name: string) =>
+    postJson<{ status: string; name: string }>(`/api/v1/strategy/${name}/stop`, {}),
+
+  // Audit log
+  getAuditLog: () =>
+    fetchJson<ApiList<AuditEvent>>('/api/v1/observability/audit'),
+
+  // Feed scheduler
+  getFeedStatus: () =>
+    fetchJson<FeedStatus>('/api/v1/feed/status'),
+
+  // ── Backtest ─────────────────────────────────────────────
+
+  listStrategies: () =>
+    fetchJson<StrategyInfo[]>('/api/v1/backtest/strategies'),
+
+  runBacktest: (body: RunBacktestRequest) =>
+    postJson<BacktestRunResult>('/api/v1/backtest/run', body),
+
+  listBacktestRuns: (limit = 20) =>
+    fetchJson<BacktestRunSummary[]>(`/api/v1/backtest/list?limit=${limit}`),
+
+  getBacktestResult: (runId: string) =>
+    fetchJson<BacktestRunResult>(`/api/v1/backtest/result/${runId}`),
 };
+
+// ── Backtest types ───────────────────────────────────────
+
+export interface StrategyInfo {
+  name: string;
+  description: string;
+  default_params: Record<string, unknown>;
+}
+
+export interface RunBacktestRequest {
+  strategy_name: string;
+  strategy_params: Record<string, unknown>;
+  start_date: string;
+  end_date: string;
+  initial_capital: number;
+  benchmark: string;
+  universe: string[];
+}
+
+export interface BacktestStats {
+  total_return: number;
+  annual_return: number;
+  max_drawdown: number;
+  max_drawdown_amount: number;
+  sharpe_ratio: number;
+  sortino_ratio: number;
+  win_rate: number;
+  profit_factor: number;
+  total_trades: number;
+  avg_holding_days: number;
+  benchmark_return: number;
+}
+
+export interface EquityPoint {
+  date: string;
+  total_asset: number;
+  cash: number;
+  market_value: number;
+  daily_return: number;
+  benchmark_return: number;
+}
+
+export interface TradeRecord {
+  trade_date: string;
+  signal_date: string;
+  ts_code: string;
+  side: string;
+  price: number;
+  qty: number;
+  amount: number;
+  fee: number;
+  slippage: number;
+  reason: string;
+}
+
+export interface BacktestRunResult {
+  run_id: string;
+  config: RunBacktestRequest;
+  stats: BacktestStats;
+  equity_curve: EquityPoint[];
+  trades: TradeRecord[];
+  filtered_signals: unknown[];
+  started_at: string;
+  finished_at: string | null;
+}
+
+export interface BacktestRunSummary {
+  run_id: string;
+  strategy_name: string;
+  status: string;
+  stats: BacktestStats | null;
+  started_at: string;
+  finished_at: string | null;
+}

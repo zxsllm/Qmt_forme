@@ -4,8 +4,10 @@ import {
   DollarOutlined,
   PieChartOutlined,
   FundOutlined,
+  ReloadOutlined,
 } from '@ant-design/icons';
-import { useQuery } from '@tanstack/react-query';
+import { Popconfirm, message } from 'antd';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
 
 interface StatItem {
@@ -19,6 +21,7 @@ interface StatItem {
 }
 
 export default function AccountCard() {
+  const qc = useQueryClient();
   const { data: acct } = useQuery({
     queryKey: ['account'],
     queryFn: api.getAccount,
@@ -28,6 +31,14 @@ export default function AccountCard() {
     queryKey: ['positions'],
     queryFn: api.getPositions,
     refetchInterval: 5000,
+  });
+  const resetMut = useMutation({
+    mutationFn: () => api.resetAccount(),
+    onSuccess: () => {
+      message.success('账户已重置');
+      qc.invalidateQueries();
+    },
+    onError: (e: Error) => message.error(e.message),
   });
 
   const a = acct ?? { total_asset: 0, cash: 0, frozen: 0, market_value: 0, total_pnl: 0, today_pnl: 0, updated_at: '' };
@@ -76,7 +87,7 @@ export default function AccountCard() {
         <div
           key={i}
           className="flex items-center bg-bg-panel rounded-panel"
-          style={{ padding: '8px 14px', gap: 10 }}
+          style={{ padding: '8px 14px', gap: 10, position: 'relative' }}
         >
           <div
             className="flex items-center justify-center shrink-0"
@@ -107,6 +118,21 @@ export default function AccountCard() {
               {c.sub}
             </div>
           </div>
+          {i === 0 && (
+            <Popconfirm
+              title="确认重置模拟账户? 所有持仓和订单将被清空"
+              onConfirm={() => resetMut.mutate()}
+              okText="确认重置"
+              cancelText="取消"
+            >
+              <ReloadOutlined
+                style={{
+                  position: 'absolute', top: 6, right: 8,
+                  fontSize: 11, color: 'var(--color-t3)', cursor: 'pointer',
+                }}
+              />
+            </Popconfirm>
+          )}
         </div>
       ))}
     </div>

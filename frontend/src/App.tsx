@@ -4,6 +4,12 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import MainLayout from './layouts/MainLayout';
 import Dashboard from './pages/Dashboard';
 import KlinePage from './pages/KlinePage';
+import PositionsPage from './pages/PositionsPage';
+import OrdersPage from './pages/OrdersPage';
+import HistoryPage from './pages/HistoryPage';
+import RiskPage from './pages/RiskPage';
+import StrategyPage from './pages/StrategyPage';
+import BacktestPage from './pages/BacktestPage';
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, retry: 1 } },
@@ -29,11 +35,12 @@ export default function App() {
             <Route element={<MainLayout />}>
               <Route index element={<Dashboard />} />
               <Route path="/kline" element={<KlinePage />} />
-              <Route path="/positions" element={<Dashboard />} />
-              <Route path="/orders" element={<Dashboard />} />
-              <Route path="/history" element={<Dashboard />} />
-              <Route path="/risk" element={<Dashboard />} />
-              <Route path="/strategy" element={<Dashboard />} />
+              <Route path="/positions" element={<PositionsPage />} />
+              <Route path="/orders" element={<OrdersPage />} />
+              <Route path="/history" element={<HistoryPage />} />
+              <Route path="/risk" element={<RiskPage />} />
+              <Route path="/strategy" element={<StrategyPage />} />
+              <Route path="/backtest" element={<BacktestPage />} />
             </Route>
           </Routes>
         </BrowserRouter>

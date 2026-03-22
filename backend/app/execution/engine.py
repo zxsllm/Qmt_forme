@@ -6,6 +6,7 @@ Singleton instance is created at import time and shared across the app.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from uuid import UUID
@@ -35,6 +36,24 @@ class TradingEngine:
         self.kill_switch = KillSwitch()
         self.matcher = SimMatcher()
         self._audit_buffer: list[AuditEvent] = []
+        self._price_limits: dict[str, tuple[float, float]] = {}
+
+    def set_price_limits(self, limits: dict[str, tuple[float, float]]) -> None:
+        """Set today's up/down limits (called by scheduler on new trade day)."""
+        self._price_limits = limits
+        logger.info("price limits loaded for %d stocks", len(limits))
+
+    # ------------------------------------------------------------------
+    # Persistence bridge (sync → async, non-blocking)
+    # ------------------------------------------------------------------
+
+    def _persist(self, coro) -> None:
+        """Schedule an async DB write without blocking the caller."""
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(coro)
+        except RuntimeError:
+            pass  # no event loop (unit tests, CLI, etc.)
 
     # ------------------------------------------------------------------
     # Order flow
@@ -72,6 +91,12 @@ class TradingEngine:
         self._audit(AuditAction.ORDER_SUBMIT, order_id=order.order_id,
                     ts_code=order.ts_code,
                     detail=f"{order.side.value} {order.qty}@{order.price or 'MKT'}")
+
+        from app.execution.persistence import save_batch
+        self._persist(save_batch(
+            orders=[order.model_copy()],
+            account=self.account_mgr.account.model_copy(),
+        ))
         return order
 
     def cancel_order(self, order_id: UUID) -> Order | str:
@@ -92,6 +117,12 @@ class TradingEngine:
 
         self._audit(AuditAction.ORDER_CANCEL, order_id=order_id,
                     ts_code=order.ts_code)
+
+        from app.execution.persistence import save_batch
+        self._persist(save_batch(
+            orders=[order.model_copy()],
+            account=self.account_mgr.account.model_copy(),
+        ))
         return order
 
     # ------------------------------------------------------------------
@@ -101,13 +132,17 @@ class TradingEngine:
     def on_bar(self, bars: dict[str, BarData]) -> list[Order]:
         """Process a batch of bars: try to fill open orders, update positions."""
         filled_orders: list[Order] = []
+        affected_codes: set[str] = set()
 
         for order in self.order_mgr.get_open_orders():
             bar = bars.get(order.ts_code)
             if bar is None:
                 continue
 
-            result = self.matcher.try_fill(order, bar)
+            limits = self._price_limits.get(order.ts_code)
+            up_lim = limits[0] if limits else None
+            down_lim = limits[1] if limits else None
+            result = self.matcher.try_fill(order, bar, up_lim, down_lim)
             if result is None:
                 continue
 
@@ -135,6 +170,7 @@ class TradingEngine:
                         ts_code=order.ts_code,
                         detail=f"{result.fill_qty}@{result.fill_price}")
             filled_orders.append(order)
+            affected_codes.add(order.ts_code)
 
         for ts_code, bar in bars.items():
             self.position_book.update_market_price(ts_code, bar.close)
@@ -150,6 +186,18 @@ class TradingEngine:
             self.kill_switch.activate(rt_state.halt_reason)
             self._audit(AuditAction.KILL_SWITCH_ON, detail=rt_state.halt_reason)
 
+        if filled_orders:
+            affected_positions = [
+                p for code in affected_codes
+                if (p := self.position_book.get(code)) is not None
+            ]
+            from app.execution.persistence import save_batch
+            self._persist(save_batch(
+                orders=[o.model_copy() for o in filled_orders],
+                positions=[p.model_copy() for p in affected_positions],
+                account=self.account_mgr.account.model_copy(),
+            ))
+
         return filled_orders
 
     # ------------------------------------------------------------------
@@ -157,6 +205,7 @@ class TradingEngine:
     # ------------------------------------------------------------------
 
     def begin_day(self) -> None:
+        self.position_book.begin_day()
         self.account_mgr.begin_day()
         self.pre_trade.reset_daily()
         self.realtime_risk.reset()
@@ -165,7 +214,47 @@ class TradingEngine:
         acct = self.account_mgr.end_day(self.position_book)
         self._audit(AuditAction.SETTLEMENT,
                     detail=f"total={acct.total_asset:.2f} pnl={acct.today_pnl:.2f}")
+
+        from app.execution.persistence import save_batch
+        all_positions = self.position_book.get_all_including_closed()
+        self._persist(save_batch(
+            positions=[p.model_copy() for p in all_positions],
+            account=acct.model_copy(),
+        ))
         return acct
+
+    async def restore_from_db(self) -> dict:
+        """Rebuild in-memory OMS state from DB (called at startup)."""
+        from app.execution.persistence import load_all_state
+
+        orders, positions, account = await load_all_state()
+
+        self.order_mgr = OrderManager()
+        for o in orders:
+            self.order_mgr._orders[o.order_id] = o
+            self.order_mgr._signal_index[o.signal_id] = o.order_id
+
+        self.position_book = PositionBook()
+        for p in positions:
+            self.position_book._positions[p.ts_code] = p
+
+        if account:
+            self.account_mgr._account = account
+            self.account_mgr._day_start_asset = account.total_asset
+
+        active = [o for o in orders if o.status in (
+            OrderStatus.SUBMITTED, OrderStatus.PARTIAL_FILLED,
+        )]
+        held = [p for p in positions if p.qty > 0]
+
+        summary = {
+            "total_orders": len(orders),
+            "active_orders": len(active),
+            "positions": len(held),
+            "account_restored": account is not None,
+        }
+        logger.info("OMS state restored: %s", summary)
+        return summary
 
     # ------------------------------------------------------------------
     # Kill switch

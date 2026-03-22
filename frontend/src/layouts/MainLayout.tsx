@@ -21,6 +21,7 @@ const menuItems = [
   { key: '/history', icon: <HistoryOutlined />, label: '历史' },
   { key: '/risk', icon: <SafetyCertificateOutlined />, label: '风控' },
   { key: '/strategy', icon: <ExperimentOutlined />, label: '策略' },
+  { key: '/backtest', icon: <HistoryOutlined />, label: '回测' },
 ];
 
 export default function MainLayout() {

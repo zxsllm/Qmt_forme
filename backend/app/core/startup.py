@@ -1,0 +1,208 @@
+"""Startup checks — data freshness, OMS state recovery, trade calendar.
+
+Called during FastAPI lifespan. All queries are async.
+If data is stale, a background subprocess runs sync_incremental.py.
+"""
+
+from __future__ import annotations
+
+import logging
+import subprocess
+import sys
+from datetime import date, datetime
+from pathlib import Path
+
+from sqlalchemy import text
+
+from app.core.database import async_session
+
+logger = logging.getLogger(__name__)
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[3] / "scripts"
+
+
+# ---------------------------------------------------------------------------
+# Trade calendar helpers (reused by scheduler, settlement, etc.)
+# ---------------------------------------------------------------------------
+
+async def is_trade_date(d: date | None = None) -> bool:
+    """Check if *d* (default: today) is a trading day via trade_cal."""
+    if d is None:
+        d = date.today()
+    cal_date = d.strftime("%Y%m%d")
+    async with async_session() as session:
+        row = await session.execute(
+            text(
+                "SELECT is_open FROM trade_cal "
+                "WHERE cal_date = :d AND exchange = 'SSE' LIMIT 1"
+            ),
+            {"d": cal_date},
+        )
+        val = row.scalar_one_or_none()
+        return val == 1
+
+
+async def last_trade_date(before: date | None = None) -> str:
+    """Most recent trade date (YYYYMMDD) on or before *before*."""
+    if before is None:
+        before = date.today()
+    cal_str = before.strftime("%Y%m%d")
+    async with async_session() as session:
+        row = await session.execute(
+            text(
+                "SELECT cal_date FROM trade_cal "
+                "WHERE is_open = 1 AND cal_date <= :d "
+                "ORDER BY cal_date DESC LIMIT 1"
+            ),
+            {"d": cal_str},
+        )
+        return row.scalar_one_or_none() or cal_str
+
+
+async def _latest_date(table: str, col: str = "trade_date") -> str | None:
+    async with async_session() as session:
+        row = await session.execute(text(f"SELECT max({col}) FROM {table}"))
+        return row.scalar_one_or_none()
+
+
+# ---------------------------------------------------------------------------
+# Startup orchestrator
+# ---------------------------------------------------------------------------
+
+async def startup_checks() -> dict:
+    """Run all startup checks; return summary dict (stored in app.state)."""
+    summary: dict = {"data": {}, "sync_triggered": False, "oms": {}}
+
+    last_td = await last_trade_date()
+    is_today_td = await is_trade_date()
+
+    # ---- Data freshness ----
+    cal_latest = await _latest_date("trade_cal", "cal_date")
+    daily_latest = await _latest_date("stock_daily")
+    limit_latest = await _latest_date("stock_limit")
+
+    summary["data"] = {
+        "trade_cal": cal_latest,
+        "stock_daily": daily_latest,
+        "stock_limit": limit_latest,
+        "last_trade_date": last_td,
+    }
+
+    needs_sync = False
+    today_str = date.today().strftime("%Y%m%d")
+
+    if cal_latest and cal_latest < today_str:
+        logger.warning("trade_cal stale: latest=%s today=%s", cal_latest, today_str)
+        needs_sync = True
+
+    if daily_latest and daily_latest < last_td:
+        gap = _date_gap(daily_latest, last_td)
+        logger.warning("stock_daily behind %d days: %s → %s", gap, daily_latest, last_td)
+        needs_sync = True
+    else:
+        logger.info("stock_daily up-to-date: %s", daily_latest)
+
+    if limit_latest and limit_latest < last_td:
+        logger.warning("stock_limit behind: %s → %s", limit_latest, last_td)
+        needs_sync = True
+
+    if needs_sync:
+        _trigger_background_sync()
+        summary["sync_triggered"] = True
+
+    # ---- OMS state recovery ----
+    from app.execution.engine import trading_engine
+    oms = await trading_engine.restore_from_db()
+    summary["oms"] = oms
+
+    # ---- Auto-start scheduler on trade dates ----
+    from app.execution.feed.scheduler import scheduler
+    if is_today_td:
+        await scheduler.start()
+        summary["scheduler"] = "auto-started"
+        logger.info("trade date → scheduler auto-started")
+    else:
+        await scheduler.start()
+        summary["scheduler"] = "started (non-trade-date, will idle)"
+        logger.info("non-trade date → scheduler started but will idle")
+
+    # ---- Final summary ----
+    summary["is_trade_date"] = is_today_td
+
+    logger.info(
+        "startup OK | trade_date=%s | daily=%s | orders=%d active, %d positions",
+        "yes" if is_today_td else "no",
+        daily_latest,
+        oms.get("active_orders", 0),
+        oms.get("positions", 0),
+    )
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+async def load_price_limits(codes: list[str]) -> dict[str, tuple[float, float]]:
+    """Calculate next-day up/down limits from latest close for given codes."""
+    if not codes:
+        return {}
+
+    placeholders = ", ".join(f":c{i}" for i in range(len(codes)))
+    params = {f"c{i}": c for i, c in enumerate(codes)}
+
+    async with async_session() as session:
+        result = await session.execute(
+            text(f"""
+                SELECT DISTINCT ON (d.ts_code) d.ts_code, d.close, b.name
+                FROM stock_daily d
+                JOIN stock_basic b ON d.ts_code = b.ts_code
+                WHERE d.ts_code IN ({placeholders})
+                ORDER BY d.ts_code, d.trade_date DESC
+            """),
+            params,
+        )
+        rows = result.all()
+
+    limits: dict[str, tuple[float, float]] = {}
+    for ts_code, close, name in rows:
+        code = ts_code.split(".")[0]
+        is_st = "ST" in (name or "").upper()
+
+        if code.startswith("3") or code.startswith("688"):
+            pct = 0.20
+        elif code.startswith("8"):
+            pct = 0.30
+        elif is_st:
+            pct = 0.05
+        else:
+            pct = 0.10
+
+        limits[ts_code] = (round(close * (1 + pct), 2), round(close * (1 - pct), 2))
+
+    logger.info("calculated price limits for %d / %d codes", len(limits), len(codes))
+    return limits
+
+
+def _date_gap(a: str, b: str) -> int:
+    d1 = datetime.strptime(a, "%Y%m%d")
+    d2 = datetime.strptime(b, "%Y%m%d")
+    return max(0, (d2 - d1).days)
+
+
+def _trigger_background_sync() -> None:
+    """Fire-and-forget: run daily_sync.py in a detached subprocess."""
+    script = SCRIPTS_DIR / "daily_sync.py"
+    if not script.exists():
+        logger.error("sync script not found: %s", script)
+        return
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, str(script)],
+            cwd=str(SCRIPTS_DIR.parent),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        logger.info("background sync started (PID=%d)", proc.pid)
+    except Exception:
+        logger.exception("failed to start background sync")

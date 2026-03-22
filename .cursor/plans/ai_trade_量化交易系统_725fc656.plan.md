@@ -30,8 +30,17 @@ todos:
     content: "Phase 3: 实时数据流 + 模拟交易引擎 (10 Steps all done)"
     status: completed
   - id: phase4-strategy
-    content: "Phase 4: 策略框架与回测系统"
-    status: pending
+    content: "Phase 4: 策略框架与回测系统 (10 Steps all done)"
+    status: completed
+  - id: phase4_5-sim
+    content: "Phase 4.5: 模拟盘闭环 (5 Steps all done)"
+    status: completed
+  - id: phase4_6-lifecycle
+    content: "Phase 4.6: 日运行生命周期 (4 Steps all done)"
+    status: completed
+  - id: phase4.7-ashare-rules
+    content: "Phase 4.7: 模拟盘A股市场规则合规 (T+1/涨跌停/整手/tick)"
+    status: completed
   - id: phase5-qmt
     content: "Phase 5: QMT实盘桥接"
     status: pending
@@ -598,13 +607,14 @@ Qmt_forme/
 | **风控状态**     | 本地风控模块数据 (无需Tushare)           | --                                                              |
 | **策略开关**     | 本地策略注册表 (无需Tushare)            | --                                                              |
 
+
 > **P2-Core UI 重构** (已完成): 设计Token层、Panel通用组件、8个面板组件重写、Dashboard瘦身、Storybook集成
 
 ---
 
-### Phase 2b (P2-Plus): 资讯仪表盘 (模拟盘闭环后, 约2周)
+### Phase 2b (P2-Plus): 资讯仪表盘 (Phase 4.6 之后, 约2周)
 
-**前置条件**: Phase 3 模拟盘跑通后再开始，避免分散精力
+**前置条件**: Phase 4.6 完成后开始 (模拟盘已可日常使用)。与 Phase 5 无依赖，可先做
 
 **目标**: 补充截图中其余的资讯/行情大屏面板，增强信息获取能力
 
@@ -706,8 +716,7 @@ Qmt_forme/
 
 ### Phase 4: 策略框架与回测系统 (约3-4周)
 
-> **Phase 4 分步执行计划**: 见 [p4-strategy-backtest.plan.md](p4-strategy-backtest.plan.md)
-> 包含: 10个Step (规则+接口→数据拉取→指标库→可信性过滤→回测引擎→报告→示范策略→DB→API→前端)
+> **Phase 4** (已完成, 10/10 Steps): 接口定义→涨跌停数据→技术指标库→可信性过滤器→回测引擎(T+1)→报告生成器→MACrossover示范策略→DB模型→REST API(4端点)→前端回测页(/backtest)
 
 **目标**: 可视化策略编辑、参数调优、历史回测。**回测可信性优先于回测功能丰富性。**
 
@@ -830,6 +839,153 @@ Level 5: 正式实盘
 - 各Level的通过阈值 (夏普/回撤/运行天数等)
 - 降级触发条件 (连续亏损天数/偏离度)
 - Level 4 小资金上限比例
+
+### Phase 4.5: 模拟盘闭环 (当前优先级, 约1-1.5周)
+
+> **目标**: 让模拟盘真正能跑起来 — 手动下单 + 实时行情 + 策略自动交易 + 前端完整对接
+
+**背景**: Phase 3 搭好了 OMS/风控/撮合/API 基础设施，Phase 4 搭好了策略框架。但两者之间缺桥接：
+
+- 前端无下单表单（`api.submitOrder()` 已实现但无 UI 调用）
+- 无实时行情采集进程（MarketFeed 框架在，缺盘中调度循环）
+- 策略只能在回测引擎中运行，无实时 StrategyRunner
+- TradePlanTable / StrategyPanel / LogPanel 仍用硬编码假数据
+- 占位路由 (/orders, /positions, /history, /risk, /strategy) 未实体化
+
+**Step 1: 手动交易操作 (下单 + 平仓 + 改单 + 账户重置)**
+
+- **下单表单 (OrderSubmitForm)**:
+  - Dashboard 交易计划区域左上角加"新建订单"按钮 → 弹出 Modal 表单
+  - 字段: 股票代码(带搜索补全) + 买卖方向 + 价格类型(市价/限价) + 价格 + 数量(手)
+  - 调用 `api.submitOrder()` → 后端 OMS 走完整链路
+  - 下单后自动刷新 OrderTable
+- **一键平仓 (PositionTable 操作列)**:
+  - 每行持仓增加"平仓"按钮 → 弹确认框 → 提交 SELL 市价单 (qty=该股全部持仓)
+  - 顶部增加"全部清仓"按钮 → 二次确认 → 对每只持仓股提交 SELL 市价单
+- **改单 (OrderTable 操作列)**:
+  - 未成交 LIMIT 订单行增加"改单"按钮 → 弹 Modal 修改价格/数量
+  - 后端: 先撤原单 → 再提交新单 (OMS 不支持原地改单, 用撤+重下模拟)
+- **K线图快捷下单**:
+  - KlineChart 上方工具栏加"买入"/"卖出"快捷按钮
+  - 点击后弹出 OrderSubmitForm，股票代码自动填入当前K线图的股票
+- **模拟账户重置**:
+  - 后端: `POST /api/v1/account/reset` → 清空持仓/订单/成交, 资金恢复初始值
+  - 前端: AccountCard 区域加"重置"图标按钮 → 二次确认
+- 验收: 从 UI 成功 (1)提交订单 (2)一键平仓 (3)改单 (4)K线快捷下单 (5)重置账户
+
+**Step 2: 实时行情调度器 (MarketDataScheduler)**
+
+- `backend/app/execution/feed/scheduler.py`
+- 盘中 (9:30-11:30, 13:00-15:00) 每分钟调用 Tushare `rt_min` 获取最新 bar
+- 将 bar 数据发布到 Redis pub/sub 频道 (复用 Phase 3 MarketFeed)
+- 同时更新内存最新价格 (供撮合引擎使用)
+- 非交易时段自动休眠
+- 作为 FastAPI 后台任务启动 (lifespan)
+- 验收: 盘中启动后端，前端 K 线图 / WebSocket 收到实时数据
+
+**Step 3: 策略运行器 (StrategyRunner)**
+
+- `backend/app/execution/strategy_runner.py`
+- 订阅 Redis 实时行情 → 收到新 bar → 调用 `strategy.on_bar()` → 生成信号
+- 信号经风控检查 → 提交给 OMS (复用 TradingEngine)
+- 支持同时运行多策略，每策略独立持仓隔离 or 共享账户 (可配置)
+- 策略启停 API: `POST /api/v1/strategy/{name}/start`, `POST /.../stop`
+- 验收: 启动 MACrossover 策略，盘中自动产生信号并下单
+
+**Step 4: 前端假数据替换为真实 API**
+
+- StrategyPanel: 对接 Step 3 的策略启停 API + 运行状态查询
+- LogPanel: 对接 `GET /api/v1/audit/recent` (审计日志 API, Phase 3 已有 audit_log 表)
+- TradePlanTable: 改为显示当日策略信号/待执行计划 (来自 StrategyRunner)
+- 验收: Dashboard 所有面板显示真实数据，无 mock
+
+**Step 5: 占位路由实体化**
+
+- `/orders` → 独立订单管理页 (全部订单 + 筛选 + 下单表单)
+- `/positions` → 独立持仓页 (持仓详情 + 个股盈亏曲线)
+- `/history` → 历史成交页 (成交记录 + 日度汇总)
+- `/risk` → 独立风控页 (风控规则配置 + 触发历史 + Kill Switch)
+- `/strategy` → 策略管理页 (策略列表 + 启停 + 参数编辑 + 运行日志)
+- 验收: 侧栏每个菜单点进去都有独立内容
+
+**依赖关系**:
+
+```
+Step 1 (下单表单) ── 独立，可立即开始
+Step 2 (行情调度) ── 独立，可与 Step 1 并行
+Step 3 (策略运行器) ── 依赖 Step 2
+Step 4 (假数据替换) ── 依赖 Step 3 (StrategyPanel 需要 runner API)
+Step 5 (路由实体化) ── 依赖 Step 1 + Step 4
+```
+
+---
+
+### Phase 4.6: 日运行生命周期 (约1周)
+
+> **子计划**: 见 [p4.6-daily-lifecycle.plan.md](p4.6-daily-lifecycle.plan.md)
+> **目标**: 让模拟盘可以"开盘时打开程序 → 自动交易 → 关闭后状态不丢失"，达到同花顺模拟盘级别的日常可用性
+> **前置**: Phase 4.5 已完成 (OMS/风控/撮合/前端/策略/行情 基础设施就绪)
+> **动机**: Phase 4.5 搭好了所有零件，但缺少"把车开起来"的完整日运行闭环——状态重启丢失、行情不自动启动、收盘不结算、数据不自动更新
+
+**核心问题 (Phase 4.5 遗留)**:
+
+1. TradingEngine 全部状态在内存，后端重启 = 订单/持仓/资金清零
+2. 行情调度器需要手动 POST 启动
+3. 无收盘自动结算
+4. 数据更新需要手动跑脚本
+5. 无交易日日历感知 (周末/节假日启动也会尝试拉数据)
+
+**包含 4 个 Step** (详见子计划):
+
+- Step 1: OMS 状态持久化 (写DB + 启动恢复)
+- Step 2: 启动自检 (数据时效检查 + 增量更新 + 状态恢复 + 交易日历感知)
+- Step 3: 盘中自动化 (scheduler自启 + 撮合联动 + 策略自动恢复)
+- Step 4: 收盘结算 + 日终数据同步
+
+---
+
+### Phase 4.7: 模拟盘A股市场规则合规 (已完成)
+
+> **目标**: 让模拟交易引擎严格遵守A股市场核心交易规则，使模拟盘的行为与真实交易所一致，
+> 避免出现"现实中会被交易所拒绝的订单在模拟盘里被接受"的情况。
+> **前置**: Phase 4.6 日运行生命周期已完成
+> **动机**: Phase 4.5/4.6 虽然搭建了完整的撮合+持仓+结算链路，但缺少对A股特有规则的严格执行。
+> 回测引擎 (`TradabilityFilter`) 已有这些规则，但实时模拟盘未同步——导致用户提交明显违规的限价单也能被接受。
+
+**已实现的A股规则清单**:
+
+| 规则 | 实现位置 | 说明 |
+|------|---------|------|
+| **T+1 交割** | `PositionBook` | 当日买入股票不能当日卖出；`available_qty` 与 `qty` 分离，`begin_day()` 日切时解锁 |
+| **涨停板买入** | `SimMatcher._is_tradable()` | 当分钟bar的 `low >= up_limit` 时 BUY 订单不成交 |
+| **跌停板卖出** | `SimMatcher._is_tradable()` | 当分钟bar的 `high <= down_limit` 时 SELL 订单不成交 |
+| **一字板双向拦截** | `SimMatcher._is_tradable()` | `open ≈ high ≈ low ≈ close` 且触及涨/跌停价 → 任何方向都不成交 |
+| **停牌不成交** | 自然过滤 | 停牌股无实时行情bar → matcher 无数据不撮合 |
+| **限价单涨跌停校验** | `api.py submit_order` | 提交时计算涨跌停价 (主板±10%/创业板科创板±20%/北交所±30%/ST±5%)，价格越界立即拒绝 |
+| **整手校验 (100股)** | `api.py submit_order` | 买入必须100股整数倍 |
+| **价格 tick 0.01** | `api.py submit_order` | 限价单价格必须为0.01元整数倍 |
+| **单笔成交量上限** | `SimMatcher` | 单笔 fill ≤ bar 成交量 20% |
+
+**涨跌停限价缓存机制**:
+
+- `startup.load_price_limits()`: 从 `stock_daily` 最新收盘价 + `stock_basic` 名称 (ST判断) 动态计算
+- 每日开盘由 `scheduler` 自动加载并注入 `TradingEngine._price_limits`
+- 新下单自动触发对应股票的 limits 加载 (`scheduler.add_watch_code()`)
+
+**修改文件清单**:
+
+- `shared/interfaces/models.py` — Position 增加 `available_qty` 字段
+- `shared/models/stock.py` — SimPosition ORM 增加 `available_qty` 列
+- `execution/oms/position_book.py` — T+1 逻辑: BUY 不增 available, SELL 扣 available, begin_day 解锁
+- `execution/risk/pre_trade.py` — 卖出校验改用 `available_qty`
+- `execution/matcher.py` — 涨跌停/一字板检查 `_is_tradable()`
+- `execution/engine.py` — `_price_limits` 缓存 + 传递 matcher + begin_day 联动 position_book
+- `execution/api.py` — 整手校验 + tick校验 + 涨跌停提交校验
+- `execution/feed/scheduler.py` — 日切/启动时自动加载涨跌停限价
+- `core/startup.py` — `load_price_limits()` 批量计算函数
+- `execution/persistence.py` — available_qty 持久化
+
+---
 
 ### Phase 5: QMT实盘桥接 (约2-3周)
 

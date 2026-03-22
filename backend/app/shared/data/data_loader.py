@@ -45,6 +45,17 @@ class DataLoader:
             {"s": status},
         )
 
+    async def search_stocks(self, q: str, limit: int = 20) -> pd.DataFrame:
+        """Search stocks by ts_code or name prefix (for autocomplete)."""
+        like = f"{q}%"
+        return await self._query(
+            "SELECT ts_code, name, industry, list_status "
+            "FROM stock_basic "
+            "WHERE (ts_code ILIKE :q OR name ILIKE :q) AND list_status = 'L' "
+            "ORDER BY ts_code LIMIT :lim",
+            {"q": like, "lim": limit},
+        )
+
     async def trade_calendar(
         self, start: str, end: str, is_open: bool = True
     ) -> list[str]:
@@ -192,3 +203,56 @@ class DataLoader:
             """,
             {"td": trade_date},
         )
+
+    # ── Limit prices (涨跌停) ──────────────────────────────────────
+
+    async def stk_limit(
+        self, ts_code: str, trade_date: str
+    ) -> dict | None:
+        """Get up/down limit prices for a single stock on a single date."""
+        df = await self._query(
+            "SELECT up_limit, down_limit, pre_close FROM stock_limit "
+            "WHERE ts_code = :c AND trade_date = :d",
+            {"c": ts_code, "d": trade_date},
+        )
+        if df.empty:
+            return None
+        row = df.iloc[0]
+        return {"up_limit": row["up_limit"], "down_limit": row["down_limit"], "pre_close": row["pre_close"]}
+
+    async def stk_limit_batch(self, trade_date: str) -> pd.DataFrame:
+        """Get all stocks' limit prices for a single date."""
+        return await self._query(
+            "SELECT ts_code, up_limit, down_limit, pre_close FROM stock_limit "
+            "WHERE trade_date = :d",
+            {"d": trade_date},
+        )
+
+    async def stk_limit_batch_range(self, start_date: str, end_date: str) -> pd.DataFrame:
+        """Get all stocks' limit prices for a date range (for backtest preloading)."""
+        return await self._query(
+            "SELECT ts_code, trade_date, up_limit, down_limit, pre_close FROM stock_limit "
+            "WHERE trade_date >= :s AND trade_date <= :e",
+            {"s": start_date, "e": end_date},
+        )
+
+    # ── Suspension (停复牌) ─────────────────────────────────────────
+
+    async def is_suspended(self, ts_code: str, trade_date: str) -> bool:
+        """Check if a stock is suspended on a given date."""
+        df = await self._query(
+            "SELECT 1 FROM suspend_d "
+            "WHERE ts_code = :c AND trade_date = :d AND suspend_type = 'S' "
+            "LIMIT 1",
+            {"c": ts_code, "d": trade_date},
+        )
+        return not df.empty
+
+    async def suspended_stocks(self, trade_date: str) -> set[str]:
+        """Get all suspended stock codes for a given date."""
+        df = await self._query(
+            "SELECT ts_code FROM suspend_d "
+            "WHERE trade_date = :d AND suspend_type = 'S'",
+            {"d": trade_date},
+        )
+        return set(df["ts_code"].tolist()) if not df.empty else set()

@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.shared.interfaces.types import (
     AuditAction,
+    FilterReason,
     OrderSide,
     OrderStatus,
     OrderType,
@@ -92,6 +93,7 @@ class Position(BaseModel):
     """Single stock holding."""
     ts_code: str
     qty: int = 0                        # current shares held
+    available_qty: int = 0              # T+1: shares available for selling today
     avg_cost: float = 0.0               # average cost per share (incl. fees)
     market_price: float = 0.0           # latest market price
     unrealized_pnl: float = 0.0
@@ -141,3 +143,91 @@ class AuditEvent(BaseModel):
     ts_code: str = ""
     detail: str = ""
     timestamp: datetime = Field(default_factory=datetime.now)
+
+
+# ---------------------------------------------------------------------------
+# Backtest
+# ---------------------------------------------------------------------------
+
+class BacktestConfig(BaseModel):
+    """Configuration for a single backtest run."""
+    strategy_name: str
+    strategy_params: dict = {}
+    start_date: str                     # YYYYMMDD
+    end_date: str                       # YYYYMMDD
+    initial_capital: float = 1_000_000.0
+    benchmark: str = "000300.SH"        # default: CSI 300
+    universe: list[str] = []            # empty = all stocks in stock_basic
+    fee_config: FeeConfig = Field(default_factory=FeeConfig)
+    freq: str = "daily"                 # "daily" or "1min" (Phase 4 MVP: daily only)
+
+
+class BacktestContext(BaseModel):
+    """Read-only context passed to IStrategy.on_init().
+
+    Provides metadata the strategy needs for initialization.
+    """
+    config: BacktestConfig
+    trade_dates: list[str] = []         # all trade dates in [start, end]
+    universe_codes: list[str] = []      # ts_codes available in this backtest
+
+
+class TradeRecord(BaseModel):
+    """One completed trade (fill) in a backtest."""
+    trade_date: str                     # date the fill occurred (T+1)
+    signal_date: str                    # date the signal was generated (T)
+    ts_code: str
+    side: OrderSide
+    price: float                        # actual fill price (after slippage)
+    qty: int
+    amount: float = 0.0                 # price * qty
+    fee: float = 0.0
+    slippage: float = 0.0
+    reason: str = ""                    # strategy reason from signal
+
+
+class FilteredSignal(BaseModel):
+    """A signal that was rejected by the credibility filter."""
+    signal_date: str
+    ts_code: str
+    side: OrderSide
+    price: float | None = None
+    qty: int = 0
+    filter_reason: FilterReason
+    detail: str = ""
+
+
+class EquityPoint(BaseModel):
+    """One daily equity snapshot."""
+    date: str
+    total_asset: float
+    cash: float
+    market_value: float
+    daily_return: float = 0.0
+    benchmark_return: float = 0.0
+
+
+class BacktestStats(BaseModel):
+    """Aggregated performance statistics."""
+    total_return: float = 0.0           # cumulative return %
+    annual_return: float = 0.0          # annualized return %
+    max_drawdown: float = 0.0           # max drawdown %
+    max_drawdown_amount: float = 0.0
+    sharpe_ratio: float = 0.0
+    sortino_ratio: float = 0.0
+    win_rate: float = 0.0               # winning trades / total trades
+    profit_factor: float = 0.0          # gross profit / gross loss
+    total_trades: int = 0
+    avg_holding_days: float = 0.0
+    benchmark_return: float = 0.0
+
+
+class BacktestResult(BaseModel):
+    """Complete output of a backtest run."""
+    config: BacktestConfig
+    stats: BacktestStats = Field(default_factory=BacktestStats)
+    equity_curve: list[EquityPoint] = []
+    trades: list[TradeRecord] = []
+    filtered_signals: list[FilteredSignal] = []
+    started_at: datetime = Field(default_factory=datetime.now)
+    finished_at: datetime | None = None

@@ -84,3 +84,13 @@ class TushareService:
 
     def index_classify(self, **kwargs) -> pd.DataFrame:
         return self.query("index_classify", **kwargs)
+
+    def stk_limit(self, **kwargs) -> pd.DataFrame:
+        return self.query(
+            "stk_limit",
+            fields="trade_date,ts_code,pre_close,up_limit,down_limit",
+            **kwargs,
+        )
+
+    def suspend_d(self, **kwargs) -> pd.DataFrame:
+        return self.query("suspend_d", **kwargs)

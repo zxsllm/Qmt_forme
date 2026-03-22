@@ -77,9 +77,14 @@ class PreTradeRiskChecker:
             if down_limit and price_est and price_est <= down_limit:
                 return self._reject(f"{req.ts_code} at down-limit {down_limit}, sell blocked")
 
-            held = position.qty if position else 0
-            if req.qty > held:
-                return self._reject(f"cannot sell {req.qty}, only hold {held}")
+            available = position.available_qty if position else 0
+            if req.qty > available:
+                held = position.qty if position else 0
+                if held >= req.qty and available < req.qty:
+                    return self._reject(
+                        f"T+1: {req.ts_code} holds {held} but only {available} available today"
+                    )
+                return self._reject(f"cannot sell {req.qty}, only hold {available}")
 
         return RiskCheckResult(action=RiskAction.PASS)
 

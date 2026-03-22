@@ -134,6 +134,31 @@ class StockMinKline(Base):
 
 
 # =========================================================================
+# Phase 4: Backtest support tables
+# =========================================================================
+
+class StockLimit(Base):
+    """Daily up/down limit prices for all stocks."""
+    __tablename__ = "stock_limit"
+
+    ts_code: Mapped[str] = mapped_column(String(16), primary_key=True)
+    trade_date: Mapped[str] = mapped_column(String(8), primary_key=True)
+    up_limit: Mapped[float | None] = mapped_column(Float)
+    down_limit: Mapped[float | None] = mapped_column(Float)
+    pre_close: Mapped[float | None] = mapped_column(Float)
+
+
+class SuspendD(Base):
+    """Daily suspension records (S=suspend, R=resume)."""
+    __tablename__ = "suspend_d"
+
+    ts_code: Mapped[str] = mapped_column(String(16), primary_key=True)
+    trade_date: Mapped[str] = mapped_column(String(8), primary_key=True)
+    suspend_type: Mapped[str | None] = mapped_column(String(4))
+    suspend_timing: Mapped[str | None] = mapped_column(String(32))
+
+
+# =========================================================================
 # Phase 3: Simulated trading tables
 # =========================================================================
 
@@ -188,6 +213,7 @@ class SimPosition(Base):
 
     ts_code: Mapped[str] = mapped_column(String(16), primary_key=True)
     qty: Mapped[int] = mapped_column(Integer, default=0)
+    available_qty: Mapped[int] = mapped_column(Integer, default=0)
     avg_cost: Mapped[float] = mapped_column(Float, default=0.0)
     market_price: Mapped[float] = mapped_column(Float, default=0.0)
     unrealized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
@@ -226,4 +252,65 @@ class AuditLog(Base):
     detail: Mapped[str] = mapped_column(Text, default="")
     timestamp: Mapped[datetime] = mapped_column(
         DateTime, server_default=text("NOW()"), index=True
+    )
+
+
+# =========================================================================
+# Phase 4: Strategy & Backtest metadata tables
+# =========================================================================
+
+class StrategyMeta(Base):
+    """Registry of all strategies available for backtesting / trading."""
+    __tablename__ = "strategy_meta"
+
+    strategy_id: Mapped[str] = mapped_column(
+        PG_UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4())
+    )
+    name: Mapped[str] = mapped_column(String(64), unique=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    default_params: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(16), default="DRAFT")
+    promotion_level: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("NOW()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("NOW()")
+    )
+
+
+class BacktestRun(Base):
+    """One backtest execution record with config + summary stats."""
+    __tablename__ = "backtest_run"
+
+    run_id: Mapped[str] = mapped_column(
+        PG_UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4())
+    )
+    strategy_name: Mapped[str] = mapped_column(String(64), index=True)
+    config_json: Mapped[str] = mapped_column(Text, default="{}")
+    stats_json: Mapped[str] = mapped_column(Text, default="{}")
+    equity_json: Mapped[str] = mapped_column(Text, default="[]")
+    trades_json: Mapped[str] = mapped_column(Text, default="[]")
+    filtered_json: Mapped[str] = mapped_column(Text, default="[]")
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("NOW()")
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    status: Mapped[str] = mapped_column(String(16), default="RUNNING")
+
+
+class PromotionHistory(Base):
+    """Track strategy promotions / demotions through the pipeline."""
+    __tablename__ = "promotion_history"
+
+    record_id: Mapped[str] = mapped_column(
+        PG_UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4())
+    )
+    strategy_name: Mapped[str] = mapped_column(String(64), index=True)
+    from_level: Mapped[int] = mapped_column(Integer)
+    to_level: Mapped[int] = mapped_column(Integer)
+    reason: Mapped[str] = mapped_column(Text, default="")
+    backtest_run_id: Mapped[str | None] = mapped_column(PG_UUID(as_uuid=False))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("NOW()")
     )

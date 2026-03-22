@@ -7,8 +7,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.shared.data import DataLoader
 from app.execution.api import router as trading_router
+from app.research.api import router as backtest_router
 from app.execution.feed.ws_manager import ws_manager
 from app.execution.feed.market_feed import REDIS_CHANNEL
+from app.execution.feed.scheduler import scheduler
 from app.core.redis import redis_client
 
 
@@ -32,6 +34,7 @@ app.add_middleware(
 )
 
 app.include_router(trading_router)
+app.include_router(backtest_router)
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +57,8 @@ async def _redis_to_ws_bridge() -> None:
 
 @app.on_event("startup")
 async def startup_event():
+    from app.core.startup import startup_checks
+    app.state.startup_result = await startup_checks()
     asyncio.create_task(_redis_to_ws_bridge())
 
 
@@ -71,7 +76,16 @@ async def ws_market(websocket: WebSocket):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "phase": "3-trading"}
+    result = getattr(app.state, "startup_result", {})
+    return {"status": "ok", "phase": "4.6-lifecycle", "startup": result}
+
+
+@app.get("/api/v1/stock/search")
+async def search_stocks(q: str = Query("", min_length=1, description="code or name")):
+    """Search stocks by ts_code or name prefix (max 20 results)."""
+    loader = DataLoader()
+    df = await loader.search_stocks(q, limit=20)
+    return {"count": len(df), "data": _df_to_records(df)}
 
 
 @app.get("/api/v1/stock/{ts_code}/daily")

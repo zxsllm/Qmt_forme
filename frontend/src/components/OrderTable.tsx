@@ -1,4 +1,5 @@
-import { Table, Tag, Button } from 'antd';
+import { useState } from 'react';
+import { Table, Tag, Button, Modal, InputNumber, Form, Space, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, type SimOrder } from '../services/api';
@@ -14,6 +15,9 @@ const statusMap: Record<string, { color: string; text: string }> = {
 
 export default function OrderTable() {
   const qc = useQueryClient();
+  const [modifyTarget, setModifyTarget] = useState<SimOrder | null>(null);
+  const [form] = Form.useForm();
+
   const { data } = useQuery({
     queryKey: ['orders'],
     queryFn: () => api.listOrders(),
@@ -22,8 +26,46 @@ export default function OrderTable() {
 
   const cancelMut = useMutation({
     mutationFn: (id: string) => api.cancelOrder(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['orders'] }),
+    onSuccess: () => {
+      message.success('撤单成功');
+      qc.invalidateQueries({ queryKey: ['orders'] });
+      qc.invalidateQueries({ queryKey: ['account'] });
+    },
+    onError: (e: Error) => message.error(e.message),
   });
+
+  const modifyMut = useMutation({
+    mutationFn: async ({ oldOrder, newPrice, newQty }: {
+      oldOrder: SimOrder; newPrice: number; newQty: number;
+    }) => {
+      await api.cancelOrder(oldOrder.order_id);
+      return api.submitOrder({
+        ts_code: oldOrder.ts_code,
+        side: oldOrder.side,
+        order_type: 'LIMIT',
+        price: newPrice,
+        qty: newQty,
+      });
+    },
+    onSuccess: () => {
+      message.success('改单成功');
+      qc.invalidateQueries({ queryKey: ['orders'] });
+      qc.invalidateQueries({ queryKey: ['account'] });
+      setModifyTarget(null);
+    },
+    onError: (e: Error) => message.error(e.message),
+  });
+
+  const handleModifyOk = () => {
+    if (!modifyTarget) return;
+    form.validateFields().then((vals) => {
+      modifyMut.mutate({
+        oldOrder: modifyTarget,
+        newPrice: vals.price,
+        newQty: vals.qty,
+      });
+    });
+  };
 
   const columns: ColumnsType<SimOrder> = [
     {
@@ -53,26 +95,65 @@ export default function OrderTable() {
       },
     },
     {
-      title: '操作', width: 60, align: 'center',
+      title: '操作', width: 100, align: 'center',
       render: (_: unknown, record: SimOrder) => {
-        const canCancel = ['PENDING', 'SUBMITTED', 'PARTIAL_FILLED'].includes(record.status);
-        return canCancel ? (
-          <Button size="small" danger onClick={() => cancelMut.mutate(record.order_id)}
-                  style={{ fontSize: 11, height: 22 }}>
-            撤单
-          </Button>
-        ) : null;
+        const canAct = ['PENDING', 'SUBMITTED', 'PARTIAL_FILLED'].includes(record.status);
+        const isLimit = record.order_type === 'LIMIT';
+        if (!canAct) return null;
+        return (
+          <Space size={4}>
+            <Button size="small" danger onClick={() => cancelMut.mutate(record.order_id)}
+                    style={{ fontSize: 11, height: 22 }}>
+              撤单
+            </Button>
+            {isLimit && (
+              <Button size="small" onClick={() => {
+                setModifyTarget(record);
+                form.setFieldsValue({ price: record.price, qty: record.qty });
+              }} style={{ fontSize: 11, height: 22 }}>
+                改单
+              </Button>
+            )}
+          </Space>
+        );
       },
     },
   ];
 
   return (
-    <Table
-      columns={columns}
-      dataSource={data?.data ?? []}
-      rowKey="order_id"
-      size="small"
-      pagination={false}
-    />
+    <>
+      <Table
+        columns={columns}
+        dataSource={data?.data ?? []}
+        rowKey="order_id"
+        size="small"
+        pagination={false}
+      />
+      <Modal
+        title={`改单 · ${modifyTarget?.ts_code ?? ''}`}
+        open={!!modifyTarget}
+        onCancel={() => setModifyTarget(null)}
+        footer={null}
+        destroyOnClose
+        width={340}
+      >
+        <Form form={form} layout="vertical" style={{ marginTop: 12 }}>
+          <Form.Item name="price" label="新价格" rules={[{ required: true }]}>
+            <InputNumber min={0.01} step={0.01} precision={2} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item name="qty" label="新数量" rules={[{ required: true }]}>
+            <InputNumber min={100} step={100} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item style={{ marginBottom: 0, textAlign: 'right' }}>
+            <Space>
+              <Button onClick={() => setModifyTarget(null)}>取消</Button>
+              <Button type="primary" onClick={handleModifyOk} loading={modifyMut.isPending}>
+                确认改单
+              </Button>
+            </Space>
+          </Form.Item>
+        </Form>
+      </Modal>
+    </>
   );
 }
