@@ -12,64 +12,53 @@ alwaysApply: true
 - **先读AGENTS.md**: 确认项目当前进度和已完成任务，避免重复劳动
 - **冲突处理**: `project-overview.mdc` > 当前激活的计划文件 > `AGENTS.md`；若 `AGENTS.md` 与计划不一致，先更新状态再继续编码
 - **不许扩范围**: 严格遵守当前Phase的MVP边界，计划文件中标注"不许越界"的内容绝对不做
-- **先复用现有实现**: 新增脚本/API/表/数据层前，先检查 `scripts/`、`backend/app/`、已有模型和已有端点；若已有近似能力，优先扩展原文件，禁止重复造轮子
-- **更新状态**: 每完成一个Step，更新计划文件frontmatter中对应todo的status，同时更新 `AGENTS.md`。若该Step创建了新的顶层目录或激活了新的隔离规则，还需更新本文件的"架构约束"节
+- **先复用现有实现**: 新增前先检查 `scripts/`、`backend/app/`、已有模型和端点，禁止重复造轮子
 - **写回计划**: 任何新增功能/架构变更必须先写回计划文件，获得确认后再编码
-- **不重构无关模块**: 只改当前Step涉及的代码，不要"顺手"重构其他模块
-- **改后必验**: 每次完成一个Step后，至少做一次最小验证（如 `/health`、关键 SQL、关键 API smoke test），未验证不得标记完成
-- **端口/进程管理**: 后端固定 `8000`，前端固定 `5173`。启动服务前先检查端口是否被占用，如果被旧进程占用则先 kill 再启动，**不要换端口**
+- **更新状态**: 每完成一个Step，更新子计划文件对应 checkbox，同时更新 `AGENTS.md`。若创建了新目录或改变隔离规则，还需更新本文件
+- **不重构无关模块**: 只改当前Step涉及的代码
+- **改后必验**: 每次完成一个Step后做最小验证，未验证不得标记完成
+- **端口/进程管理**: 后端 `8000`，前端 `5173`。启动前先检查端口占用，被占则先 kill 再启动
 
 ## 技术约束
 
-- **Python**: 3.10+，禁止Python 2语法。类型注解用 `X | Y` 而非 `Union[X, Y]`
-- **启动命令**: Windows用 `python` 或 `py -3`，确保调用Python 3
-- **数据库**: PostgreSQL，ORM用SQLAlchemy 2.0 (async)
-- **数据源**: Tushare Pro，token从环境变量 `TUSHARE_TOKEN` 读取
+- **Python**: 3.10+，类型注解用 `X | Y`。Windows用 `python` 或 `py -3`
+- **数据库**: PostgreSQL 18+，ORM用SQLAlchemy 2.0 (async)，Alembic管理迁移
+- **数据源**: Tushare Pro，token从 `TUSHARE_TOKEN` 环境变量读取
 - **Web框架**: FastAPI
-- **前端** (P2-Core起): React 19 + TypeScript + Vite + Ant Design 5 + TailwindCSS
+- **前端**: React 19 + TypeScript + Vite + Ant Design 5 + TailwindCSS v4
 
-## 架构约束 (当前态 + 规划态)
+## 架构约束
 
-已实现的目录结构:
-- `backend/app/core/` — 配置、数据库连接
-- `backend/app/shared/models/` — SQLAlchemy 模型 (所有表)
+已实现目录:
+- `backend/app/core/` — 配置、数据库、Redis连接
+- `backend/app/shared/models/` — SQLAlchemy ORM
+- `backend/app/shared/interfaces/` — Pydantic models + enums (research/execution 通信协议)
 - `backend/app/shared/data/` — DataLoader 统一数据访问层
-- `backend/app/research/data/` — TushareService (数据拉取)
-- `scripts/` — 一次性/批量数据拉取脚本
+- `backend/app/research/data/` — TushareService
+- `backend/app/execution/` — TradingEngine, OMS, 风控, 撮合, Feed, 可观测性
+- `frontend/` — React 19 交易控制台 + Storybook
+- `scripts/` — 数据拉取/同步脚本
 
-- `frontend/` — React 19 + TypeScript + Vite + Ant Design 5 (P2-Core)
-- `backend/app/execution/` — OMS、风控、撮合、行情Feed (Phase 3)
-- `backend/app/execution/oms/` — 订单状态机、持仓账本、资金账本
-- `backend/app/execution/risk/` — 下单前风控、盘中风控、Kill Switch
-- `backend/app/execution/feed/` — 行情订阅 (Phase 3 进行中)
-- `backend/app/execution/observability/` — 可观测性 (Phase 3 进行中)
-- `backend/app/shared/interfaces/` — research/execution 通信协议 (Pydantic models + enums)
-
-规划中但尚未创建的目录 (到对应Phase再创建，之前不要提前建):
-- `backend/app/execution/broker/` — QMT实盘桥接 (Phase 5)
-
-隔离规则 (创建对应目录后生效):
-- **research/ 禁止 import execution/** 下任何模块
+隔离规则:
 - **execution/ 禁止 import research/** 下任何模块
-- 两层只能通过 **shared/interfaces/** 通信
-- QMT桥接(execution/broker/)与研究层(research/)完全隔离
+- **research/ 可以 import execution/oms/, execution/matcher.py, execution/fee.py, execution/slippage.py** (回测复用撮合逻辑)
+- **research/ 禁止 import execution/engine.py** (不能使用实时交易单例)
+- 两层通过 **shared/interfaces/** 定义契约
 
 ## 数据库约束
 
-- 常规表用 **Alembic** 管理迁移: `stock_basic`, `trade_cal`, `stock_daily`, `daily_basic`, `index_basic`, `index_daily`, `index_classify`
-- **分区表用原生SQL**: `stock_min_kline` (按月分区) — 不纳入 Alembic 迁移链，分区脚本在 `scripts/create_min_partitions.py`
-- 新增分区表时，同样走原生SQL + 独立脚本，不要试图用 Alembic autogenerate
+- 常规表用 **Alembic** 管理迁移
+- **分区表用原生SQL**: `stock_min_kline` (按月分区)，脚本在 `scripts/create_min_partitions.py`
+- Alembic autogenerate 会误删分区子表，迁移后必须检查并删除相关 `op.drop_table`
 
 ## 数据时效性约束
 
-- 数据**不会自动更新**，所有数据都是离线拉取的历史快照
-- `AGENTS.md` 中记录了数据覆盖的时间范围和最后拉取时间，**每次拉取后必须更新**
-- 增量更新日线/指标: 修改 `scripts/init_data.py` 和 `scripts/pull_batch1.py` 中的日期范围后重跑
-- 增量更新分钟数据: 先用 `scripts/create_min_partitions.py` 添加新月份分区，再用 `scripts/pull_minutes.py --resume` 拉取
-- AI不得假设数据库中的数据是"实时"或"最新"的；需要最新数据时，应提示用户先执行增量更新
+- 数据**不会自动更新**，是离线历史快照
+- `AGENTS.md` 记录数据覆盖范围和最后拉取时间，**每次拉取后必须更新**
+- AI不得假设数据是"实时"或"最新"的；需要最新数据时，提示用户先执行增量更新
 
 ## Tushare调用规范
 
-- 所有Tushare调用必须经过 `backend/app/research/data/tushare_service.py`，不允许散落在业务代码中直接调 `pro.query()`
-- 必须有频次控制 (rate limiter) 和错误重试
-- 参考 `.cursor/skills/skill-tushare-data/` 中的接口文档获取参数和返回值定义
+- 所有调用必须经过 `backend/app/research/data/tushare_service.py`，禁止直接 `pro.query()`
+- 必须有频次控制和错误重试
+- 参考 `.cursor/skills/skill-tushare-data/` 中的接口文档

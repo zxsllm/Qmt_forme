@@ -598,8 +598,7 @@ Qmt_forme/
 | **风控状态**     | 本地风控模块数据 (无需Tushare)           | --                                                              |
 | **策略开关**     | 本地策略注册表 (无需Tushare)            | --                                                              |
 
-> **P2-Core UI 重构详情**: 见 [p2-core_ui重构_688581cd.plan.md](p2-core_ui重构_688581cd.plan.md)  
-> 包含: 设计Token层、Panel通用组件、8个面板组件重写、Dashboard瘦身、Storybook集成
+> **P2-Core UI 重构** (已完成): 设计Token层、Panel通用组件、8个面板组件重写、Dashboard瘦身、Storybook集成
 
 ---
 
@@ -639,8 +638,7 @@ Qmt_forme/
 
 ### Phase 3: 实时数据流 + OMS/模拟交易引擎 (约3-4周)
 
-> **Phase 3 分步执行计划**: 见 [p3-realtime-oms.plan.md](p3-realtime-oms.plan.md)  
-> 包含: 10个Step (Redis→接口协议→DB模型→OMS→风控→撮合→行情Feed→API→可观测性→前端对接)
+> **Phase 3** (已完成, 10/10 Steps): Redis→接口协议→DB模型→OMS→风控→撮合→行情Feed→API→可观测性→前端对接
 
 **目标**: 实现实时行情推送、OMS订单管理系统、风控模块、分钟级模拟交易
 
@@ -707,6 +705,9 @@ Qmt_forme/
 
 
 ### Phase 4: 策略框架与回测系统 (约3-4周)
+
+> **Phase 4 分步执行计划**: 见 [p4-strategy-backtest.plan.md](p4-strategy-backtest.plan.md)
+> 包含: 10个Step (规则+接口→数据拉取→指标库→可信性过滤→回测引擎→报告→示范策略→DB→API→前端)
 
 **目标**: 可视化策略编辑、参数调优、历史回测。**回测可信性优先于回测功能丰富性。**
 
