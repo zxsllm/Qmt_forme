@@ -20,6 +20,9 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 
+# Node
+node_modules/
+
 # Data
 reports/
 *.parquet

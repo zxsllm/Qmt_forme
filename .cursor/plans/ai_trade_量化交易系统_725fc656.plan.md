@@ -18,11 +18,11 @@ todos:
     content: "Phase 1 Step 5: 数据拉取脚本 (stock_basic+trade_cal+半年daily) 跑通验证"
     status: completed
   - id: phase1-full
-    content: "Phase 1 后续: 分钟数据/分区表/DataLoader/Redis/更多接口 (MVP跑通后再做)"
-    status: pending
+    content: "Phase 1 后续: 分钟数据/分区表/DataLoader/指数/行业 已完成; Redis/增量同步推迟"
+    status: completed
   - id: phase2-core
     content: "Phase 2a (P2-Core): 交易控制台 (K线/持仓/风控/策略开关)"
-    status: pending
+    status: completed
   - id: phase2-plus
     content: "Phase 2b (P2-Plus): 资讯仪表盘 (行业/新闻/板块/宏观, 模拟盘闭环后)"
     status: pending
@@ -62,7 +62,7 @@ isProject: false
 
 - **框架**: React 19 + TypeScript + Vite
 - **UI库**: Ant Design 5 (暗色主题，适合金融面板) + TailwindCSS
-- **K线图表**: TradingView Lightweight Charts (专业级K线) 或 ECharts (综合图表)
+- **K线图表**: klinecharts (内置技术指标, A股红涨绿跌, Canvas高性能渲染)
 - **实时通信**: WebSocket (行情推送)
 - **状态管理**: Zustand (轻量) + React Query (服务端状态)
 - **路由**: React Router v7
@@ -598,6 +598,8 @@ Qmt_forme/
 | **风控状态**     | 本地风控模块数据 (无需Tushare)           | --                                                              |
 | **策略开关**     | 本地策略注册表 (无需Tushare)            | --                                                              |
 
+> **P2-Core UI 重构详情**: 见 [p2-core_ui重构_688581cd.plan.md](p2-core_ui重构_688581cd.plan.md)  
+> 包含: 设计Token层、Panel通用组件、8个面板组件重写、Dashboard瘦身、Storybook集成
 
 ---
 
@@ -643,6 +645,12 @@ Qmt_forme/
 
 **开发任务**:
 
+- **Phase 3 前置: Redis安装与配置**:
+  - 安装Redis (Windows: Memurai/WSL Redis, Linux/macOS: 原生Redis)
+  - 后端添加 redis 依赖 (redis[hiredis])
+  - `backend/app/core/redis.py`: Redis连接池配置 (从 `REDIS_URL` 环境变量读取)
+  - `.env.example` 添加 `REDIS_URL=redis://localhost:6379/0`
+  - 验证连通性
 - **行情订阅 (execution/feed/)**:
   - WebSocket实时行情推送管道 (Tushare实时分钟 -> Redis -> WebSocket -> 前端)
   - 行情数据标准化 (统一 BarData 格式, 遵循 shared/interfaces/)

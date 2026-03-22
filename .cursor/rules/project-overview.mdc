@@ -8,7 +8,7 @@ alwaysApply: true
 
 ## 执行纪律
 
-- **先读计划**: 每次新对话开始，先读 `.cursor/plans/` 下的计划文件，确认当前步骤和MVP边界
+- **先读计划**: 每次新对话开始，先读 `.cursor/plans/ai_trade_量化交易系统_725fc656.plan.md`，确认当前步骤和MVP边界。主计划中若有 `> 见 [xxx.plan.md]` 跳转引用，需跟进读取对应子计划文件
 - **先读AGENTS.md**: 确认项目当前进度和已完成任务，避免重复劳动
 - **冲突处理**: `project-overview.mdc` > 当前激活的计划文件 > `AGENTS.md`；若 `AGENTS.md` 与计划不一致，先更新状态再继续编码
 - **不许扩范围**: 严格遵守当前Phase的MVP边界，计划文件中标注"不许越界"的内容绝对不做
@@ -17,6 +17,7 @@ alwaysApply: true
 - **写回计划**: 任何新增功能/架构变更必须先写回计划文件，获得确认后再编码
 - **不重构无关模块**: 只改当前Step涉及的代码，不要"顺手"重构其他模块
 - **改后必验**: 每次完成一个Step后，至少做一次最小验证（如 `/health`、关键 SQL、关键 API smoke test），未验证不得标记完成
+- **端口/进程管理**: 后端固定 `8000`，前端固定 `5173`。启动服务前先检查端口是否被占用，如果被旧进程占用则先 kill 再启动，**不要换端口**
 
 ## 技术约束
 
@@ -36,10 +37,11 @@ alwaysApply: true
 - `backend/app/research/data/` — TushareService (数据拉取)
 - `scripts/` — 一次性/批量数据拉取脚本
 
+- `frontend/` — React 19 + TypeScript + Vite + Ant Design 5 (P2-Core)
+
 规划中但尚未创建的目录 (到对应Phase再创建，之前不要提前建):
 - `backend/app/execution/` — OMS、风控、Broker桥接 (Phase 3+)
 - `backend/app/shared/interfaces/` — research/execution 通信协议 (Phase 3+)
-- `frontend/` — React前端 (Phase 2a)
 
 隔离规则 (创建对应目录后生效):
 - **research/ 禁止 import execution/** 下任何模块
