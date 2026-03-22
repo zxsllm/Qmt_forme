@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Data
+reports/
+*.parquet
+
+# Cursor (skills are local, rules and plans are committed)
+.cursor/skills/
+.cursor/plans/Untitled
+
+# Logs
+*.log
