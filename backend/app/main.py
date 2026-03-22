@@ -1,9 +1,15 @@
-from fastapi import FastAPI, Query
+import asyncio
+import json
+import math
+
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.shared.data import DataLoader
-
-
-import math
+from app.execution.api import router as trading_router
+from app.execution.feed.ws_manager import ws_manager
+from app.execution.feed.market_feed import REDIS_CHANNEL
+from app.core.redis import redis_client
 
 
 def _df_to_records(df):
@@ -16,12 +22,56 @@ def _df_to_records(df):
     return records
 
 
-app = FastAPI(title="AI Trade", version="0.1.0")
+app = FastAPI(title="AI Trade", version="0.2.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(trading_router)
+
+
+# ---------------------------------------------------------------------------
+# Redis pub/sub → WebSocket bridge (background task)
+# ---------------------------------------------------------------------------
+
+async def _redis_to_ws_bridge() -> None:
+    """Subscribe to Redis market channel and forward to all WS clients."""
+    import redis as _redis
+    sub = _redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+    ps = sub.pubsub()
+    ps.subscribe(REDIS_CHANNEL)
+
+    while True:
+        msg = ps.get_message(ignore_subscribe_messages=True, timeout=0.5)
+        if msg and msg["type"] == "message":
+            await ws_manager.broadcast_text(msg["data"])
+        await asyncio.sleep(0.05)
+
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(_redis_to_ws_bridge())
+
+
+@app.websocket("/ws/market")
+async def ws_market(websocket: WebSocket):
+    await ws_manager.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        await ws_manager.disconnect(websocket)
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "phase": "1-data"}
+    return {"status": "ok", "phase": "3-trading"}
 
 
 @app.get("/api/v1/stock/{ts_code}/daily")

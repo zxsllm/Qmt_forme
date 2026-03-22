@@ -38,10 +38,15 @@ alwaysApply: true
 - `scripts/` — 一次性/批量数据拉取脚本
 
 - `frontend/` — React 19 + TypeScript + Vite + Ant Design 5 (P2-Core)
+- `backend/app/execution/` — OMS、风控、撮合、行情Feed (Phase 3)
+- `backend/app/execution/oms/` — 订单状态机、持仓账本、资金账本
+- `backend/app/execution/risk/` — 下单前风控、盘中风控、Kill Switch
+- `backend/app/execution/feed/` — 行情订阅 (Phase 3 进行中)
+- `backend/app/execution/observability/` — 可观测性 (Phase 3 进行中)
+- `backend/app/shared/interfaces/` — research/execution 通信协议 (Pydantic models + enums)
 
 规划中但尚未创建的目录 (到对应Phase再创建，之前不要提前建):
-- `backend/app/execution/` — OMS、风控、Broker桥接 (Phase 3+)
-- `backend/app/shared/interfaces/` — research/execution 通信协议 (Phase 3+)
+- `backend/app/execution/broker/` — QMT实盘桥接 (Phase 5)
 
 隔离规则 (创建对应目录后生效):
 - **research/ 禁止 import execution/** 下任何模块

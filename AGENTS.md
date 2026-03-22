@@ -4,8 +4,8 @@
 
 ## 当前状态
 
-- **当前Phase**: Phase 2a (P2-Core) 已完成，准备进入 Phase 3
-- **下一步**: Phase 3 (实时数据流 + OMS/模拟交易引擎)
+- **当前Phase**: Phase 3 已完成 (10/10 Steps)
+- **下一步**: Phase 4 (策略框架与回测系统)
 - **最后更新**: 2026-03-22
 
 ## 数据时效
@@ -26,6 +26,16 @@
 - [x] Phase 1 收尾: 增量同步脚本 (scripts/sync_incremental.py)
 - [x] Phase 2a P2-Core: 前端交易控制台 (React19+Vite+AntD5+klinecharts)
 - [x] Phase 2a UI重构: 设计Token + Panel容器 + 独立组件 + Storybook (见 p2-core_ui重构_688581cd.plan.md)
+- [x] Phase 3 Step 2: shared/interfaces/ 通信协议 (BarData/Signal/Order/Position/Account等)
+- [x] Phase 3 Step 3: DB模型 (SimOrder/SimTrade/SimPosition/SimAccount/AuditLog) + Alembic迁移
+- [x] Phase 3 Step 4: OMS核心 (OrderManager/PositionBook/AccountManager)
+- [x] Phase 3 Step 5: 风控 (PreTradeRiskChecker/RealtimeRiskMonitor/KillSwitch)
+- [x] Phase 3 Step 6: 撮合引擎 (SimMatcher + fee + slippage)
+- [x] Phase 3 Step 8: REST API + TradingEngine协调层 + CORS
+- [x] Phase 3 Step 1: Redis (Memurai) + core/redis.py
+- [x] Phase 3 Step 7: 行情Feed (MarketFeed→Redis pub/sub) + WebSocket bridge
+- [x] Phase 3 Step 9: 可观测性 (heartbeat/audit/daily_summary)
+- [x] Phase 3 Step 10: 前端对接 (AccountCard/PositionTable/OrderTable/RiskPanel → 真实API)
 
 ## 数据统计
 
@@ -62,6 +72,27 @@ scripts/
   create_min_partitions.py    -- 创建/扩展 stock_min_kline 月分区
   pull_minutes.py             -- 拉取1min数据 (支持 --test N / --resume)
   sync_incremental.py         -- 增量同步 (日线/指标/指数, 支持 --dry-run)
+
+backend/app/
+  shared/interfaces/
+    types.py                    -- Enums (OrderSide/Status/Type, RiskAction, AuditAction)
+    models.py                   -- Pydantic models (BarData/Signal/Order/Position/Account等)
+  execution/
+    engine.py                   -- TradingEngine 协调层 (OMS+Risk+Matcher单例)
+    api.py                      -- REST API router (/orders, /positions, /account, /risk)
+    fee.py                      -- A股手续费计算 (佣金+印花税+过户费)
+    slippage.py                 -- 滑点模型 (固定tick + 成交量冲击)
+    matcher.py                  -- 模拟撮合引擎 (分钟K线驱动)
+    oms/
+      order_manager.py          -- 订单状态机 + 信号去重
+      position_book.py          -- 持仓账本 (买入/卖出/PnL)
+      account.py                -- 资金账本 (冻结/释放/结算)
+    risk/
+      pre_trade.py              -- 下单前风控 (6项检查)
+      realtime.py               -- 盘中风控 (回撤/单票亏损)
+      kill_switch.py            -- 紧急停机
+    feed/                       -- [待完成] 行情订阅 (需Redis)
+    observability/              -- [待完成] 可观测性 (需Redis)
 
 frontend/                       -- React 19 + TypeScript + Vite + Storybook
   .storybook/
@@ -109,16 +140,24 @@ frontend/                       -- React 19 + TypeScript + Vite + Storybook
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/health` | 健康检查 |
+| GET | `/health` | 健康检查 (phase: 3-trading) |
 | GET | `/api/v1/stock/{ts_code}/daily?start=&end=` | 个股日线+基本面 |
 | GET | `/api/v1/market/snapshot/{trade_date}` | 全市场当日截面 (TOP20) |
 | GET | `/api/v1/index/{ts_code}/daily?start=&end=` | 指数日线 |
 | GET | `/api/v1/classify/sw?level=` | 申万行业分类 |
+| POST | `/api/v1/orders` | 提交订单 (signal→risk→submit) |
+| DELETE | `/api/v1/orders/{order_id}` | 撤单 |
+| GET | `/api/v1/orders?status=` | 订单列表 |
+| GET | `/api/v1/positions` | 持仓 |
+| GET | `/api/v1/account` | 账户概览 |
+| GET | `/api/v1/risk/status` | 风控状态 |
+| POST | `/api/v1/risk/kill-switch` | 激活紧急停机 |
+| DELETE | `/api/v1/risk/kill-switch` | 解除紧急停机 |
 
 ## 待做 (按优先级)
 
-- [ ] **Phase 3**: 实时数据流 + OMS/模拟交易引擎 (Redis, WebSocket, 订单状态机, 风控, 撮合)
-- [ ] Phase 4: 策略框架与回测系统
+- [x] ~~Phase 3: 实时数据流 + OMS/模拟交易引擎~~
+- [ ] **Phase 4**: 策略框架与回测系统
 - [ ] Phase 5: QMT实盘桥接
 - [ ] Phase 6: AI/ML策略增强
 
@@ -146,6 +185,11 @@ frontend/                       -- React 19 + TypeScript + Vite + Storybook
 | 2026-03-22 | K线库: klinecharts | 内置指标/A股红涨绿跌/Canvas高性能 |
 | 2026-03-22 | 独立组件 + Panel + Storybook | Dashboard纯布局; 统一设计Token; 组件可独立预览 |
 | 2026-03-22 | Storybook用PostCSS而非Vite插件 | @tailwindcss/vite与Storybook模块图冲突 |
+| 2026-03-22 | TradingEngine单例+内存状态 | Phase 3 MVP不需要DB持久化,重启清零 |
+| 2026-03-22 | CORS允许localhost:5173 | 前后端分离开发 |
+| 2026-03-22 | Redis: Memurai (Windows) | 原生Windows Redis替代, 端口6379 |
+| 2026-03-22 | Redis pub/sub → WS bridge | 行情数据通过Redis channel广播到前端 |
+| 2026-03-22 | 前端组件切换真实API | AccountCard/Position/Order/Risk用useQuery轮询 |
 
 ## 已知限制
 
@@ -169,3 +213,4 @@ frontend/                       -- React 19 + TypeScript + Vite + Storybook
 - **uvicorn启动**: 在 `backend/` 目录下运行 `uvicorn app.main:app --port 8000`
 - **前端**: `frontend/` 目录下 `npm run dev` (端口5173)
 - **Storybook**: `frontend/` 目录下 `npm run storybook` (端口6006)
+- **Redis**: Memurai (Windows服务, 端口6379, 自动启动)

@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../services/api';
+import { useMarketFeed } from '../services/useMarketFeed';
 import Panel from '../components/Panel';
 import ErrorBoundary from '../components/ErrorBoundary';
 import AccountCard from '../components/AccountCard';
@@ -18,6 +19,8 @@ export default function Dashboard() {
     queryFn: () => api.stockDaily(DEFAULT_CODE),
   });
 
+  const { connected } = useMarketFeed();
+
   return (
     <div className="flex flex-col h-full bg-bg-base" style={{ padding: 16, gap: 10 }}>
       {/* Row 1: compact account stats */}
@@ -29,7 +32,16 @@ export default function Dashboard() {
           <TradePlanTable />
         </Panel>
 
-        <Panel title={`K线 · ${DEFAULT_CODE}`} className="flex-1" noPadding>
+        <Panel
+          title={`K线 · ${DEFAULT_CODE}`}
+          className="flex-1"
+          noPadding
+          extra={
+            <span style={{ fontSize: 10, color: connected ? '#4ade80' : '#64748b' }}>
+              ● {connected ? 'WS 已连接' : 'WS 离线'}
+            </span>
+          }
+        >
           <ErrorBoundary fallbackMsg="K线图表加载失败">
             <KlineChart data={dailyData?.data || []} autoFill indicators={['MA', 'VOL']} />
           </ErrorBoundary>

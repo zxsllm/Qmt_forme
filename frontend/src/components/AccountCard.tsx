@@ -5,7 +5,8 @@ import {
   PieChartOutlined,
   FundOutlined,
 } from '@ant-design/icons';
-import { mockAccount, mockPositions } from '../services/mockData';
+import { useQuery } from '@tanstack/react-query';
+import { api } from '../services/api';
 
 interface StatItem {
   icon: React.ReactNode;
@@ -18,30 +19,43 @@ interface StatItem {
 }
 
 export default function AccountCard() {
-  const a = mockAccount;
-  const up = a.daily_pnl >= 0;
+  const { data: acct } = useQuery({
+    queryKey: ['account'],
+    queryFn: api.getAccount,
+    refetchInterval: 5000,
+  });
+  const { data: posData } = useQuery({
+    queryKey: ['positions'],
+    queryFn: api.getPositions,
+    refetchInterval: 5000,
+  });
+
+  const a = acct ?? { total_asset: 0, cash: 0, frozen: 0, market_value: 0, total_pnl: 0, today_pnl: 0, updated_at: '' };
+  const posCount = posData?.count ?? 0;
+  const up = a.today_pnl >= 0;
+  const pnlPct = a.total_asset > 0 ? (a.today_pnl / a.total_asset) * 100 : 0;
 
   const cards: StatItem[] = [
     {
       icon: <DollarOutlined />,
       iconBg: '#1d4ed8',
       label: '总资产',
-      value: `¥${a.total_assets.toLocaleString()}`,
-      sub: `可用 ¥${a.available_cash.toLocaleString()}`,
+      value: `¥${a.total_asset.toLocaleString()}`,
+      sub: `可用 ¥${a.cash.toLocaleString()}`,
     },
     {
       icon: <PieChartOutlined />,
       iconBg: '#7c3aed',
       label: '持仓市值',
       value: `¥${a.market_value.toLocaleString()}`,
-      sub: `${mockPositions.length} 只持仓`,
+      sub: `${posCount} 只持仓`,
     },
     {
       icon: up ? <ArrowUpOutlined /> : <ArrowDownOutlined />,
       iconBg: up ? '#15803d' : '#b91c1c',
       label: '今日盈亏',
-      value: `${up ? '+' : ''}¥${a.daily_pnl.toLocaleString()}`,
-      sub: `${up ? '+' : ''}${a.daily_pnl_pct.toFixed(2)}%`,
+      value: `${up ? '+' : ''}¥${a.today_pnl.toLocaleString()}`,
+      sub: `${up ? '+' : ''}${pnlPct.toFixed(2)}%`,
       valueColor: up ? 'var(--color-down)' : 'var(--color-up)',
       subColor: up ? 'var(--color-down)' : 'var(--color-up)',
     },

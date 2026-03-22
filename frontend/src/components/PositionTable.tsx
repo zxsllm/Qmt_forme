@@ -1,10 +1,10 @@
 import { Table, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { mockPositions, type Position } from '../services/mockData';
+import { useQuery } from '@tanstack/react-query';
+import { api, type SimPosition } from '../services/api';
 
-const columns: ColumnsType<Position> = [
+const columns: ColumnsType<SimPosition> = [
   { title: '代码', dataIndex: 'ts_code', width: 100 },
-  { title: '名称', dataIndex: 'name', width: 80 },
   { title: '持仓', dataIndex: 'qty', width: 70, align: 'right' },
   {
     title: '成本',
@@ -15,40 +15,46 @@ const columns: ColumnsType<Position> = [
   },
   {
     title: '现价',
-    dataIndex: 'last_price',
+    dataIndex: 'market_price',
     width: 80,
     align: 'right',
     render: (v: number) => v.toFixed(2),
   },
   {
-    title: '盈亏',
-    dataIndex: 'pnl',
+    title: '浮动盈亏',
+    dataIndex: 'unrealized_pnl',
     width: 90,
     align: 'right',
     render: (v: number) => (
       <span style={{ color: v >= 0 ? 'var(--color-down)' : 'var(--color-up)' }}>
-        {v >= 0 ? '+' : ''}{v.toLocaleString()}
+        {v >= 0 ? '+' : ''}{v.toFixed(2)}
       </span>
     ),
   },
   {
-    title: '盈亏%',
-    dataIndex: 'pnl_pct',
+    title: '已实现',
+    dataIndex: 'realized_pnl',
     width: 80,
     align: 'right',
     render: (v: number) => (
       <Tag color={v >= 0 ? 'green' : 'red'} variant="filled" style={{ fontSize: 11, margin: 0 }}>
-        {v >= 0 ? '+' : ''}{v.toFixed(2)}%
+        {v >= 0 ? '+' : ''}{v.toFixed(2)}
       </Tag>
     ),
   },
 ];
 
 export default function PositionTable() {
+  const { data } = useQuery({
+    queryKey: ['positions'],
+    queryFn: api.getPositions,
+    refetchInterval: 5000,
+  });
+
   return (
     <Table
       columns={columns}
-      dataSource={mockPositions}
+      dataSource={data?.data ?? []}
       rowKey="ts_code"
       size="small"
       pagination={false}

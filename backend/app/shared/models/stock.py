@@ -1,6 +1,8 @@
 from datetime import datetime
+from uuid import uuid4
 
-from sqlalchemy import DateTime, Float, Integer, String
+from sqlalchemy import DateTime, Float, Integer, String, Text, text
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.shared.models.base import Base
@@ -129,3 +131,99 @@ class StockMinKline(Base):
     low: Mapped[float | None] = mapped_column(Float)
     vol: Mapped[float | None] = mapped_column(Float)
     amount: Mapped[float | None] = mapped_column(Float)
+
+
+# =========================================================================
+# Phase 3: Simulated trading tables
+# =========================================================================
+
+class SimOrder(Base):
+    __tablename__ = "sim_orders"
+
+    order_id: Mapped[str] = mapped_column(
+        PG_UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4())
+    )
+    signal_id: Mapped[str] = mapped_column(PG_UUID(as_uuid=False), index=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    side: Mapped[str] = mapped_column(String(4))            # BUY / SELL
+    order_type: Mapped[str] = mapped_column(String(8))      # MARKET / LIMIT
+    price: Mapped[float | None] = mapped_column(Float)
+    qty: Mapped[int] = mapped_column(Integer)
+    filled_qty: Mapped[int] = mapped_column(Integer, default=0)
+    filled_price: Mapped[float] = mapped_column(Float, default=0.0)
+    status: Mapped[str] = mapped_column(String(16), default="PENDING", index=True)
+    fee: Mapped[float] = mapped_column(Float, default=0.0)
+    slippage: Mapped[float] = mapped_column(Float, default=0.0)
+    reject_reason: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("NOW()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("NOW()"), onupdate=datetime.now
+    )
+
+
+class SimTrade(Base):
+    """Individual fill / execution record."""
+    __tablename__ = "sim_trades"
+
+    trade_id: Mapped[str] = mapped_column(
+        PG_UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4())
+    )
+    order_id: Mapped[str] = mapped_column(PG_UUID(as_uuid=False), index=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    side: Mapped[str] = mapped_column(String(4))
+    price: Mapped[float] = mapped_column(Float)
+    qty: Mapped[int] = mapped_column(Integer)
+    fee: Mapped[float] = mapped_column(Float, default=0.0)
+    slippage: Mapped[float] = mapped_column(Float, default=0.0)
+    traded_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("NOW()")
+    )
+
+
+class SimPosition(Base):
+    """Per-stock position snapshot, one row per ts_code."""
+    __tablename__ = "sim_positions"
+
+    ts_code: Mapped[str] = mapped_column(String(16), primary_key=True)
+    qty: Mapped[int] = mapped_column(Integer, default=0)
+    avg_cost: Mapped[float] = mapped_column(Float, default=0.0)
+    market_price: Mapped[float] = mapped_column(Float, default=0.0)
+    unrealized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("NOW()"), onupdate=datetime.now
+    )
+
+
+class SimAccount(Base):
+    """Single-row account snapshot.  id=1 always."""
+    __tablename__ = "sim_account"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    total_asset: Mapped[float] = mapped_column(Float, default=1_000_000.0)
+    cash: Mapped[float] = mapped_column(Float, default=1_000_000.0)
+    frozen: Mapped[float] = mapped_column(Float, default=0.0)
+    market_value: Mapped[float] = mapped_column(Float, default=0.0)
+    total_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    today_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("NOW()"), onupdate=datetime.now
+    )
+
+
+class AuditLog(Base):
+    """Immutable audit trail for all trading actions."""
+    __tablename__ = "audit_log"
+
+    event_id: Mapped[str] = mapped_column(
+        PG_UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4())
+    )
+    action: Mapped[str] = mapped_column(String(32), index=True)
+    order_id: Mapped[str | None] = mapped_column(PG_UUID(as_uuid=False))
+    ts_code: Mapped[str] = mapped_column(String(16), default="")
+    detail: Mapped[str] = mapped_column(Text, default="")
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("NOW()"), index=True
+    )

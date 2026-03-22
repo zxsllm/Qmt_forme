@@ -1,9 +1,14 @@
 from app.shared.models.base import Base
 from app.shared.models.stock import (
+    AuditLog,
     DailyBasic,
     IndexBasic,
     IndexClassify,
     IndexDaily,
+    SimAccount,
+    SimOrder,
+    SimPosition,
+    SimTrade,
     StockBasic,
     StockDaily,
     StockMinKline,
@@ -20,4 +25,9 @@ __all__ = [
     "IndexDaily",
     "IndexClassify",
     "StockMinKline",
+    "SimOrder",
+    "SimTrade",
+    "SimPosition",
+    "SimAccount",
+    "AuditLog",
 ]

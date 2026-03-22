@@ -27,8 +27,8 @@ todos:
     content: "Phase 2b (P2-Plus): 资讯仪表盘 (行业/新闻/板块/宏观, 模拟盘闭环后)"
     status: pending
   - id: phase3-realtime-sim
-    content: "Phase 3: 实时数据流 + 模拟交易引擎"
-    status: pending
+    content: "Phase 3: 实时数据流 + 模拟交易引擎 (10 Steps all done)"
+    status: completed
   - id: phase4-strategy
     content: "Phase 4: 策略框架与回测系统"
     status: pending
@@ -638,6 +638,9 @@ Qmt_forme/
 
 
 ### Phase 3: 实时数据流 + OMS/模拟交易引擎 (约3-4周)
+
+> **Phase 3 分步执行计划**: 见 [p3-realtime-oms.plan.md](p3-realtime-oms.plan.md)  
+> 包含: 10个Step (Redis→接口协议→DB模型→OMS→风控→撮合→行情Feed→API→可观测性→前端对接)
 
 **目标**: 实现实时行情推送、OMS订单管理系统、风控模块、分钟级模拟交易
 
