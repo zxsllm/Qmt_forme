@@ -6,6 +6,7 @@ Usage:
 """
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -14,6 +15,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
 from sqlalchemy import create_engine, text
 from app.core.config import settings
 from app.research.data.tushare_service import TushareService
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 DB_URL = settings.DATABASE_URL.replace("+asyncpg", "+psycopg")
 engine = create_engine(DB_URL, echo=False)
@@ -30,59 +38,68 @@ def get_trade_dates() -> list[str]:
 
 def pull_stk_limit(trade_dates: list[str], dry_run: bool = False):
     with engine.connect() as conn:
-        existing = set()
         rows = conn.execute(text("SELECT DISTINCT trade_date FROM stock_limit")).fetchall()
         existing = {r[0] for r in rows}
 
     todo = [d for d in trade_dates if d not in existing]
-    print(f"stk_limit: {len(todo)} dates to pull ({len(existing)} already done)")
+    logger.info("stk_limit: %d dates to pull (%d already done)", len(todo), len(existing))
 
     if dry_run:
-        print("  [DRY RUN] skipping")
+        logger.info("  [DRY RUN] skipping")
         return
 
-    total_rows = 0
+    total_rows, failed = 0, []
     for i, td in enumerate(todo):
-        df = ts_svc.stk_limit(trade_date=td)
-        if df.empty:
-            print(f"  [{i+1}/{len(todo)}] {td}: 0 rows (skip)")
-            continue
+        try:
+            df = ts_svc.stk_limit(trade_date=td)
+            if df.empty:
+                continue
 
-        df = df[["trade_date", "ts_code", "pre_close", "up_limit", "down_limit"]]
-        df.to_sql("stock_limit", engine, if_exists="append", index=False, method="multi")
-        total_rows += len(df)
-        if (i + 1) % 10 == 0 or i == len(todo) - 1:
-            print(f"  [{i+1}/{len(todo)}] {td}: +{len(df)} rows (total: {total_rows})")
+            df = df[["trade_date", "ts_code", "pre_close", "up_limit", "down_limit"]]
+            df.to_sql("stock_limit", engine, if_exists="append", index=False, method="multi")
+            total_rows += len(df)
+            if (i + 1) % 10 == 0 or i == len(todo) - 1:
+                logger.info("  [%d/%d] %s: +%d rows (total: %d)", i + 1, len(todo), td, len(df), total_rows)
+        except Exception as e:
+            logger.warning("stk_limit failed for %s: %s", td, e)
+            failed.append(td)
 
-    print(f"stk_limit done: {total_rows} rows inserted")
+    logger.info("stk_limit done: %d rows inserted", total_rows)
+    if failed:
+        logger.warning("  Failed dates (%d): %s", len(failed), failed)
 
 
 def pull_suspend_d(trade_dates: list[str], dry_run: bool = False):
     with engine.connect() as conn:
-        existing = set()
         rows = conn.execute(text("SELECT DISTINCT trade_date FROM suspend_d")).fetchall()
         existing = {r[0] for r in rows}
 
     todo = [d for d in trade_dates if d not in existing]
-    print(f"suspend_d: {len(todo)} dates to pull ({len(existing)} already done)")
+    logger.info("suspend_d: %d dates to pull (%d already done)", len(todo), len(existing))
 
     if dry_run:
-        print("  [DRY RUN] skipping")
+        logger.info("  [DRY RUN] skipping")
         return
 
-    total_rows = 0
+    total_rows, failed = 0, []
     for i, td in enumerate(todo):
-        df = ts_svc.suspend_d(suspend_type="S", trade_date=td)
-        if df.empty:
-            continue
+        try:
+            df = ts_svc.suspend_d(suspend_type="S", trade_date=td)
+            if df.empty:
+                continue
 
-        df = df[["ts_code", "trade_date", "suspend_type", "suspend_timing"]]
-        df.to_sql("suspend_d", engine, if_exists="append", index=False, method="multi")
-        total_rows += len(df)
-        if (i + 1) % 10 == 0 or i == len(todo) - 1:
-            print(f"  [{i+1}/{len(todo)}] {td}: +{len(df)} rows (total: {total_rows})")
+            df = df[["ts_code", "trade_date", "suspend_type", "suspend_timing"]]
+            df.to_sql("suspend_d", engine, if_exists="append", index=False, method="multi")
+            total_rows += len(df)
+            if (i + 1) % 10 == 0 or i == len(todo) - 1:
+                logger.info("  [%d/%d] %s: +%d rows (total: %d)", i + 1, len(todo), td, len(df), total_rows)
+        except Exception as e:
+            logger.warning("suspend_d failed for %s: %s", td, e)
+            failed.append(td)
 
-    print(f"suspend_d done: {total_rows} rows inserted")
+    logger.info("suspend_d done: %d rows inserted", total_rows)
+    if failed:
+        logger.warning("  Failed dates (%d): %s", len(failed), failed)
 
 
 if __name__ == "__main__":
@@ -91,7 +108,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     dates = get_trade_dates()
-    print(f"Found {len(dates)} trade dates in DB")
+    logger.info("Found %d trade dates in DB", len(dates))
 
     pull_stk_limit(dates, dry_run=args.dry_run)
     pull_suspend_d(dates, dry_run=args.dry_run)

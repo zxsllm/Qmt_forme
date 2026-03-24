@@ -35,6 +35,7 @@ class TradabilityFilter:
         limit_df: pd.DataFrame,
         suspend_df: pd.DataFrame,
         stock_basic_df: pd.DataFrame,
+        st_df: pd.DataFrame | None = None,
     ):
         self._limits: dict[tuple[str, str], tuple[float, float]] = {}
         for _, row in limit_df.iterrows():
@@ -47,6 +48,7 @@ class TradabilityFilter:
 
         self._list_dates: dict[str, str] = {}
         self._st_names: set[str] = set()
+        self._st_by_date: dict[str, set[str]] = {}
         for _, row in stock_basic_df.iterrows():
             tc = row["ts_code"]
             if pd.notna(row.get("list_date")):
@@ -55,9 +57,16 @@ class TradabilityFilter:
             if "ST" in name or "st" in name:
                 self._st_names.add(tc)
 
+        if st_df is not None and not st_df.empty:
+            for _, row in st_df.iterrows():
+                td = str(row.get("trade_date", ""))
+                tc = str(row.get("ts_code", ""))
+                if td and tc:
+                    self._st_by_date.setdefault(td, set()).add(tc)
+
         logger.info(
-            "TradabilityFilter loaded: %d limit entries, %d suspend dates, %d stocks",
-            len(self._limits), len(self._suspended), len(self._list_dates),
+            "TradabilityFilter loaded: %d limit entries, %d suspend dates, %d stocks, %d st-date entries",
+            len(self._limits), len(self._suspended), len(self._list_dates), len(self._st_by_date),
         )
 
     def check(
@@ -96,7 +105,9 @@ class TradabilityFilter:
 
         return FilterResult(True)
 
-    def is_st(self, ts_code: str) -> bool:
+    def is_st(self, ts_code: str, trade_date: str | None = None) -> bool:
+        if trade_date and self._st_by_date:
+            return ts_code in self._st_by_date.get(trade_date, set())
         return ts_code in self._st_names
 
     def _is_suspended(self, ts_code: str, trade_date: str) -> bool:

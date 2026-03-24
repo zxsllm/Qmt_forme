@@ -1,7 +1,7 @@
 import type { ReactNode, CSSProperties } from 'react';
 
 interface PanelProps {
-  title?: string;
+  title?: ReactNode;
   extra?: ReactNode;
   children: ReactNode;
   className?: string;

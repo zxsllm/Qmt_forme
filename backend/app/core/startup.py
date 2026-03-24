@@ -26,7 +26,12 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[3] / "scripts"
 # ---------------------------------------------------------------------------
 
 async def is_trade_date(d: date | None = None) -> bool:
-    """Check if *d* (default: today) is a trading day via trade_cal."""
+    """Check if *d* (default: today) is a trading day via trade_cal.
+
+    Falls back to weekday heuristic (Mon-Fri = trading) if the date
+    is missing from trade_cal to prevent scheduler from idling
+    all day when the calendar hasn't been synced far enough ahead.
+    """
     if d is None:
         d = date.today()
     cal_date = d.strftime("%Y%m%d")
@@ -39,7 +44,18 @@ async def is_trade_date(d: date | None = None) -> bool:
             {"d": cal_date},
         )
         val = row.scalar_one_or_none()
+
+    if val is not None:
         return val == 1
+
+    is_weekday = d.weekday() < 5
+    if is_weekday:
+        logger.warning(
+            "trade_cal missing %s — falling back to weekday heuristic (assume trading). "
+            "Run sync_incremental.py to update calendar.",
+            cal_date,
+        )
+    return is_weekday
 
 
 async def last_trade_date(before: date | None = None) -> str:
@@ -72,6 +88,8 @@ async def _latest_date(table: str, col: str = "trade_date") -> str | None:
 async def startup_checks() -> dict:
     """Run all startup checks; return summary dict (stored in app.state)."""
     summary: dict = {"data": {}, "sync_triggered": False, "oms": {}}
+
+    await _ensure_trade_cal_coverage()
 
     last_td = await last_trade_date()
     is_today_td = await is_trade_date()
@@ -143,6 +161,52 @@ async def startup_checks() -> dict:
 # Helpers
 # ---------------------------------------------------------------------------
 
+async def _ensure_trade_cal_coverage() -> None:
+    """Ensure trade_cal covers at least 30 days into the future.
+
+    If the max cal_date is behind, synchronously pull from Tushare to fill the gap.
+    This prevents the scheduler from thinking today is not a trade date.
+    """
+    today = date.today()
+    today_str = today.strftime("%Y%m%d")
+
+    cal_max = await _latest_date("trade_cal", "cal_date")
+    if cal_max and cal_max >= today_str:
+        return
+
+    logger.warning(
+        "trade_cal max=%s is behind today=%s — pulling calendar from Tushare now",
+        cal_max, today_str,
+    )
+    try:
+        import asyncio
+        await asyncio.to_thread(_sync_trade_cal_now, cal_max or today_str, today_str)
+    except Exception:
+        logger.exception("failed to update trade_cal at startup")
+
+
+def _sync_trade_cal_now(start: str, today_str: str) -> None:
+    """Synchronous trade_cal update (runs in thread)."""
+    from datetime import timedelta as td
+    from app.research.data.tushare_service import TushareService
+    from sqlalchemy import create_engine
+
+    future_end = (datetime.strptime(today_str, "%Y%m%d") + td(days=90)).strftime("%Y%m%d")
+    svc = TushareService()
+    df = svc.trade_cal(start_date=start, end_date=future_end)
+    if df.empty:
+        return
+
+    from app.core.config import settings
+    sync_url = settings.DATABASE_URL.replace("+asyncpg", "+psycopg")
+    eng = create_engine(sync_url, echo=False)
+    with eng.begin() as conn:
+        from sqlalchemy import text as sa_text
+        conn.execute(sa_text("DELETE FROM trade_cal WHERE cal_date >= :s"), {"s": start})
+        df.to_sql("trade_cal", conn, if_exists="append", index=False)
+    logger.info("trade_cal updated: %d rows (up to %s)", len(df), future_end)
+
+
 async def load_price_limits(codes: list[str]) -> dict[str, tuple[float, float]]:
     """Calculate next-day up/down limits from latest close for given codes."""
     if not codes:
@@ -197,12 +261,16 @@ def _trigger_background_sync() -> None:
         logger.error("sync script not found: %s", script)
         return
     try:
+        log_dir = SCRIPTS_DIR.parent / "logs"
+        log_dir.mkdir(exist_ok=True)
+        log_file = log_dir / f"daily_sync_{date.today().strftime('%Y%m%d')}.log"
+        fh = open(log_file, "a", encoding="utf-8")
         proc = subprocess.Popen(
             [sys.executable, str(script)],
             cwd=str(SCRIPTS_DIR.parent),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=fh,
+            stderr=subprocess.STDOUT,
         )
-        logger.info("background sync started (PID=%d)", proc.pid)
+        logger.info("background sync started (PID=%d), log=%s", proc.pid, log_file)
     except Exception:
         logger.exception("failed to start background sync")

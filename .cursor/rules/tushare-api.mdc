@@ -1,0 +1,15 @@
+---
+description: Tushare API 接口规范 - 新增/修改 Tushare 调用时自动触发
+globs: "**/tushare_service.py,**/pull_*.py,**/sync_*.py,**/init_data.py,**/daily_sync.py"
+alwaysApply: false
+---
+
+# Tushare API 规范
+
+当新增或修改 Tushare API 调用时：
+
+1. **先读技能文档**: 读取 `.cursor/skills/skill-tushare-data/SKILL.md` 了解调用规范和常见陷阱
+2. **查阅 API 参考**: 在 `.cursor/skills/skill-tushare-data/references/` 下找到目标 API 的详细参数和字段文档
+3. **确认实际接口名**: Tushare 部分接口名与文档标题不同（如 `major_news` 非 `news`，`anns_d` 非 `anns`），以 reference 文档中的 **接口名称** 字段为准
+4. **统一入口**: 所有调用必须通过 `TushareService`，禁止直接 `pro.query()`
+5. **类型安全**: 写入 PostgreSQL 前，将 pandas Series 转为 Python 原生类型，避免 `psycopg2 can't adapt type 'Series'`

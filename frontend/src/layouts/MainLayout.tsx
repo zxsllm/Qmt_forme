@@ -10,6 +10,7 @@ import {
   ExperimentOutlined,
   DashboardOutlined,
 } from '@ant-design/icons';
+import SidebarNews from '../components/SidebarNews';
 
 const { Sider } = Layout;
 
@@ -36,29 +37,43 @@ export default function MainLayout() {
         collapsed={collapsed}
         onCollapse={setCollapsed}
         theme="dark"
-        width={160}
+        width={180}
         collapsedWidth={56}
         trigger={null}
-        style={{ background: 'var(--color-bg-base)', borderRight: '1px solid var(--color-edge)' }}
+        style={{
+          background: 'var(--color-bg-base)',
+          borderRight: '1px solid var(--color-edge)',
+          display: 'flex',
+          flexDirection: 'column',
+        }}
       >
-        <div
-          className="flex items-center gap-2 cursor-pointer border-b border-edge"
-          style={{ padding: '12px 20px' }}
-          onClick={() => setCollapsed(!collapsed)}
-        >
-          <span className="text-accent font-bold text-[16px]">
-            {collapsed ? 'AT' : 'AI Trade'}
-          </span>
-          {!collapsed && <span className="text-t4 text-[11px] ml-auto">v0.1</span>}
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+          <div
+            className="flex items-center gap-2 cursor-pointer border-b border-edge"
+            style={{ padding: '12px 20px', flexShrink: 0 }}
+            onClick={() => setCollapsed(!collapsed)}
+          >
+            <span className="text-accent font-bold text-[16px]">
+              {collapsed ? 'AT' : 'AI Trade'}
+            </span>
+            {!collapsed && <span className="text-t4 text-[11px] ml-auto">v0.2</span>}
+          </div>
+
+          <Menu
+            theme="dark"
+            mode="inline"
+            selectedKeys={[location.pathname]}
+            items={menuItems}
+            onClick={({ key }) => navigate(key)}
+            style={{ background: 'transparent', borderRight: 'none', flexShrink: 0 }}
+          />
+
+          {!collapsed && (
+            <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+              <SidebarNews />
+            </div>
+          )}
         </div>
-        <Menu
-          theme="dark"
-          mode="inline"
-          selectedKeys={[location.pathname]}
-          items={menuItems}
-          onClick={({ key }) => navigate(key)}
-          style={{ background: 'transparent', borderRight: 'none' }}
-        />
       </Sider>
 
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">

@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import DateTime, Float, Integer, String, Text, text
+from sqlalchemy import DateTime, Float, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -314,3 +314,121 @@ class PromotionHistory(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=text("NOW()")
     )
+
+
+# =========================================================================
+# P2-Plus: 资讯仪表盘新增表
+# =========================================================================
+
+class MoneyFlowDC(Base):
+    """Per-stock daily money flow from Tushare moneyflow_dc."""
+    __tablename__ = "moneyflow_dc"
+
+    ts_code: Mapped[str] = mapped_column(String(16), primary_key=True)
+    trade_date: Mapped[str] = mapped_column(String(8), primary_key=True)
+    buy_sm_amount: Mapped[float | None] = mapped_column(Float)
+    sell_sm_amount: Mapped[float | None] = mapped_column(Float)
+    buy_md_amount: Mapped[float | None] = mapped_column(Float)
+    sell_md_amount: Mapped[float | None] = mapped_column(Float)
+    buy_lg_amount: Mapped[float | None] = mapped_column(Float)
+    sell_lg_amount: Mapped[float | None] = mapped_column(Float)
+    buy_elg_amount: Mapped[float | None] = mapped_column(Float)
+    sell_elg_amount: Mapped[float | None] = mapped_column(Float)
+    net_mf_amount: Mapped[float | None] = mapped_column(Float)
+
+
+class StockNews(Base):
+    """Market news from Tushare news API."""
+    __tablename__ = "stock_news"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    datetime: Mapped[str] = mapped_column(String(32), index=True)
+    content: Mapped[str] = mapped_column(Text, default="")
+    channels: Mapped[str | None] = mapped_column(String(128))
+    source: Mapped[str | None] = mapped_column(String(64))
+
+
+class StockAnns(Base):
+    """Company announcements from Tushare anns API."""
+    __tablename__ = "stock_anns"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    ann_date: Mapped[str] = mapped_column(String(8), index=True)
+    title: Mapped[str] = mapped_column(Text, default="")
+    url: Mapped[str | None] = mapped_column(Text)
+
+
+class StockST(Base):
+    """Daily ST stock list from Tushare stock_st API."""
+    __tablename__ = "stock_st"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str | None] = mapped_column(String(32))
+    trade_date: Mapped[str] = mapped_column(String(8), index=True)
+    type: Mapped[str | None] = mapped_column(String(8))
+    type_name: Mapped[str | None] = mapped_column(String(32))
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "trade_date", name="uq_stock_st_code_date"),
+    )
+
+
+class AdjFactor(Base):
+    """Daily adjustment factor from Tushare adj_factor API."""
+    __tablename__ = "adj_factor"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    trade_date: Mapped[str] = mapped_column(String(8), index=True)
+    adj_factor: Mapped[float | None] = mapped_column(Float)
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "trade_date", name="uq_adj_factor_code_date"),
+    )
+
+
+class SwDaily(Base):
+    """Shenwan industry index daily bars from Tushare sw_daily API."""
+    __tablename__ = "sw_daily"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    trade_date: Mapped[str] = mapped_column(String(8), index=True)
+    name: Mapped[str | None] = mapped_column(String(32))
+    open: Mapped[float | None] = mapped_column(Float)
+    low: Mapped[float | None] = mapped_column(Float)
+    high: Mapped[float | None] = mapped_column(Float)
+    close: Mapped[float | None] = mapped_column(Float)
+    change: Mapped[float | None] = mapped_column(Float)
+    pct_change: Mapped[float | None] = mapped_column(Float)
+    vol: Mapped[float | None] = mapped_column(Float)
+    amount: Mapped[float | None] = mapped_column(Float)
+    pe: Mapped[float | None] = mapped_column(Float)
+    pb: Mapped[float | None] = mapped_column(Float)
+    float_mv: Mapped[float | None] = mapped_column(Float)
+    total_mv: Mapped[float | None] = mapped_column(Float)
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "trade_date", name="uq_sw_daily_code_date"),
+    )
+
+
+class ConceptList(Base):
+    """Concept/theme sector list from Tushare concept API."""
+    __tablename__ = "concept_list"
+
+    code: Mapped[str] = mapped_column(String(16), primary_key=True)
+    name: Mapped[str | None] = mapped_column(String(64))
+    src: Mapped[str | None] = mapped_column(String(16))
+
+
+class ConceptDetail(Base):
+    """Concept-to-stock mapping from Tushare concept_detail API."""
+    __tablename__ = "concept_detail"
+
+    concept_code: Mapped[str] = mapped_column(String(16), primary_key=True)
+    ts_code: Mapped[str] = mapped_column(String(16), primary_key=True)
+    concept_name: Mapped[str | None] = mapped_column(String(64))
+    name: Mapped[str | None] = mapped_column(String(32))

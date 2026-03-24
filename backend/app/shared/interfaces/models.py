@@ -35,6 +35,7 @@ class BarData(BaseModel):
     close: float
     vol: float
     amount: float = 0.0
+    pre_close: float | None = None
     freq: str = "1min"
 
 

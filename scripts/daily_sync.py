@@ -41,11 +41,18 @@ def main():
 
     results["pull_stk_limit"] = run("pull_stk_limit.py")
 
+    results["pull_moneyflow"] = run("pull_moneyflow.py")
+    results["pull_news"] = run("pull_news.py")
+    results["pull_anns"] = run("pull_anns.py")
+    results["pull_st_list"] = run("pull_st_list.py")
+    results["pull_adj_factor"] = run("pull_adj_factor.py")
+    results["pull_sw_daily"] = run("pull_sw_daily.py")
+
     print(f"\n{'='*60}")
     print("  Daily Sync Summary")
     print(f"{'='*60}")
     for name, ok in results.items():
-        print(f"  {'✓' if ok else '✗'} {name}")
+        print(f"  {'[OK]' if ok else '[FAIL]'} {name}")
     print()
 
     all_ok = all(results.values())

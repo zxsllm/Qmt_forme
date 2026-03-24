@@ -13,7 +13,7 @@ const actionColor: Record<string, string> = {
   BACKTEST_FILTER: 'var(--color-t3)',
 };
 
-export default function LogPanel({ className = '', secondary = false }: { className?: string; secondary?: boolean }) {
+export default function LogPanel({ className = '', secondary = false, style }: { className?: string; secondary?: boolean; style?: React.CSSProperties }) {
   const { data } = useQuery({
     queryKey: ['audit-log'],
     queryFn: api.getAuditLog,

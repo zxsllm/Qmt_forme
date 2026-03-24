@@ -29,3 +29,26 @@ export const Default: Story = {
 export const WithMACD: Story = {
   args: { data: sampleData, height: 500, indicators: ['MA', 'VOL', 'MACD'] },
 };
+
+const minuteData = Array.from({ length: 240 }, (_, i) => {
+  const h = 9 + Math.floor((i + 30) / 60);
+  const m = (i + 30) % 60;
+  const t = `2026-03-23 ${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`;
+  const base = 15 + Math.sin(i / 20) * 1.5;
+  return {
+    trade_time: t,
+    open: +(base + Math.random() * 0.2).toFixed(2),
+    high: +(base + 0.3 + Math.random() * 0.2).toFixed(2),
+    low: +(base - 0.3 + Math.random() * 0.2).toFixed(2),
+    close: +(base + Math.random() * 0.1).toFixed(2),
+    vol: Math.round(10000 + Math.random() * 30000),
+  };
+});
+
+export const IntradayArea: Story = {
+  args: { data: minuteData, period: '1min', height: 400, indicators: ['VOL'] },
+};
+
+export const Weekly: Story = {
+  args: { data: sampleData, period: 'weekly', height: 400, indicators: ['MA', 'VOL'] },
+};

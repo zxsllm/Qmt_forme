@@ -80,8 +80,7 @@ def pull_stock_minutes(ts_code: str) -> int:
     cur_end = end_dt
 
     while True:
-        df = svc.query(
-            "stk_mins",
+        df = svc.stk_mins(
             ts_code=ts_code,
             freq=FREQ,
             start_date=start_dt,

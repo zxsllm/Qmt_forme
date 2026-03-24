@@ -1,6 +1,8 @@
 import asyncio
-import json
+import logging
 import math
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,7 +30,7 @@ app = FastAPI(title="AI Trade", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["http://localhost:5173", "http://localhost:5174"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -121,4 +123,92 @@ async def get_index_daily(
 async def get_sw_classify(level: str = Query("", description="L1/L2/L3")):
     loader = DataLoader()
     df = await loader.sw_classify(level)
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+# ── P2-Plus: Rankings / MoneyFlow / GlobalIndices / News / K-line ──
+
+
+@app.get("/api/v1/market/rankings")
+async def get_market_rankings(
+    type: str = Query("gain", description="gain|lose|turnover"),
+    limit: int = Query(10, ge=1, le=50),
+):
+    loader = DataLoader()
+    df = await loader.market_rankings(type, limit)
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/sector/rankings")
+async def get_sector_rankings(limit: int = Query(10, ge=1, le=50)):
+    loader = DataLoader()
+    df = await loader.sector_rankings(limit)
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/market/moneyflow")
+async def get_moneyflow(limit: int = Query(10, ge=1, le=50)):
+    loader = DataLoader()
+    df = await loader.moneyflow_top(limit)
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/market/global-indices")
+async def get_global_indices():
+    loader = DataLoader()
+    df = await loader.global_indices()
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/market/news")
+async def get_market_news(limit: int = Query(50, ge=1, le=200)):
+    loader = DataLoader()
+    df = await loader.market_news(limit)
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/stock/{ts_code}/news")
+async def get_stock_news(ts_code: str, limit: int = Query(20, ge=1, le=100)):
+    loader = DataLoader()
+    df = await loader.stock_news(ts_code, limit)
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/stock/{ts_code}/anns")
+async def get_stock_anns(ts_code: str, limit: int = Query(20, ge=1, le=100)):
+    loader = DataLoader()
+    df = await loader.stock_anns(ts_code, limit)
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/stock/{ts_code}/weekly")
+async def get_stock_weekly(
+    ts_code: str,
+    start: str = Query("", description="YYYYMMDD"),
+    end: str = Query("", description="YYYYMMDD"),
+):
+    loader = DataLoader()
+    df = await loader.weekly(ts_code, start, end)
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/stock/{ts_code}/monthly")
+async def get_stock_monthly(
+    ts_code: str,
+    start: str = Query("", description="YYYYMMDD"),
+    end: str = Query("", description="YYYYMMDD"),
+):
+    loader = DataLoader()
+    df = await loader.monthly(ts_code, start, end)
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/stock/{ts_code}/minutes")
+async def get_stock_minutes(
+    ts_code: str,
+    start: str = Query("", description="datetime e.g. 2026-03-23 09:30:00"),
+    end: str = Query("", description="datetime"),
+):
+    loader = DataLoader()
+    df = await loader.minutes(ts_code, start, end)
     return {"count": len(df), "data": _df_to_records(df)}

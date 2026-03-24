@@ -24,8 +24,8 @@ todos:
     content: "Phase 2a (P2-Core): 交易控制台 (K线/持仓/风控/策略开关)"
     status: completed
   - id: phase2-plus
-    content: "Phase 2b (P2-Plus): 资讯仪表盘 (行业/新闻/板块/宏观, 模拟盘闭环后)"
-    status: pending
+    content: "Phase 2b (P2-Plus): 资讯仪表盘 — Dashboard重做(K线多周期+7排行榜+新闻公告) + Sidebar新闻 + 新Tushare API 7个 + DB表5个 + 同步脚本3个 + 盘中新闻5分钟自动刷新"
+    status: completed
   - id: phase3-realtime-sim
     content: "Phase 3: 实时数据流 + 模拟交易引擎 (10 Steps all done)"
     status: completed
@@ -40,6 +40,9 @@ todos:
     status: completed
   - id: phase4.7-ashare-rules
     content: "Phase 4.7: 模拟盘A股市场规则合规 (T+1/涨跌停/整手/tick)"
+    status: completed
+  - id: p2plus-opt
+    content: "P2-Plus-Opt: 性能优化 & 数据增强 — TushareService fields优化 + 脚本try-except + 批量INSERT + scheduler DRY + stock_st/adj_factor/sw_daily 三新API + 动态ST风控 + 前复权daily_qfq + 申万行业板块排行升级"
     status: completed
   - id: phase5-qmt
     content: "Phase 5: QMT实盘桥接"
@@ -954,23 +957,33 @@ Step 5 (路由实体化) ── 依赖 Step 1 + Step 4
 
 **已实现的A股规则清单**:
 
-| 规则 | 实现位置 | 说明 |
-|------|---------|------|
-| **T+1 交割** | `PositionBook` | 当日买入股票不能当日卖出；`available_qty` 与 `qty` 分离，`begin_day()` 日切时解锁 |
-| **涨停板买入** | `SimMatcher._is_tradable()` | 当分钟bar的 `low >= up_limit` 时 BUY 订单不成交 |
-| **跌停板卖出** | `SimMatcher._is_tradable()` | 当分钟bar的 `high <= down_limit` 时 SELL 订单不成交 |
-| **一字板双向拦截** | `SimMatcher._is_tradable()` | `open ≈ high ≈ low ≈ close` 且触及涨/跌停价 → 任何方向都不成交 |
-| **停牌不成交** | 自然过滤 | 停牌股无实时行情bar → matcher 无数据不撮合 |
-| **限价单涨跌停校验** | `api.py submit_order` | 提交时计算涨跌停价 (主板±10%/创业板科创板±20%/北交所±30%/ST±5%)，价格越界立即拒绝 |
-| **整手校验 (100股)** | `api.py submit_order` | 买入必须100股整数倍 |
-| **价格 tick 0.01** | `api.py submit_order` | 限价单价格必须为0.01元整数倍 |
-| **单笔成交量上限** | `SimMatcher` | 单笔 fill ≤ bar 成交量 20% |
+
+| 规则               | 实现位置                        | 说明                                                          |
+| ---------------- | --------------------------- | ----------------------------------------------------------- |
+| **T+1 交割**       | `PositionBook`              | 当日买入股票不能当日卖出；`available_qty` 与 `qty` 分离，`begin_day()` 日切时解锁 |
+| **涨停板买入**        | `SimMatcher._is_tradable()` | rt_k 快照的 `low >= up_limit` 时 BUY 订单不成交                      |
+| **跌停板卖出**        | `SimMatcher._is_tradable()` | rt_k 快照的 `high <= down_limit` 时 SELL 订单不成交                  |
+| **一字板双向拦截**      | `SimMatcher._is_tradable()` | `open ≈ high ≈ low ≈ close` 且触及涨/跌停价 → 任何方向都不成交             |
+| **停牌不成交**        | 自然过滤                        | 停牌股无 rt_k 数据 → matcher 无数据不撮合                               |
+| **限价单涨跌停校验**     | `api.py submit_order`       | 提交时计算涨跌停价 (主板±10%/创业板科创板±20%/北交所±30%/ST±5%)，价格越界立即拒绝        |
+| **整手校验 (100股)**  | `api.py submit_order`       | 买入必须100股整数倍                                                 |
+| **价格 tick 0.01** | `api.py submit_order`       | 限价单价格必须为0.01元整数倍                                            |
+| **单笔成交量上限**      | `SimMatcher`                | 单笔 fill ≤ 快照成交量 20%                                         |
+
 
 **涨跌停限价缓存机制**:
 
 - `startup.load_price_limits()`: 从 `stock_daily` 最新收盘价 + `stock_basic` 名称 (ST判断) 动态计算
 - 每日开盘由 `scheduler` 自动加载并注入 `TradingEngine._price_limits`
+- rt_k 返回的 `pre_close` 可在盘中补充计算未缓存股票的涨跌停价
 - 新下单自动触发对应股票的 limits 加载 (`scheduler.add_watch_code()`)
+
+**实时行情数据源** (Phase 4.7+ 优化):
+
+- 数据源从 `rt_min` (分钟K线, 60s轮询) 升级为 `rt_k` (实时日K快照, 1.2s轮询)
+- `rt_k` 提供: 最新价(close) / 日内OHLCV / 昨收(pre_close) / 买一卖一
+- 批量查询: 逗号拼接多只股票一次 API 调用
+- BarData 模型新增 `pre_close` 字段
 
 **修改文件清单**:
 

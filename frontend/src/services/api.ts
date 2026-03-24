@@ -267,7 +267,101 @@ export const api = {
 
   getBacktestResult: (runId: string) =>
     fetchJson<BacktestRunResult>(`/api/v1/backtest/result/${runId}`),
+
+  // ── P2-Plus: Rankings / News / K-line ────────────────────
+  marketRankings: (type: 'gain' | 'lose' | 'turnover' = 'gain', limit = 10) =>
+    fetchJson<ApiList<RankingRow>>(`/api/v1/market/rankings?type=${type}&limit=${limit}`),
+
+  sectorRankings: (limit = 10) =>
+    fetchJson<ApiList<SectorRankRow>>(`/api/v1/sector/rankings?limit=${limit}`),
+
+  moneyFlow: (limit = 10) =>
+    fetchJson<ApiList<MoneyFlowRow>>(`/api/v1/market/moneyflow?limit=${limit}`),
+
+  globalIndices: () =>
+    fetchJson<ApiList<GlobalIndexRow>>('/api/v1/market/global-indices'),
+
+  marketNews: (limit = 50) =>
+    fetchJson<ApiList<NewsItem>>(`/api/v1/market/news?limit=${limit}`),
+
+  stockNews: (tsCode: string, limit = 20) =>
+    fetchJson<ApiList<NewsItem>>(`/api/v1/stock/${tsCode}/news?limit=${limit}`),
+
+  stockAnns: (tsCode: string, limit = 20) =>
+    fetchJson<ApiList<AnnItem>>(`/api/v1/stock/${tsCode}/anns?limit=${limit}`),
+
+  stockWeekly: (code: string, start = '', end = '') =>
+    fetchJson<ApiList<DailyBar>>(`/api/v1/stock/${code}/weekly?start=${start}&end=${end}`),
+
+  stockMonthly: (code: string, start = '', end = '') =>
+    fetchJson<ApiList<DailyBar>>(`/api/v1/stock/${code}/monthly?start=${start}&end=${end}`),
+
+  stockMinutes: (code: string, start = '', end = '') =>
+    fetchJson<ApiList<MinuteBar>>(`/api/v1/stock/${code}/minutes?start=${start}&end=${end}`),
 };
+
+// ── P2-Plus types ────────────────────────────────────────
+
+export interface RankingRow {
+  ts_code: string;
+  name: string;
+  close: number;
+  pct_chg: number;
+  turnover_rate: number | null;
+  amount: number | null;
+  vol: number | null;
+}
+
+export interface SectorRankRow {
+  industry: string;
+  avg_pct_chg: number;
+  stock_count: number;
+}
+
+export interface MoneyFlowRow {
+  ts_code: string;
+  name: string;
+  net_mf_amount: number;
+  buy_elg_amount: number | null;
+  sell_elg_amount: number | null;
+  buy_lg_amount: number | null;
+  sell_lg_amount: number | null;
+}
+
+export interface GlobalIndexRow {
+  ts_code: string;
+  name: string;
+  close: number;
+  pct_chg: number;
+  vol: number | null;
+}
+
+export interface NewsItem {
+  id: number;
+  datetime: string;
+  content: string;
+  channels: string | null;
+  source: string | null;
+}
+
+export interface AnnItem {
+  id: number;
+  ts_code: string;
+  ann_date: string;
+  title: string;
+  url: string | null;
+}
+
+export interface MinuteBar {
+  ts_code: string;
+  trade_time: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  vol: number;
+  amount: number;
+}
 
 // ── Backtest types ───────────────────────────────────────
 

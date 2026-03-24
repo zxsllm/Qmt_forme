@@ -1,8 +1,9 @@
-import { Table, Tag, Empty } from 'antd';
+import { Table, Tag, Empty, Tabs } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useQuery } from '@tanstack/react-query';
 import { api, type SimOrder } from '../services/api';
 import Panel from '../components/Panel';
+import LogPanel from '../components/LogPanel';
 
 const columns: ColumnsType<SimOrder> = [
   {
@@ -52,14 +53,31 @@ export default function HistoryPage() {
 
   return (
     <div className="flex flex-col h-full bg-bg-base" style={{ padding: 16, gap: 10 }}>
-      <Panel title="历史成交" className="flex-1" noPadding>
-        <Table
-          columns={columns}
-          dataSource={data?.data ?? []}
-          rowKey="order_id"
-          size="small"
-          pagination={{ pageSize: 50 }}
-          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无历史记录" /> }}
+      <Panel title="历史 & 日志" className="flex-1" noPadding>
+        <Tabs
+          defaultActiveKey="history"
+          style={{ height: '100%', padding: '0 8px' }}
+          items={[
+            {
+              key: 'history',
+              label: '历史成交',
+              children: (
+                <Table
+                  columns={columns}
+                  dataSource={data?.data ?? []}
+                  rowKey="order_id"
+                  size="small"
+                  pagination={{ pageSize: 50 }}
+                  locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无历史记录" /> }}
+                />
+              ),
+            },
+            {
+              key: 'audit',
+              label: '审计日志',
+              children: <LogPanel style={{ height: '100%' }} />,
+            },
+          ]}
         />
       </Panel>
     </div>

@@ -41,10 +41,11 @@ class KillSwitchBody(BaseModel):
 # Price limit validation
 # ---------------------------------------------------------------------------
 
-def _limit_pct(ts_code: str, name: str = "") -> float:
+def _limit_pct(ts_code: str, name: str = "", is_st: bool | None = None) -> float:
     """Return daily price limit percentage based on board type and ST status."""
     code = ts_code.split(".")[0]
-    is_st = "ST" in name.upper() if name else False
+    if is_st is None:
+        is_st = "ST" in name.upper() if name else False
 
     if code.startswith("3") or code.startswith("688"):
         return 0.20
