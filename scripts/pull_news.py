@@ -33,13 +33,13 @@ INSERT_COLS = ["datetime", "content", "channels", "source"]
 
 
 def _normalize_news_df(df):
-    """Rename Tushare major_news columns to our schema and filter new rows."""
+    """Rename Tushare news columns to our schema."""
     col_rename = {}
-    if "pub_time" in df.columns:
+    if "pub_time" in df.columns and "datetime" not in df.columns:
         col_rename["pub_time"] = "datetime"
     if "title" in df.columns and "content" not in df.columns:
         col_rename["title"] = "content"
-    if "src" in df.columns:
+    if "src" in df.columns and "source" not in df.columns:
         col_rename["src"] = "source"
     return df.rename(columns=col_rename)
 
@@ -66,25 +66,39 @@ def insert_news_batch(cur, df) -> int:
     return len(rows)
 
 
-def fetch_latest_news(ts_svc: TushareService, db_url: str, limit: int = 50) -> int:
+NEWS_SOURCES = [
+    "sina", "cls", "eastmoney", "wallstreetcn", "10jqka",
+    "yuncaijing", "fenghuang", "jinrongjie", "yicai",
+]
+_source_index = 0
+
+
+def fetch_latest_news(ts_svc: TushareService, db_url: str, limit: int = 50,
+                      src: str | None = None) -> int:
     """Fetch new news from Tushare and insert into DB. Returns inserted count.
 
+    If src is None, rotates through NEWS_SOURCES automatically.
     This function is also called by scheduler._pull_news_sync for DRY reuse.
     """
+    global _source_index
+
+    if src is None:
+        src = NEWS_SOURCES[_source_index % len(NEWS_SOURCES)]
+        _source_index += 1
+
     with psycopg2.connect(db_url) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT MAX(datetime) FROM stock_news")
             last_dt = cur.fetchone()[0] or ""
 
-            df = ts_svc.news(src="sina", limit=limit)
-            if df.empty:
-                df = ts_svc.news(limit=limit)
+            df = ts_svc.news(src=src, limit=limit)
             if df.empty:
                 return 0
 
             df = _normalize_news_df(df)
+            df["source"] = src
             if "datetime" not in df.columns:
-                logger.warning("Unexpected columns from major_news: %s", list(df.columns))
+                logger.warning("Unexpected columns from news(src=%s): %s", src, list(df.columns))
                 return 0
 
             if last_dt:
@@ -92,8 +106,27 @@ def fetch_latest_news(ts_svc: TushareService, db_url: str, limit: int = 50) -> i
             if df.empty:
                 return 0
 
+            df = df.drop_duplicates(subset=["datetime", "content"], keep="first")
+            if df.empty:
+                return 0
+
+            cur.execute(
+                "SELECT datetime, LEFT(content, 100) FROM stock_news "
+                "WHERE datetime >= %s",
+                (df["datetime"].min(),),
+            )
+            existing = {(r[0], r[1]) for r in cur.fetchall()}
+            mask = df.apply(
+                lambda r: (str(r.get("datetime", "")), str(r.get("content", ""))[:100]) not in existing,
+                axis=1,
+            )
+            df = df[mask]
+            if df.empty:
+                return 0
+
             count = insert_news_batch(cur, df)
             conn.commit()
+            logger.info("news(%s): inserted %d items", src, count)
             return count
 
 
@@ -113,6 +146,7 @@ def pull_news(ts_svc: TushareService, conn, limit: int):
         return
 
     df = _normalize_news_df(df)
+    df["source"] = "sina"
     if "datetime" not in df.columns:
         logger.warning("  [WARN] Unexpected columns: %s", list(df.columns))
         return

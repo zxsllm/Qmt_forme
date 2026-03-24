@@ -49,71 +49,81 @@ export default function AccountCard() {
   const cards: StatItem[] = [
     {
       icon: <DollarOutlined />,
-      iconBg: '#1d4ed8',
+      iconBg: 'linear-gradient(135deg, #2481bd, #3b61d6)',
       label: '总资产',
       value: `¥${a.total_asset.toLocaleString()}`,
       sub: `可用 ¥${a.cash.toLocaleString()}`,
     },
     {
       icon: <PieChartOutlined />,
-      iconBg: '#7c3aed',
+      iconBg: 'linear-gradient(135deg, #7c3aed, #b48cff)',
       label: '持仓市值',
       value: `¥${a.market_value.toLocaleString()}`,
       sub: `${posCount} 只持仓`,
     },
     {
       icon: up ? <ArrowUpOutlined /> : <ArrowDownOutlined />,
-      iconBg: up ? '#15803d' : '#b91c1c',
+      iconBg: up ? 'linear-gradient(135deg, #15803d, #4ade80)' : 'linear-gradient(135deg, #b91c1c, #ff6f91)',
       label: '今日盈亏',
       value: `${up ? '+' : ''}¥${a.today_pnl.toLocaleString()}`,
       sub: `${up ? '+' : ''}${pnlPct.toFixed(2)}%`,
-      valueColor: up ? 'var(--color-down)' : 'var(--color-up)',
-      subColor: up ? 'var(--color-down)' : 'var(--color-up)',
+      valueColor: up ? '#4ade80' : '#ff6f91',
+      subColor: up ? '#4ade80' : '#ff6f91',
     },
     {
       icon: <FundOutlined />,
-      iconBg: '#b45309',
+      iconBg: 'linear-gradient(135deg, #b45309, #ffbf75)',
       label: '累计盈亏',
       value: `${a.total_pnl >= 0 ? '+' : ''}¥${a.total_pnl.toLocaleString()}`,
       sub: '持仓收益',
-      valueColor: a.total_pnl >= 0 ? 'var(--color-down)' : 'var(--color-up)',
-      subColor: a.total_pnl >= 0 ? 'var(--color-down)' : 'var(--color-up)',
+      valueColor: a.total_pnl >= 0 ? '#4ade80' : '#ff6f91',
+      subColor: a.total_pnl >= 0 ? '#4ade80' : '#ff6f91',
     },
   ];
 
   return (
-    <div className="grid grid-cols-4" style={{ gap: 10 }}>
+    <div className="grid grid-cols-4" style={{ gap: 12 }}>
       {cards.map((c, i) => (
         <div
           key={i}
-          className="flex items-center bg-bg-panel rounded-panel"
-          style={{ padding: '8px 14px', gap: 10, position: 'relative' }}
+          className="flex items-center"
+          style={{
+            padding: '10px 16px',
+            gap: 12,
+            position: 'relative',
+            background: 'linear-gradient(180deg, rgba(23,42,59,0.88), rgba(8,17,25,0.92))',
+            border: '1px solid rgba(148,186,215,0.18)',
+            borderRadius: 16,
+            boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04), 0 12px 32px rgba(0,0,0,0.28)',
+            backdropFilter: 'blur(10px)',
+          }}
         >
           <div
             className="flex items-center justify-center shrink-0"
             style={{
-              width: 26,
-              height: 26,
-              borderRadius: 6,
+              width: 30,
+              height: 30,
+              borderRadius: 10,
               background: c.iconBg,
-              fontSize: 13,
+              fontSize: 14,
               color: '#fff',
-              opacity: 0.85,
             }}
           >
             {c.icon}
           </div>
-          <div className="min-w-0 flex flex-col" style={{ gap: 1 }}>
-            <div className="text-t3 text-[10px] truncate">{c.label}</div>
+          <div className="min-w-0 flex flex-col" style={{ gap: 2 }}>
+            <div style={{ fontSize: 11, color: '#93a9bc', letterSpacing: '0.04em' }} className="truncate">
+              {c.label}
+            </div>
             <div
-              className="font-medium text-[13px] truncate"
-              style={{ color: c.valueColor || 'var(--color-t1)', lineHeight: 1.25 }}
+              className="font-semibold truncate"
+              style={{ fontSize: 14, color: c.valueColor || '#e6f1fa', lineHeight: 1.25 }}
             >
               {c.value}
             </div>
             <div
-              className="text-[10px] truncate"
-              style={{ color: c.subColor || 'var(--color-t3)', marginTop: 1 }}
+              className="truncate"
+              style={{ fontSize: 10, color: c.subColor || '#64748b', marginTop: 1 }}
             >
               {c.sub}
             </div>
@@ -127,8 +137,8 @@ export default function AccountCard() {
             >
               <ReloadOutlined
                 style={{
-                  position: 'absolute', top: 6, right: 8,
-                  fontSize: 11, color: 'var(--color-t3)', cursor: 'pointer',
+                  position: 'absolute', top: 8, right: 10,
+                  fontSize: 11, color: '#64748b', cursor: 'pointer',
                 }}
               />
             </Popconfirm>

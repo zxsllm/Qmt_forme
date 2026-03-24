@@ -15,12 +15,28 @@ export interface MarketBar {
   freq: string;
 }
 
-export function useMarketFeed(onBar?: (bar: MarketBar) => void) {
+interface WsNewsEvent {
+  type: 'news_update';
+  count: number;
+}
+
+type WsMessage = MarketBar | WsNewsEvent;
+
+function isNewsEvent(msg: WsMessage): msg is WsNewsEvent {
+  return 'type' in msg && (msg as WsNewsEvent).type === 'news_update';
+}
+
+export function useMarketFeed(
+  onBar?: (bar: MarketBar) => void,
+  onNews?: () => void,
+) {
   const [connected, setConnected] = useState(false);
   const [lastBar, setLastBar] = useState<MarketBar | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const onBarRef = useRef(onBar);
+  const onNewsRef = useRef(onNews);
   onBarRef.current = onBar;
+  onNewsRef.current = onNews;
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -32,10 +48,12 @@ export function useMarketFeed(onBar?: (bar: MarketBar) => void) {
 
     ws.onmessage = (evt) => {
       try {
-        const bar: MarketBar = JSON.parse(evt.data);
-        if (bar.ts_code) {
-          setLastBar(bar);
-          onBarRef.current?.(bar);
+        const data: WsMessage = JSON.parse(evt.data);
+        if (isNewsEvent(data)) {
+          onNewsRef.current?.();
+        } else if (data.ts_code) {
+          setLastBar(data as MarketBar);
+          onBarRef.current?.(data as MarketBar);
         }
       } catch { /* ignore non-JSON (e.g. pong) */ }
     };

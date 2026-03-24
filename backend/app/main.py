@@ -43,17 +43,23 @@ app.include_router(backtest_router)
 # Redis pub/sub → WebSocket bridge (background task)
 # ---------------------------------------------------------------------------
 
+NEWS_CHANNEL = "market:news"
+
+
 async def _redis_to_ws_bridge() -> None:
-    """Subscribe to Redis market channel and forward to all WS clients."""
+    """Subscribe to Redis market + news channels and forward to all WS clients."""
     import redis as _redis
     sub = _redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
     ps = sub.pubsub()
-    ps.subscribe(REDIS_CHANNEL)
+    ps.subscribe(REDIS_CHANNEL, NEWS_CHANNEL)
 
     while True:
-        msg = ps.get_message(ignore_subscribe_messages=True, timeout=0.5)
-        if msg and msg["type"] == "message":
-            await ws_manager.broadcast_text(msg["data"])
+        try:
+            msg = ps.get_message(ignore_subscribe_messages=True, timeout=0.5)
+            if msg and msg["type"] == "message":
+                await ws_manager.broadcast_text(msg["data"])
+        except Exception:
+            pass
         await asyncio.sleep(0.05)
 
 
@@ -83,8 +89,13 @@ async def health():
 
 
 @app.get("/api/v1/stock/search")
-async def search_stocks(q: str = Query("", min_length=1, description="code or name")):
-    """Search stocks by ts_code or name prefix (max 20 results)."""
+async def search_stocks(q: str = Query("", min_length=1, description="code, name or pinyin")):
+    """Search stocks by ts_code, name prefix, or pinyin initials (max 20)."""
+    if q.isalpha() and q.upper() == q:
+        from app.shared.data.pinyin_cache import search_by_pinyin
+        results = await search_by_pinyin(q, limit=20)
+        if results:
+            return {"count": len(results), "data": results}
     loader = DataLoader()
     df = await loader.search_stocks(q, limit=20)
     return {"count": len(df), "data": _df_to_records(df)}
@@ -178,6 +189,27 @@ async def get_stock_news(ts_code: str, limit: int = Query(20, ge=1, le=100)):
 async def get_stock_anns(ts_code: str, limit: int = Query(20, ge=1, le=100)):
     loader = DataLoader()
     df = await loader.stock_anns(ts_code, limit)
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/stock/{ts_code}/irm_qa")
+async def get_stock_irm_qa(ts_code: str, limit: int = Query(20, ge=1, le=100)):
+    import pandas as pd
+    from app.research.data.tushare_service import TushareService
+
+    exchange = ts_code.split(".")[-1].upper() if "." in ts_code else ""
+
+    def _fetch():
+        svc = TushareService()
+        if exchange == "SH":
+            return svc.irm_qa_sh(ts_code=ts_code, limit=limit)
+        elif exchange == "SZ":
+            return svc.irm_qa_sz(ts_code=ts_code, limit=limit)
+        return pd.DataFrame()
+
+    df = await asyncio.to_thread(_fetch)
+    if df.empty:
+        return {"count": 0, "data": []}
     return {"count": len(df), "data": _df_to_records(df)}
 
 

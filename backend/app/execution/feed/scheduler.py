@@ -96,17 +96,38 @@ async def _fetch_rt_k(ts_codes: list[str]) -> list[BarData]:
 
 class MarketDataScheduler:
 
-    NEWS_REFRESH_INTERVAL = 300  # 5 minutes
+    NEWS_REFRESH_INTERVAL = 5  # poll news every 5s
 
     def __init__(self):
         self._running = False
         self._task: asyncio.Task | None = None
+        self._news_task: asyncio.Task | None = None
         self._watch_codes: list[str] = []
         self._today_is_trading: bool | None = None
         self._last_check_date: date | None = None
         self._settled_today = False
         self._synced_today = False
         self._last_news_pull: float = 0
+
+    def _maybe_pull_news(self) -> None:
+        """Fire-and-forget news pull — never blocks the scheduler loop."""
+        import time as _t
+        if _t.time() - self._last_news_pull < self.NEWS_REFRESH_INTERVAL:
+            return
+        if self._news_task and not self._news_task.done():
+            logger.debug("news pull still running, skip")
+            return
+        self._last_news_pull = _t.time()
+
+        async def _pull_with_timeout():
+            try:
+                await asyncio.wait_for(asyncio.to_thread(self._pull_news_sync), timeout=15)
+            except asyncio.TimeoutError:
+                logger.warning("news pull timed out (15s)")
+            except Exception:
+                logger.warning("news pull task error", exc_info=True)
+
+        self._news_task = asyncio.ensure_future(_pull_with_timeout())
 
     @property
     def is_running(self) -> bool:
@@ -196,11 +217,14 @@ class MarketDataScheduler:
                         logger.info("new day, not a trade date")
 
                 if not self._today_is_trading:
-                    await asyncio.sleep(1800)
+                    self._maybe_pull_news()
+                    await asyncio.sleep(self.NEWS_REFRESH_INTERVAL)
                     continue
 
                 now = datetime.now()
                 t = now.time()
+
+                self._maybe_pull_news()
 
                 if _is_trading_time(now):
                     bars = await _fetch_rt_k(self._watch_codes)
@@ -216,11 +240,6 @@ class MarketDataScheduler:
                         else:
                             logger.debug("published %d bars, no fills", len(bars))
 
-                    import time as _time
-                    if _time.time() - self._last_news_pull > self.NEWS_REFRESH_INTERVAL:
-                        await asyncio.to_thread(self._pull_news_sync)
-                        self._last_news_pull = _time.time()
-
                     await asyncio.sleep(POLL_INTERVAL)
 
                 elif t >= AFTERNOON_CLOSE:
@@ -230,12 +249,10 @@ class MarketDataScheduler:
                     if not self._synced_today and t >= SYNC_TIME:
                         self._run_daily_sync()
                         self._synced_today = True
-                    await asyncio.sleep(600)
+                    await asyncio.sleep(self.NEWS_REFRESH_INTERVAL)
 
                 else:
-                    wait = _seconds_until_next_session(now)
-                    logger.info("pre-market/lunch, sleeping %ds", min(wait, 300))
-                    await asyncio.sleep(min(wait, 300))
+                    await asyncio.sleep(self.NEWS_REFRESH_INTERVAL)
 
             except asyncio.CancelledError:
                 break
@@ -288,13 +305,21 @@ class MarketDataScheduler:
         logger.info("triggering post-market data sync...")
         _trigger_background_sync()
 
+    NEWS_RETENTION_DAYS = 3
+
     @staticmethod
     def _pull_news_sync() -> None:
-        """Pull latest news in background thread (called every 5 min during trading)."""
+        """Pull latest news, purge old ones (>3 days), notify via Redis."""
+        logger.info("news pull: calling Tushare...")
         try:
+            import json
             import os
             import sys
+            from datetime import datetime, timedelta
             from pathlib import Path
+
+            import psycopg2
+            from app.core.redis import redis_client
 
             scripts_dir = str(Path(__file__).resolve().parents[4] / "scripts")
             if scripts_dir not in sys.path:
@@ -308,8 +333,24 @@ class MarketDataScheduler:
             )
             svc = TushareService()
             count = fetch_latest_news(svc, db_url, limit=50)
+
+            cutoff = (datetime.now() - timedelta(days=MarketDataScheduler.NEWS_RETENTION_DAYS)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            with psycopg2.connect(db_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM stock_news WHERE datetime < %s", (cutoff,))
+                    deleted = cur.rowcount
+                conn.commit()
+            if deleted:
+                logger.info("news cleanup: deleted %d items older than %s", deleted, cutoff)
+
             if count:
                 logger.info("news refresh: inserted %d items", count)
+                redis_client.publish(
+                    "market:news",
+                    json.dumps({"type": "news_update", "count": count}),
+                )
         except Exception:
             logger.warning("news refresh failed", exc_info=True)
 

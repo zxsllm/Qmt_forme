@@ -15,8 +15,8 @@ interface Props<T> {
 }
 
 function pctColor(v: number | null | undefined): string {
-  if (v == null) return '#94a3b8';
-  return v >= 0 ? '#f87171' : '#4ade80';
+  if (v == null) return '#93a9bc';
+  return v >= 0 ? '#ff6f91' : '#4ade80';
 }
 
 export { pctColor };
@@ -27,22 +27,24 @@ export default function RankTable<T>({ title, data, columns }: Props<T>) {
       style={{
         flex: 1,
         minWidth: 0,
-        background: '#0d1117',
-        border: '1px solid #1e2530',
-        borderRadius: 6,
+        background: 'linear-gradient(180deg, rgba(23,42,59,0.88), rgba(8,17,25,0.92))',
+        border: '1px solid rgba(148,186,215,0.18)',
+        borderRadius: 18,
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
+        backdropFilter: 'blur(10px)',
+        boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04), 0 12px 32px rgba(0,0,0,0.28)',
       }}
     >
       <div
         style={{
-          padding: '6px 10px',
-          fontSize: 12,
-          fontWeight: 600,
-          color: '#94a3b8',
-          borderBottom: '1px solid #1e2530',
-          background: '#151b23',
+          padding: '8px 14px',
+          fontSize: 13,
+          fontWeight: 700,
+          letterSpacing: '0.04em',
+          color: '#d7efff',
+          borderBottom: '1px solid rgba(148,186,215,0.12)',
           flexShrink: 0,
         }}
       >
@@ -56,14 +58,14 @@ export default function RankTable<T>({ title, data, columns }: Props<T>) {
                 <th
                   key={col.key}
                   style={{
-                    padding: '4px 6px',
+                    padding: '5px 8px',
                     textAlign: col.align || 'left',
-                    color: '#475569',
+                    color: '#64748b',
                     fontWeight: 500,
-                    borderBottom: '1px solid #1e2530',
+                    borderBottom: '1px solid rgba(148,186,215,0.10)',
                     position: 'sticky',
                     top: 0,
-                    background: '#0d1117',
+                    background: 'rgba(14,28,41,0.95)',
                     width: col.width,
                   }}
                 >
@@ -76,15 +78,15 @@ export default function RankTable<T>({ title, data, columns }: Props<T>) {
             {data.map((row, idx) => (
               <tr
                 key={idx}
-                style={{ borderBottom: '1px solid #1e2530' }}
+                style={{ borderBottom: '1px solid rgba(148,186,215,0.06)' }}
               >
                 {columns.map((col) => (
                   <td
                     key={col.key}
                     style={{
-                      padding: '3px 6px',
+                      padding: '4px 8px',
                       textAlign: col.align || 'left',
-                      color: '#cbd5e1',
+                      color: '#e6f1fa',
                       whiteSpace: 'nowrap',
                       overflow: 'hidden',
                       textOverflow: 'ellipsis',

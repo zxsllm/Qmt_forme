@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
-import { Layout, Menu } from 'antd';
+import { Menu } from 'antd';
 import {
   LineChartOutlined,
   FundOutlined,
@@ -11,8 +11,6 @@ import {
   DashboardOutlined,
 } from '@ant-design/icons';
 import SidebarNews from '../components/SidebarNews';
-
-const { Sider } = Layout;
 
 const menuItems = [
   { key: '/', icon: <DashboardOutlined />, label: '控制台' },
@@ -31,50 +29,51 @@ export default function MainLayout() {
   const location = useLocation();
 
   return (
-    <div className="flex h-full bg-bg-base">
-      <Sider
-        collapsible
-        collapsed={collapsed}
-        onCollapse={setCollapsed}
-        theme="dark"
-        width={180}
-        collapsedWidth={56}
-        trigger={null}
+    <div className="flex h-full">
+      <div
         style={{
-          background: 'var(--color-bg-base)',
-          borderRight: '1px solid var(--color-edge)',
+          width: collapsed ? 56 : 200,
+          flexShrink: 0,
           display: 'flex',
           flexDirection: 'column',
+          background: 'linear-gradient(180deg, rgba(16,34,49,0.92), rgba(7,17,26,0.96))',
+          borderRight: '1px solid rgba(148,186,215,0.12)',
+          backdropFilter: 'blur(10px)',
+          transition: 'width 200ms ease',
         }}
       >
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-          <div
-            className="flex items-center gap-2 cursor-pointer border-b border-edge"
-            style={{ padding: '12px 20px', flexShrink: 0 }}
-            onClick={() => setCollapsed(!collapsed)}
-          >
-            <span className="text-accent font-bold text-[16px]">
-              {collapsed ? 'AT' : 'AI Trade'}
-            </span>
-            {!collapsed && <span className="text-t4 text-[11px] ml-auto">v0.2</span>}
-          </div>
-
-          <Menu
-            theme="dark"
-            mode="inline"
-            selectedKeys={[location.pathname]}
-            items={menuItems}
-            onClick={({ key }) => navigate(key)}
-            style={{ background: 'transparent', borderRight: 'none', flexShrink: 0 }}
-          />
-
+        <div
+          className="flex items-center gap-2 cursor-pointer shrink-0"
+          style={{
+            padding: collapsed ? '14px 16px' : '14px 20px',
+            borderBottom: '1px solid rgba(148,186,215,0.10)',
+          }}
+          onClick={() => setCollapsed(!collapsed)}
+        >
+          <span style={{ color: '#6bc7ff', fontWeight: 700, fontSize: 16 }}>
+            {collapsed ? 'AT' : 'AI Trade'}
+          </span>
           {!collapsed && (
-            <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
-              <SidebarNews />
-            </div>
+            <span style={{ color: '#334155', fontSize: 11, marginLeft: 'auto' }}>v0.2</span>
           )}
         </div>
-      </Sider>
+
+        <Menu
+          theme="dark"
+          mode="inline"
+          selectedKeys={[location.pathname]}
+          items={menuItems}
+          onClick={({ key }) => navigate(key)}
+          inlineCollapsed={collapsed}
+          style={{ background: 'transparent', borderRight: 'none', flexShrink: 0, padding: '6px 0' }}
+        />
+
+        {!collapsed && (
+          <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+            <SidebarNews />
+          </div>
+        )}
+      </div>
 
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <Outlet />

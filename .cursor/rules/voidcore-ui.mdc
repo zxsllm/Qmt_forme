@@ -1,0 +1,118 @@
+---
+description: VoidCore 深空玻璃拟态 UI 风格规范，修改前端组件时必须遵循
+globs: frontend/src/**/*.{tsx,css}
+alwaysApply: false
+---
+
+# VoidCore UI 风格规范
+
+修改前端 UI 时，必须遵循以下设计语言，保持整体呼吸感与深空玻璃拟态一致性。
+
+## 色板
+
+| 变量 | 色值 | 用途 |
+|------|------|------|
+| `--bg-deep` | `#07111a` | 最深底色 |
+| `--bg-mid` | `#102231` | 中层面板底色 |
+| `--bg-soft` | `rgba(16,34,49,0.78)` | 柔和背景 |
+| `--line-soft` | `rgba(148,186,215,0.18)` | 卡片/面板边框 |
+| `--line-strong` | `rgba(121,200,246,0.42)` | 聚焦/选中边框 |
+| `--text-main` | `#e6f1fa` | 主文本 |
+| `--text-soft` | `#93a9bc` | 辅助文本/标签 |
+| `--blue` | `#6bc7ff` | 信息/主操作 |
+| `--purple` | `#b48cff` | 进阶/次级 |
+| `--orange` | `#ffbf75` | 警告/高亮 |
+| `--red` | `#ff6f91` | 错误/危险 |
+| `--special` | `#7ce1f2` | 特殊高亮/青色 |
+
+## 玻璃面板 (glass-panel)
+
+所有卡片/面板的基底样式：
+
+```css
+background: linear-gradient(180deg, rgba(23,42,59,0.88), rgba(8,17,25,0.92));
+border: 1px solid var(--line-soft);
+box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 18px 48px rgba(0,0,0,0.34);
+backdrop-filter: blur(10px);
+border-radius: 22px;
+padding: 18px;
+```
+
+## 圆角体系
+
+- 大面板/Hero: `24px`
+- 卡片/Section: `22px`
+- 子卡片/Slot: `18px`
+- 按钮/弹窗: `14px`
+- 输入框: `14px`
+- Tooltip: `12px`
+- 胶囊/Badge: `999px`
+
+## 按钮
+
+```css
+border: 0; border-radius: 14px; padding: 10px 14px;
+font-size: 13px; font-weight: 600; color: #f3fbff;
+transition: transform 120ms ease, opacity 120ms ease;
+```
+
+- 主按钮: `background: linear-gradient(135deg, #2481bd, #3b61d6)`
+- 次要按钮: `background: linear-gradient(135deg, #2f4354, #22303b)`
+- 警告按钮: `background: linear-gradient(135deg, #99502c, #b54f61)`
+- Hover: `transform: translateY(-1px)`
+- Disabled: `opacity: 0.5; cursor: not-allowed`
+
+## 输入框
+
+```css
+border-radius: 14px;
+border: 1px solid rgba(255,255,255,0.1);
+background: rgba(6,14,22,0.82);
+color: var(--text-main);
+padding: 10px 12px; font-size: 13px;
+```
+
+聚焦态: `border-color: rgba(121,200,246,0.46); box-shadow: 0 0 0 3px rgba(56,132,180,0.16)`
+
+## 间距与呼吸感
+
+- 面板内 padding: `18px`
+- 面板间 gap: `18px`
+- 子元素间 gap: `10~12px`
+- Section title margin-bottom: `14px`
+- 内容紧凑时最小 gap: `6px`
+
+## 排版
+
+- Section 标题: `14px / 700 / letter-spacing 0.04em / color #d7efff`
+- 辅助标签 (tiny-label): `11px / uppercase / letter-spacing 0.04em / color var(--text-soft)`
+- 辅助说明 (helper-note): `12px / line-height 1.6 / color var(--text-soft)`
+- 正文: `13px / color var(--text-main)`
+- 日志列表项: `12px / line-height 1.55 / color #d7e5f2`
+
+## 交互卡片
+
+可点击卡片的三态：
+
+```css
+/* 默认 */
+border: 1px solid rgba(255,255,255,0.08);
+background: rgba(255,255,255,0.03);
+
+/* Hover */
+transform: translateY(-1px);
+border-color: rgba(150,217,255,0.24);
+background: rgba(255,255,255,0.05);
+
+/* 选中 */
+border-color: rgba(121,200,246,0.62);
+background: rgba(32,74,103,0.48);
+```
+
+## 禁止
+
+- 禁止使用纯白背景或高饱和纯色块
+- 禁止使用 `border-radius < 10px` 的面板（按钮/badge 除外）
+- 禁止去掉 `backdrop-filter: blur` 或 `inset box-shadow` 呼吸层
+- 禁止使用 `> 1px` 的边框宽度（除选中/锁定状态）
+- 所有 `transition` 必须 `120ms ease`，不使用 `linear` 或 `> 200ms` 的时长

@@ -12,26 +12,26 @@ export default function RiskPage() {
   });
 
   return (
-    <div className="flex flex-col h-full bg-bg-base" style={{ padding: 16, gap: 10 }}>
-      <div className="flex" style={{ gap: 10, minHeight: 240 }}>
+    <div className="flex flex-col h-full" style={{ padding: 18, gap: 12 }}>
+      <div className="flex" style={{ gap: 12, minHeight: 240 }}>
         <RiskPanel className="flex-1" />
         <Panel title="行情调度器" className="w-80">
-          <div className="text-[12px]" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 12 }}>
             <div className="flex justify-between">
-              <span className="text-t3">状态</span>
-              <span className={feed?.running ? 'text-green-400' : 'text-t4'}>
+              <span style={{ color: '#93a9bc' }}>状态</span>
+              <span style={{ color: feed?.running ? '#4ade80' : '#334155' }}>
                 {feed?.running ? '运行中' : '已停止'}
               </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-t3">交易时段</span>
-              <span className={feed?.trading_time ? 'text-green-400' : 'text-t4'}>
+              <span style={{ color: '#93a9bc' }}>交易时段</span>
+              <span style={{ color: feed?.trading_time ? '#4ade80' : '#334155' }}>
                 {feed?.trading_time ? '是' : '否'}
               </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-t3">监控股票</span>
-              <span className="text-t1">{feed?.watch_codes ?? 0} 只</span>
+              <span style={{ color: '#93a9bc' }}>监控股票</span>
+              <span style={{ color: '#e6f1fa' }}>{feed?.watch_codes ?? 0} 只</span>
             </div>
           </div>
         </Panel>

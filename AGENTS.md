@@ -27,7 +27,7 @@
 - [x] **Phase 4.5** (5 Steps): 手动交易UI(下单Modal/平仓/改单/K线快捷下单/账户重置) + MarketDataScheduler(实时行情调度) + StrategyRunner(策略实时执行) + 假数据替换(StrategyPanel/LogPanel对接API) + 路由实体化(5个独立页面)
 - [x] **Phase 4.6** (4 Steps): OMS状态持久化(DB写回+重启恢复) + 启动自检(数据时效+增量更新+OMS恢复) + 盘中自动化(scheduler自启+交易日历+watch_codes) + 收盘结算(end_day+日终数据同步)
 - [x] **Phase 4.7**: 模拟盘A股市场规则合规 — T+1交割(available_qty) + 涨停不买/跌停不卖/一字板拦截(SimMatcher) + 限价单涨跌停校验(api) + 整手100股校验 + 价格tick 0.01校验 + 涨跌停限价缓存(每日自动加载)
-- [x] **P2-Plus**: 资讯仪表盘 — Dashboard重做(K线+排行榜+新闻公告) + K线多周期(分时/日/周/月) + 7个排行榜面板(板块涨跌/股票涨跌/换手率/主力净流入/全球指数) + Sidebar新闻快讯(盘中5分钟自动刷新) + 个股新闻(按股票名称匹配)/公告面板 + 新Tushare API(moneyflow_dc/major_news/anns_d/concept等) + 新DB表5个 + 性能索引4个 + 同步脚本3个 + 分钟数据清理脚本
+- [x] **P2-Plus**: 资讯仪表盘 — Dashboard重做(K线+排行榜+新闻公告) + K线多周期(分时/日/周/月) + 7个排行榜面板(板块涨跌/股票涨跌/换手率/主力净流入/全球指数) + Sidebar新闻快讯(6源5秒轮询+WS推送+3天清理+来源标注) + 个股新闻(按股票名称匹配)/公告/互动问答面板 + 拼音首字母搜索 + 新Tushare API(moneyflow_dc/news/anns_d/concept/irm_qa_sh/irm_qa_sz等) + 新DB表5个 + 性能索引4个 + 同步脚本3个 + 分钟数据清理脚本
 - [x] **P2-Plus-Opt**: 性能优化 & 数据增强 — TushareService全部方法补fields参数(减少网络传输) + 8个脚本补try-except错误处理(失败不中断后续) + news/anns批量INSERT(execute_values替代逐行) + scheduler新闻DRY重构(复用pull_news.fetch_latest_news) + 新增3个API(stock_st/adj_factor/sw_daily) + stock_st动态ST风控(替代名称静态匹配) + adj_factor前复权支持(DataLoader.daily_qfq) + sw_daily板块排行升级(真实申万行业指数替代AVG近似)
 
 ## 数据统计
@@ -80,6 +80,7 @@ backend/
         base.py             -- DeclarativeBase
         stock.py            -- 所有ORM (StockBasic~ConceptDetail+StockST+AdjFactor+SwDaily, 共22个表)
       data/data_loader.py   -- DataLoader (异步, 含排行榜/板块/资金流/新闻/周线/月线/ST查询/复权/前复权日线)
+      data/pinyin_cache.py  -- 拼音首字母搜索缓存 (5400+股票内存映射, lazy-load)
     research/
       data/tushare_service.py -- TushareService (频次控制+重试+fields优化, 含stock_st/adj_factor/sw_daily/rt_k/stk_mins等22个封装方法)
       indicators/            -- MA/EMA/WMA/MACD/RSI/KDJ/BOLL
@@ -100,7 +101,7 @@ backend/
       matcher.py            -- 模拟撮合引擎 (含涨跌停/一字板A股规则校验)
       oms/                  -- 订单状态机 + 持仓账本 + 资金账本
       risk/                 -- 下单前风控 + 盘中风控 + Kill Switch
-      feed/                 -- MarketFeed + WSManager + scheduler.py (rt_k实时行情1.2s轮询 + 新闻5分钟自动刷新)
+      feed/                 -- MarketFeed + WSManager + scheduler.py (rt_k实时行情1.2s轮询 + 新闻6源5秒轮询+WS推送+3天清理)
       observability/        -- 心跳 + 审计日志 + 每日摘要
   alembic/                  -- 迁移 (仅管常规表)
 
@@ -131,8 +132,8 @@ frontend/                   -- React 19 + TypeScript + Vite + Storybook
     pages/StrategyPage.tsx  -- 策略管理页 (配置/启停)
     components/
       KlineChart.tsx        -- K线图表 (支持分时/日K/周K/月K)
-      SidebarNews.tsx       -- 左侧Sidebar新闻快讯滚动区 (P2-Plus)
-      StockNewsPanel.tsx    -- 个股新闻/公司公告Tabs (P2-Plus)
+      SidebarNews.tsx       -- 左侧Sidebar新闻快讯滚动区 (P2-Plus, 点击查看全文Modal)
+      StockNewsPanel.tsx    -- 个股新闻/公司公告/互动问答Tabs (P2-Plus)
       rankings/             -- 7个排行榜面板 (P2-Plus)
         RankTable.tsx       -- 排行榜通用基础表格组件
         SectorGainPanel.tsx -- 板块涨幅榜
@@ -146,6 +147,7 @@ frontend/                   -- React 19 + TypeScript + Vite + Storybook
       OrderTable.tsx, RiskPanel.tsx, StrategyPanel.tsx, LogPanel.tsx 等
     layouts/MainLayout.tsx  -- Sidebar导航 + SidebarNews新闻区
     services/api.ts         -- 后端API调用 (含P2-Plus 10个新API) + useMarketFeed WebSocket
+    services/useMarketFeed.ts -- WS hook (行情+新闻推送双通道)
 ```
 
 ## 已有API端点
@@ -153,13 +155,14 @@ frontend/                   -- React 19 + TypeScript + Vite + Storybook
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/health` | 健康检查 |
-| GET | `/api/v1/stock/search?q=` | 股票搜索(自动补全) |
+| GET | `/api/v1/stock/search?q=` | 股票搜索(代码/名称/拼音首字母) |
 | GET | `/api/v1/stock/{ts_code}/daily` | 个股日线+基本面 |
 | GET | `/api/v1/stock/{ts_code}/weekly` | 个股周K线 (P2-Plus) |
 | GET | `/api/v1/stock/{ts_code}/monthly` | 个股月K线 (P2-Plus) |
 | GET | `/api/v1/stock/{ts_code}/minutes` | 个股分钟K线 (P2-Plus) |
 | GET | `/api/v1/stock/{ts_code}/news` | 个股新闻 (P2-Plus) |
 | GET | `/api/v1/stock/{ts_code}/anns` | 公司公告 (P2-Plus) |
+| GET | `/api/v1/stock/{ts_code}/irm_qa` | 互动问答 (irm_qa_sh/irm_qa_sz) |
 | GET | `/api/v1/market/snapshot/{trade_date}` | 全市场截面 |
 | GET | `/api/v1/market/rankings` | 涨幅/跌幅/换手率排行 (P2-Plus) |
 | GET | `/api/v1/sector/rankings` | 板块涨跌幅排行 (P2-Plus) |
@@ -231,21 +234,24 @@ frontend/                   -- React 19 + TypeScript + Vite + Storybook
 | Dashboard=信息决策中心 | P2-Plus: 交易组件各自路由已有, Dashboard改为K线+排行榜+新闻 |
 | 分钟数据6个月清理 | cleanup_minutes.py 自动DROP超期分区, 节省~67GB/年 |
 | 已接入所有Tushare权限 | moneyflow_dc/major_news/anns_d/concept/index_global等全量API |
-| 新闻盘中5分钟刷新 | scheduler._pull_news_sync() 复用pull_news.fetch_latest_news, 5分钟一次 |
+| 新闻9源轮询+WS推送 | 9个来源(sina/cls/eastmoney/wallstreetcn/10jqka/yuncaijing/fenghuang/jinrongjie/yicai)每5s轮询一个→Redis pub/sub→WS推送→前端自动刷新+来源彩色标签, 全天候, 3天清理, 去重 |
 | TushareService全量fields | 所有API默认只拉需要的字段, 减少传输量+解析开销 |
 | 批量INSERT(execute_values) | pull_news/pull_anns从逐行INSERT改为批量, 性能提升10-50x |
 | stock_st动态ST风控 | 按交易日查DB替代静态名称匹配, 支持ST摘帽/戴帽时间线 |
 | adj_factor前复权 | DataLoader.daily_qfq()按最新因子前复权, 回测更准确 |
 | sw_daily板块排行 | 直接查申万行业指数替代AVG(pct_chg)近似, 数据权威 |
 | 脚本全面try-except | 单日/单项API失败不中断整体sync流程, 记录failed列表 |
+| pypinyin内存缓存 | 5400+股票拼音首字母lazy-load, 支持YTLF→云天励飞式搜索 |
+| irm_qa直接查Tushare | 互动问答不入库, 按SH/SZ自动路由irm_qa_sh/irm_qa_sz |
+| 新闻WS推送 | scheduler拉新闻后Redis publish→WS bridge→前端invalidateQueries |
 
 ## 已知限制
 
 - `stock_min_kline` 在 Alembic 迁移链之外，schema变更需手动SQL
 - API返回的DataFrame中有NaN值，`main.py` 里用 `_df_to_records()` 处理
 - klinecharts 为 Canvas 渲染，不支持 CSS 变量，颜色硬编码在 `COLORS` 常量
-- moneyflow_dc/stock_news/stock_anns/stock_st/adj_factor/sw_daily 表初始为空，首次需运行 `daily_sync.py` 或单独脚本拉取数据；之后盘中新闻每5分钟自动刷新，收盘后 daily_sync 全量同步
-- Tushare 实际 API 名称: 新闻=`major_news`（非`news`），公告=`anns_d`（非`anns`）
+- moneyflow_dc/stock_news/stock_anns/stock_st/adj_factor/sw_daily 表初始为空，首次需运行 `daily_sync.py` 或单独脚本拉取数据；之后新闻每5秒自动刷新+WS推送(全天候), 超3天自动清理, 收盘后 daily_sync 全量同步
+- Tushare API 名称: 新闻=`news`（参考文档接口名），公告=`anns_d`（非`anns`）
 - 个股新闻查询用股票名称+代码数字在 content 中 ILIKE 匹配（Tushare major_news 不按个股分类）
 - stock_daily/daily_basic 有 trade_date 索引（手动创建，不在 Alembic 内）
 

@@ -24,7 +24,7 @@ todos:
     content: "Phase 2a (P2-Core): 交易控制台 (K线/持仓/风控/策略开关)"
     status: completed
   - id: phase2-plus
-    content: "Phase 2b (P2-Plus): 资讯仪表盘 — Dashboard重做(K线多周期+7排行榜+新闻公告) + Sidebar新闻 + 新Tushare API 7个 + DB表5个 + 同步脚本3个 + 盘中新闻5分钟自动刷新"
+    content: "Phase 2b (P2-Plus): 资讯仪表盘 — Dashboard重做(K线多周期+7排行榜+新闻公告) + Sidebar新闻(6源5秒轮询+WS推送+3天清理+来源标注) + 拼音搜索+互动问答 + 新Tushare API 9个 + DB表5个 + 同步脚本3个"
     status: completed
   - id: phase3-realtime-sim
     content: "Phase 3: 实时数据流 + 模拟交易引擎 (10 Steps all done)"

@@ -12,6 +12,14 @@ interface PanelProps {
   style?: CSSProperties;
 }
 
+const GLASS: CSSProperties = {
+  background: 'linear-gradient(180deg, rgba(23,42,59,0.88), rgba(8,17,25,0.92))',
+  border: '1px solid rgba(148,186,215,0.18)',
+  boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04), 0 18px 48px rgba(0,0,0,0.34)',
+  backdropFilter: 'blur(10px)',
+  borderRadius: 18,
+};
+
 export default function Panel({
   title,
   extra,
@@ -19,31 +27,36 @@ export default function Panel({
   className = '',
   bodyClass = '',
   noPadding = false,
-  secondary = false,
   borderless = false,
   style,
 }: PanelProps) {
-  const border = borderless
-    ? 'border-transparent'
-    : 'border-[rgba(255,255,255,0.035)]';
+  const merged: CSSProperties = {
+    ...GLASS,
+    ...(borderless ? { border: 'none', boxShadow: 'none' } : {}),
+    ...style,
+  };
 
   return (
     <div
-      className={`bg-bg-panel border rounded-panel flex flex-col overflow-hidden ${border} ${className}`}
-      style={style}
+      className={`flex flex-col overflow-hidden ${className}`}
+      style={merged}
     >
       {title && (
         <div
           className="flex items-center justify-between shrink-0"
           style={{
-            height: 36,
-            padding: '0 16px',
-            borderBottom: '1px solid rgba(255,255,255,0.05)',
+            height: 40,
+            padding: '0 18px',
+            borderBottom: '1px solid rgba(148,186,215,0.12)',
           }}
         >
           <span
-            className="text-t2 tracking-wide"
-            style={{ fontSize: secondary ? 11 : 12, fontWeight: secondary ? 400 : 500 }}
+            style={{
+              fontSize: 13,
+              fontWeight: 600,
+              letterSpacing: '0.04em',
+              color: '#d7efff',
+            }}
           >
             {title}
           </span>
@@ -52,7 +65,7 @@ export default function Panel({
       )}
       <div
         className={`flex-1 min-h-0 overflow-auto ${bodyClass}`}
-        style={noPadding ? undefined : { padding: '12px 16px' }}
+        style={noPadding ? undefined : { padding: '14px 18px' }}
       >
         {children}
       </div>

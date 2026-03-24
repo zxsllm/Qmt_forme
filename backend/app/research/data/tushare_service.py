@@ -155,14 +155,22 @@ class TushareService:
     # ── 资讯 ─────────────────────────────────────────────────
 
     def news(self, **kwargs) -> pd.DataFrame:
-        kwargs.setdefault("fields", "datetime,content,title,channels,src")
-        return self.query("major_news", **kwargs)
+        kwargs.setdefault("fields", "datetime,content,title,channels")
+        return self.query("news", **kwargs)
 
     def anns(self, **kwargs) -> pd.DataFrame:
         kwargs.setdefault("fields", "ts_code,ann_date,name,title,url")
         return self.query("anns_d", **kwargs)
 
     # ── 概念板块 ─────────────────────────────────────────────
+
+    def irm_qa_sh(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault("fields", "ts_code,name,trade_date,q,a,pub_time")
+        return self.query("irm_qa_sh", **kwargs)
+
+    def irm_qa_sz(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault("fields", "ts_code,name,trade_date,q,a,pub_time,industry")
+        return self.query("irm_qa_sz", **kwargs)
 
     def concept(self, **kwargs) -> pd.DataFrame:
         kwargs.setdefault("fields", "code,name,src")

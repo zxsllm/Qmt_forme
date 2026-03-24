@@ -21,11 +21,11 @@ export default function App() {
       theme={{
         algorithm: theme.darkAlgorithm,
         token: {
-          colorBgContainer: '#151b23',
-          colorBgElevated: '#1e2530',
-          colorBorder: '#1e2530',
-          colorPrimary: '#3b82f6',
-          borderRadius: 6,
+          colorBgContainer: '#0e1c29',
+          colorBgElevated: '#102231',
+          colorBorder: 'rgba(148,186,215,0.18)',
+          colorPrimary: '#6bc7ff',
+          borderRadius: 14,
         },
       }}
     >

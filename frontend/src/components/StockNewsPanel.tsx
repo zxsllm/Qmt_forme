@@ -1,6 +1,7 @@
-import { Tabs, Empty } from 'antd';
+import { useState, type CSSProperties } from 'react';
+import { Tabs, Empty, Modal } from 'antd';
 import { useQuery } from '@tanstack/react-query';
-import { api } from '../services/api';
+import { api, type IrmQaItem } from '../services/api';
 
 interface Props {
   tsCode: string;
@@ -22,32 +23,50 @@ export default function StockNewsPanel({ tsCode, height = 160 }: Props) {
     refetchInterval: 120_000,
   });
 
+  const exchange = tsCode.split('.')[1]?.toUpperCase() ?? '';
+  const { data: irmData } = useQuery({
+    queryKey: ['stock-irm-qa', tsCode],
+    queryFn: () => api.stockIrmQa(tsCode),
+    enabled: !!tsCode && (exchange === 'SH' || exchange === 'SZ'),
+    staleTime: 5 * 60_000,
+  });
+
   const newsItems = newsData?.data ?? [];
   const annsItems = annsData?.data ?? [];
+  const irmItems: IrmQaItem[] = irmData?.data ?? [];
 
-  const listStyle: React.CSSProperties = {
+  const [selectedQa, setSelectedQa] = useState<IrmQaItem | null>(null);
+
+  const listStyle: CSSProperties = {
     overflowY: 'auto',
     height: height - 40,
-    padding: '0 8px',
+    padding: '4px 12px',
   };
 
-  const rowStyle: React.CSSProperties = {
+  const rowStyle: CSSProperties = {
     fontSize: 12,
     lineHeight: '22px',
-    color: '#cbd5e1',
-    borderBottom: '1px solid #1e2530',
-    padding: '3px 0',
+    color: '#93a9bc',
+    borderBottom: '1px solid rgba(148,186,215,0.08)',
+    padding: '4px 6px',
     whiteSpace: 'nowrap',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
   };
 
+  const dateStyle: CSSProperties = {
+    color: '#556677',
+    marginRight: 6,
+    fontSize: 11,
+  };
+
   return (
-    <div style={{ height, borderTop: '1px solid #1e2530' }}>
+    <div style={{ height, borderTop: '1px solid rgba(148,186,215,0.12)', padding: '0 14px' }}>
       <Tabs
         size="small"
         defaultActiveKey="news"
         style={{ height: '100%' }}
+        tabBarStyle={{ marginBottom: 4 }}
         items={[
           {
             key: 'news',
@@ -59,7 +78,7 @@ export default function StockNewsPanel({ tsCode, height = 160 }: Props) {
                 ) : (
                   newsItems.map((n) => (
                     <div key={n.id} style={rowStyle} title={n.content}>
-                      <span style={{ color: '#64748b', marginRight: 6 }}>
+                      <span style={dateStyle}>
                         {n.datetime?.slice(0, 10)}
                       </span>
                       {n.content?.slice(0, 60)}
@@ -79,7 +98,7 @@ export default function StockNewsPanel({ tsCode, height = 160 }: Props) {
                 ) : (
                   annsItems.map((a) => (
                     <div key={a.id} style={rowStyle} title={a.title}>
-                      <span style={{ color: '#64748b', marginRight: 6 }}>
+                      <span style={dateStyle}>
                         {a.ann_date}
                       </span>
                       {a.url ? (
@@ -87,7 +106,7 @@ export default function StockNewsPanel({ tsCode, height = 160 }: Props) {
                           href={a.url}
                           target="_blank"
                           rel="noreferrer"
-                          style={{ color: '#60a5fa' }}
+                          style={{ color: '#6bc7ff' }}
                         >
                           {a.title?.slice(0, 50)}
                         </a>
@@ -100,8 +119,88 @@ export default function StockNewsPanel({ tsCode, height = 160 }: Props) {
               </div>
             ),
           },
+          {
+            key: 'irm',
+            label: '互动问答',
+            children: (
+              <div style={listStyle}>
+                {irmItems.length === 0 ? (
+                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无问答" />
+                ) : (
+                  irmItems.map((item, idx) => (
+                    <div
+                      key={`${item.ts_code}-${item.pub_time}-${idx}`}
+                      style={{
+                        ...rowStyle,
+                        cursor: 'pointer',
+                        whiteSpace: 'nowrap',
+                      }}
+                      title={`Q: ${item.q}\nA: ${item.a}`}
+                      onClick={() => setSelectedQa(item)}
+                      onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.color = '#e6f1fa'; }}
+                      onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.color = '#93a9bc'; }}
+                    >
+                      <span style={dateStyle}>
+                        {item.pub_time?.slice(0, 10) || item.trade_date}
+                      </span>
+                      Q: {item.q?.slice(0, 50)}
+                    </div>
+                  ))
+                )}
+              </div>
+            ),
+          },
         ]}
       />
+
+      <Modal
+        open={!!selectedQa}
+        onCancel={() => setSelectedQa(null)}
+        footer={null}
+        title={
+          <span style={{ color: '#d7efff', fontSize: 14 }}>
+            {selectedQa?.name} 互动问答
+          </span>
+        }
+        width={600}
+        styles={{
+          content: {
+            background: 'linear-gradient(180deg, rgba(23,42,59,0.96), rgba(8,17,25,0.98))',
+            border: '1px solid rgba(148,186,215,0.18)',
+            borderRadius: 22,
+          },
+          header: {
+            background: 'transparent',
+            borderBottom: '1px solid rgba(148,186,215,0.12)',
+          },
+        }}
+      >
+        {selectedQa && (
+          <div style={{ color: '#e6f1fa', fontSize: 13, lineHeight: 1.8 }}>
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 11, color: '#6bc7ff', fontWeight: 600, marginBottom: 4 }}>
+                提问
+              </div>
+              <div style={{ whiteSpace: 'pre-wrap' }}>{selectedQa.q}</div>
+            </div>
+            <div style={{
+              padding: '12px 14px',
+              background: 'rgba(255,255,255,0.03)',
+              borderRadius: 14,
+              border: '1px solid rgba(148,186,215,0.10)',
+            }}>
+              <div style={{ fontSize: 11, color: '#b48cff', fontWeight: 600, marginBottom: 4 }}>
+                回复
+              </div>
+              <div style={{ whiteSpace: 'pre-wrap' }}>{selectedQa.a}</div>
+            </div>
+            <div style={{ marginTop: 10, fontSize: 11, color: '#556677', display: 'flex', gap: 16 }}>
+              <span>回复时间: {selectedQa.pub_time || selectedQa.trade_date}</span>
+              {selectedQa.industry && <span>行业: {selectedQa.industry}</span>}
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

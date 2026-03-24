@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Button, Card, Switch, Tag, Space, InputNumber, Input, Modal, Form, message } from 'antd';
+import { Button, Switch, Tag, Space, InputNumber, Input, Modal, Form, message } from 'antd';
 import { PlayCircleOutlined, PauseCircleOutlined } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
@@ -62,28 +62,34 @@ export default function StrategyPage() {
   };
 
   return (
-    <div className="flex flex-col h-full bg-bg-base" style={{ padding: 16, gap: 10 }}>
+    <div className="flex flex-col h-full" style={{ padding: 18, gap: 12 }}>
       <Panel title="策略管理" className="flex-1">
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14 }}>
           {AVAILABLE.map((s) => {
             const running = runningMap.get(s.name);
             return (
-              <Card
+              <div
                 key={s.name}
-                size="small"
-                style={{ width: 320, background: 'var(--color-bg-panel)', border: '1px solid var(--color-edge)' }}
+                style={{
+                  width: 340,
+                  padding: 18,
+                  background: 'rgba(255,255,255,0.03)',
+                  border: '1px solid rgba(148,186,215,0.14)',
+                  borderRadius: 18,
+                  transition: 'border-color 120ms ease, background 120ms ease',
+                }}
               >
-                <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
-                  <span className="text-t1 font-medium text-[13px]">{s.label}</span>
+                <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
+                  <span style={{ color: '#e6f1fa', fontWeight: 600, fontSize: 14 }}>{s.label}</span>
                   {running ? (
                     <Tag color="green">运行中</Tag>
                   ) : (
                     <Tag color="default">已停止</Tag>
                   )}
                 </div>
-                <div className="text-t3 text-[12px]" style={{ marginBottom: 12 }}>{s.desc}</div>
+                <div style={{ color: '#93a9bc', fontSize: 12, marginBottom: 14 }}>{s.desc}</div>
                 {running && (
-                  <div className="text-[11px] text-t3" style={{ marginBottom: 8 }}>
+                  <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>
                     信号: {running.signals_today} 今日 / {running.total_signals} 总计
                     · {running.total_codes} 只股票
                   </div>
@@ -114,7 +120,7 @@ export default function StrategyPage() {
                     </Button>
                   )}
                 </Space>
-              </Card>
+              </div>
             );
           })}
         </div>

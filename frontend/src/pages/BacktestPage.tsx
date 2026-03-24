@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import {
-  Button, Card, Form, Input, InputNumber, Select, Table, Spin, message, Statistic, Row, Col, Tag
+  Button, Form, Input, InputNumber, Select, Table, Spin, message, Tag,
 } from 'antd';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { api, type BacktestRunResult, type BacktestStats, type TradeRecord } from '../services/api';
+import Panel from '../components/Panel';
 
 const formatPct = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
 const formatNum = (v: number) => v.toFixed(2);
@@ -41,8 +42,8 @@ export default function BacktestPage() {
   };
 
   return (
-    <div className="flex flex-col gap-[var(--spacing-panel)] h-full overflow-auto">
-      <Card size="small" className="shrink-0" styles={{ body: { padding: '12px 16px' } }}>
+    <div className="flex flex-col h-full overflow-auto" style={{ padding: 18, gap: 12 }}>
+      <Panel className="shrink-0">
         <Form layout="inline" onFinish={onFinish} initialValues={{
           strategy_name: 'ma_crossover',
           start_date: '20260101',
@@ -76,7 +77,7 @@ export default function BacktestPage() {
             </Button>
           </Form.Item>
         </Form>
-      </Card>
+      </Panel>
 
       {mutation.isPending && (
         <div className="flex items-center justify-center py-12">
@@ -102,9 +103,9 @@ function ResultPanel({ result }: { result: BacktestRunResult }) {
 
 function StatsCards({ stats }: { stats: BacktestStats }) {
   const items: { label: string; value: string; color?: string }[] = [
-    { label: '总收益', value: formatPct(stats.total_return), color: stats.total_return >= 0 ? 'var(--color-up)' : 'var(--color-down)' },
-    { label: '年化收益', value: formatPct(stats.annual_return), color: stats.annual_return >= 0 ? 'var(--color-up)' : 'var(--color-down)' },
-    { label: '最大回撤', value: formatPct(stats.max_drawdown), color: 'var(--color-down)' },
+    { label: '总收益', value: formatPct(stats.total_return), color: stats.total_return >= 0 ? '#ff6f91' : '#4ade80' },
+    { label: '年化收益', value: formatPct(stats.annual_return), color: stats.annual_return >= 0 ? '#ff6f91' : '#4ade80' },
+    { label: '最大回撤', value: formatPct(stats.max_drawdown), color: '#4ade80' },
     { label: '夏普比率', value: formatNum(stats.sharpe_ratio) },
     { label: '索提诺', value: formatNum(stats.sortino_ratio) },
     { label: '胜率', value: formatPct(stats.win_rate) },
@@ -115,19 +116,27 @@ function StatsCards({ stats }: { stats: BacktestStats }) {
   ];
 
   return (
-    <Row gutter={[8, 8]}>
+    <div className="grid grid-cols-5" style={{ gap: 10 }}>
       {items.map(item => (
-        <Col key={item.label} span={Math.floor(24 / Math.min(items.length, 5))}>
-          <Card size="small" styles={{ body: { padding: '8px 12px', textAlign: 'center' } }}>
-            <Statistic
-              title={<span className="text-t3 text-xs">{item.label}</span>}
-              value={item.value}
-              valueStyle={{ fontSize: 16, color: item.color || 'var(--color-t1)' }}
-            />
-          </Card>
-        </Col>
+        <div
+          key={item.label}
+          style={{
+            padding: '10px 14px',
+            textAlign: 'center',
+            background: 'rgba(255,255,255,0.03)',
+            border: '1px solid rgba(148,186,215,0.12)',
+            borderRadius: 16,
+          }}
+        >
+          <div style={{ fontSize: 11, color: '#93a9bc', marginBottom: 4, letterSpacing: '0.04em' }}>
+            {item.label}
+          </div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: item.color || '#e6f1fa' }}>
+            {item.value}
+          </div>
+        </div>
       ))}
-    </Row>
+    </div>
   );
 }
 
@@ -140,7 +149,7 @@ function EquityCurveTable({ equity }: { equity: BacktestRunResult['equity_curve'
     {
       title: '日收益', dataIndex: 'daily_return', key: 'daily_return', width: 90,
       render: (v: number) => (
-        <span style={{ color: v >= 0 ? 'var(--color-up)' : 'var(--color-down)' }}>
+        <span style={{ color: v >= 0 ? '#ff6f91' : '#4ade80' }}>
           {(v * 100).toFixed(2)}%
         </span>
       ),
@@ -148,7 +157,7 @@ function EquityCurveTable({ equity }: { equity: BacktestRunResult['equity_curve'
   ];
 
   return (
-    <Card size="small" title="权益曲线" styles={{ body: { padding: 0 } }}>
+    <Panel title="权益曲线" noPadding>
       <Table
         dataSource={equity}
         columns={columns}
@@ -157,7 +166,7 @@ function EquityCurveTable({ equity }: { equity: BacktestRunResult['equity_curve'
         pagination={{ pageSize: 15, size: 'small' }}
         scroll={{ y: 300 }}
       />
-    </Card>
+    </Panel>
   );
 }
 
@@ -178,7 +187,7 @@ function TradesTable({ trades }: { trades: TradeRecord[] }) {
   ];
 
   return (
-    <Card size="small" title={`交易明细 (${trades.length}笔)`} styles={{ body: { padding: 0 } }}>
+    <Panel title={`交易明细 (${trades.length}笔)`} noPadding>
       <Table
         dataSource={trades}
         columns={columns}
@@ -187,6 +196,6 @@ function TradesTable({ trades }: { trades: TradeRecord[] }) {
         pagination={{ pageSize: 15, size: 'small' }}
         scroll={{ y: 300 }}
       />
-    </Card>
+    </Panel>
   );
 }

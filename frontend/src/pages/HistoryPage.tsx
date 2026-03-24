@@ -52,11 +52,11 @@ export default function HistoryPage() {
   });
 
   return (
-    <div className="flex flex-col h-full bg-bg-base" style={{ padding: 16, gap: 10 }}>
+    <div className="flex flex-col h-full" style={{ padding: 18, gap: 12 }}>
       <Panel title="历史 & 日志" className="flex-1" noPadding>
         <Tabs
           defaultActiveKey="history"
-          style={{ height: '100%', padding: '0 8px' }}
+          style={{ height: '100%', padding: '0 10px' }}
           items={[
             {
               key: 'history',

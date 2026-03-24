@@ -8,9 +8,10 @@ import OrderSubmitForm from '../components/OrderSubmitForm';
 export default function OrdersPage() {
   const [showForm, setShowForm] = useState(false);
   const [filter, setFilter] = useState<string>('all');
+  void filter;
 
   return (
-    <div className="flex flex-col h-full bg-bg-base" style={{ padding: 16, gap: 10 }}>
+    <div className="flex flex-col h-full" style={{ padding: 18, gap: 12 }}>
       <div className="flex items-center justify-between">
         <Space>
           <Radio.Group

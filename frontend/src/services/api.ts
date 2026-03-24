@@ -290,6 +290,9 @@ export const api = {
   stockAnns: (tsCode: string, limit = 20) =>
     fetchJson<ApiList<AnnItem>>(`/api/v1/stock/${tsCode}/anns?limit=${limit}`),
 
+  stockIrmQa: (tsCode: string, limit = 20) =>
+    fetchJson<ApiList<IrmQaItem>>(`/api/v1/stock/${tsCode}/irm_qa?limit=${limit}`),
+
   stockWeekly: (code: string, start = '', end = '') =>
     fetchJson<ApiList<DailyBar>>(`/api/v1/stock/${code}/weekly?start=${start}&end=${end}`),
 
@@ -350,6 +353,16 @@ export interface AnnItem {
   ann_date: string;
   title: string;
   url: string | null;
+}
+
+export interface IrmQaItem {
+  ts_code: string;
+  name: string;
+  trade_date: string;
+  q: string;
+  a: string;
+  pub_time: string | null;
+  industry?: string | null;
 }
 
 export interface MinuteBar {

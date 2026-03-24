@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Button, Input, Space, Radio } from 'antd';
+import { useState, useCallback, useRef } from 'react';
+import { AutoComplete, Space, Radio } from 'antd';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../services/api';
 import { useMarketFeed } from '../services/useMarketFeed';
@@ -32,8 +32,37 @@ export default function Dashboard() {
   const [inputVal, setInputVal] = useState(DEFAULT_CODE);
   const [period, setPeriod] = useState<KlinePeriod>('daily');
   const [quickSide, setQuickSide] = useState<'BUY' | 'SELL' | null>(null);
+  const [searchOptions, setSearchOptions] = useState<{ value: string; label: React.ReactNode }[]>([]);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const { connected } = useMarketFeed();
+
+  const onSearchInput = useCallback((text: string) => {
+    setInputVal(text);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (!text || text.length < 1) { setSearchOptions([]); return; }
+
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const res = await api.searchStocks(text);
+        setSearchOptions(
+          res.data.map((s) => ({
+            value: s.ts_code,
+            label: (
+              <span>
+                <b style={{ color: '#6bc7ff' }}>{s.ts_code}</b>
+                <span style={{ marginLeft: 8, color: '#93a9bc', fontSize: 12 }}>
+                  {s.name}
+                </span>
+              </span>
+            ),
+          })),
+        );
+      } catch {
+        setSearchOptions([]);
+      }
+    }, 200);
+  }, []);
 
   const { data: stockInfo } = useQuery({
     queryKey: ['stock-search-info', code],
@@ -65,7 +94,7 @@ export default function Dashboard() {
   const latestClose = (latest as Record<string, unknown>)?.close as number | undefined;
   const latestPctChg = (latest as Record<string, unknown>)?.pct_chg as number | undefined;
 
-  const pctColor = (latestPctChg ?? 0) >= 0 ? '#f87171' : '#4ade80';
+  const pctColor = (latestPctChg ?? 0) >= 0 ? '#ff6f91' : '#4ade80';
 
   const titleExtra = (
     <Space size={8} align="center">
@@ -77,19 +106,39 @@ export default function Dashboard() {
         buttonStyle="solid"
         options={PERIOD_OPTIONS}
       />
-      <Button size="small" type="primary" danger
-        style={{ fontSize: 11, height: 22 }}
+      <button
+        className="shrink-0"
+        style={{
+          background: 'linear-gradient(135deg, #99502c, #b54f61)',
+          border: 0,
+          borderRadius: 14,
+          padding: '4px 10px',
+          fontSize: 11,
+          fontWeight: 600,
+          color: '#f3fbff',
+          cursor: 'pointer',
+        }}
         onClick={() => setQuickSide('BUY')}
       >
         买入
-      </Button>
-      <Button size="small"
-        style={{ fontSize: 11, height: 22, background: '#15803d', borderColor: '#15803d', color: '#fff' }}
+      </button>
+      <button
+        className="shrink-0"
+        style={{
+          background: 'linear-gradient(135deg, #15803d, #22c55e)',
+          border: 0,
+          borderRadius: 14,
+          padding: '4px 10px',
+          fontSize: 11,
+          fontWeight: 600,
+          color: '#f3fbff',
+          cursor: 'pointer',
+        }}
         onClick={() => setQuickSide('SELL')}
       >
         卖出
-      </Button>
-      <span style={{ fontSize: 10, color: connected ? '#4ade80' : '#64748b' }}>
+      </button>
+      <span style={{ fontSize: 10, color: connected ? '#4ade80' : '#334155' }}>
         ● {connected ? 'WS' : '离线'}
       </span>
     </Space>
@@ -97,16 +146,16 @@ export default function Dashboard() {
 
   const titleContent = (
     <Space size={8} align="center">
-      <Input.Search
+      <AutoComplete
         value={inputVal}
-        onChange={(e) => setInputVal(e.target.value.toUpperCase())}
-        onSearch={(v) => { if (v) setCode(v.toUpperCase()); }}
-        placeholder="股票代码"
-        style={{ width: 140 }}
+        options={searchOptions}
+        onSearch={onSearchInput}
+        onSelect={(v: string) => { setCode(v); setInputVal(v); }}
+        placeholder="代码/名称/拼音"
+        style={{ width: 180 }}
         size="small"
-        enterButton="查"
       />
-      <span style={{ fontWeight: 600, color: '#e2e8f0' }}>{stockName}</span>
+      <span style={{ fontWeight: 600, color: '#e6f1fa' }}>{stockName}</span>
       {latestClose != null && (
         <>
           <span style={{ color: pctColor, fontWeight: 600, fontSize: 14 }}>
@@ -123,7 +172,7 @@ export default function Dashboard() {
   );
 
   return (
-    <div className="flex flex-col h-full bg-bg-base" style={{ padding: 12, gap: 8 }}>
+    <div className="flex flex-col h-full" style={{ padding: 18, gap: 12 }}>
       <AccountCard />
 
       <Panel title={titleContent} extra={titleExtra} className="flex-1" noPadding style={{ minHeight: 0 }}>
@@ -137,7 +186,7 @@ export default function Dashboard() {
         </div>
       </Panel>
 
-      <div className="flex shrink-0" style={{ height: 280, gap: 6 }}>
+      <div className="flex shrink-0" style={{ height: 280, gap: 10 }}>
         <SectorGainPanel />
         <SectorLosePanel />
         <StockGainPanel />
