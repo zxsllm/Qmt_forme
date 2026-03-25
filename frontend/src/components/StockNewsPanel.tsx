@@ -35,6 +35,7 @@ export default function StockNewsPanel({ tsCode, height = 160 }: Props) {
   const annsItems = annsData?.data ?? [];
   const irmItems: IrmQaItem[] = irmData?.data ?? [];
 
+  const [selectedNews, setSelectedNews] = useState<(typeof newsItems)[number] | null>(null);
   const [selectedQa, setSelectedQa] = useState<IrmQaItem | null>(null);
 
   const listStyle: CSSProperties = {
@@ -77,7 +78,13 @@ export default function StockNewsPanel({ tsCode, height = 160 }: Props) {
                   <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无新闻" />
                 ) : (
                   newsItems.map((n) => (
-                    <div key={n.id} style={rowStyle} title={n.content}>
+                    <div
+                      key={n.id}
+                      style={{ ...rowStyle, cursor: 'pointer' }}
+                      onClick={() => setSelectedNews(n)}
+                      onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.color = '#e6f1fa'; }}
+                      onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.color = '#93a9bc'; }}
+                    >
                       <span style={dateStyle}>
                         {n.datetime?.slice(0, 10)}
                       </span>
@@ -152,6 +159,40 @@ export default function StockNewsPanel({ tsCode, height = 160 }: Props) {
           },
         ]}
       />
+
+      <Modal
+        open={!!selectedNews}
+        onCancel={() => setSelectedNews(null)}
+        footer={null}
+        title={
+          <span style={{ color: '#d7efff', fontSize: 14 }}>
+            {selectedNews?.datetime?.slice(0, 16) || '新闻详情'}
+          </span>
+        }
+        width={560}
+        styles={{
+          content: {
+            background: 'linear-gradient(180deg, rgba(23,42,59,0.96), rgba(8,17,25,0.98))',
+            border: '1px solid rgba(148,186,215,0.18)',
+            borderRadius: 22,
+          },
+          header: {
+            background: 'transparent',
+            borderBottom: '1px solid rgba(148,186,215,0.12)',
+          },
+        }}
+      >
+        {selectedNews && (
+          <div style={{ color: '#e6f1fa', fontSize: 13, lineHeight: 1.8, whiteSpace: 'pre-wrap' }}>
+            {selectedNews.content}
+            {selectedNews.channels && (
+              <div style={{ marginTop: 12, fontSize: 11, color: '#556677' }}>
+                频道: {selectedNews.channels}
+              </div>
+            )}
+          </div>
+        )}
+      </Modal>
 
       <Modal
         open={!!selectedQa}

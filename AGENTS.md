@@ -8,7 +8,7 @@
 - **下一步**: 跑一个月模拟盘 → Phase 5 (QMT实盘桥接)
 - **执行顺序**: 跑一个月模拟盘 → Phase 5 → Phase 6
 - **主计划**: `.cursor/plans/ai_trade_量化交易系统_725fc656.plan.md`
-- **最后更新**: 2026-03-24
+- **最后更新**: 2026-03-25
 
 ## 数据时效
 
@@ -52,6 +52,10 @@
 | stock_st | 0+ | ST股票每日列表 (P2-Plus-Opt) |
 | adj_factor | 0+ | 复权因子 (P2-Plus-Opt) |
 | sw_daily | 0+ | 申万行业指数日线 (P2-Plus-Opt) |
+| index_global | 1,443 | 国际指数日线12个×半年 (P2-Plus-Data) |
+| stk_auction | 0+ | 集合竞价成交 (P2-Plus-Data) |
+| eco_cal | 0+ | 全球财经日历 (P2-Plus-Data) |
+| moneyflow_ind_ths | 0+ | THS行业资金流向 (P2-Plus-Data) |
 | sim_orders | 0+ | 模拟订单 (Phase 3) |
 | sim_trades | 0+ | 模拟成交 (Phase 3) |
 | sim_positions | 0+ | 模拟持仓快照 (Phase 3) |
@@ -78,11 +82,11 @@ backend/
         models.py           -- Pydantic models (BarData含pre_close/Signal/Order/Position含available_qty/Account等)
       models/
         base.py             -- DeclarativeBase
-        stock.py            -- 所有ORM (StockBasic~ConceptDetail+StockST+AdjFactor+SwDaily, 共22个表)
-      data/data_loader.py   -- DataLoader (异步, 含排行榜/板块/资金流/新闻/周线/月线/ST查询/复权/前复权日线)
+        stock.py            -- 所有ORM (StockBasic~ConceptDetail+StockST+AdjFactor+SwDaily+StkAuction+EcoCal+MoneyflowIndThs+IndexGlobal, 共26个表)
+      data/data_loader.py   -- DataLoader (异步, 含排行榜/板块/资金流/新闻/周线/月线/ST查询/复权/前复权日线/集合竞价/财经日历/行业资金流向/国际指数)
       data/pinyin_cache.py  -- 拼音首字母搜索缓存 (5400+股票内存映射, lazy-load)
     research/
-      data/tushare_service.py -- TushareService (频次控制+重试+fields优化, 含stock_st/adj_factor/sw_daily/rt_k/stk_mins等22个封装方法)
+      data/tushare_service.py -- TushareService (频次控制+重试+fields优化, 含stock_st/adj_factor/sw_daily/rt_k/rt_idx_k/stk_mins/stk_auction/stk_auction_o/eco_cal/moneyflow_ind_ths等27个封装方法)
       indicators/            -- MA/EMA/WMA/MACD/RSI/KDJ/BOLL
       backtest/
         engine.py            -- BacktestEngine (T+1, 复用OMS)
@@ -101,7 +105,7 @@ backend/
       matcher.py            -- 模拟撮合引擎 (含涨跌停/一字板A股规则校验)
       oms/                  -- 订单状态机 + 持仓账本 + 资金账本
       risk/                 -- 下单前风控 + 盘中风控 + Kill Switch
-      feed/                 -- MarketFeed + WSManager + scheduler.py (rt_k实时行情1.2s轮询 + 新闻6源5秒轮询+WS推送+3天清理)
+      feed/                 -- MarketFeed + WSManager + scheduler.py (rt_k 1.2s全市场统一轮询 + 新闻9源5秒轮询+WS推送+3天清理)
       observability/        -- 心跳 + 审计日志 + 每日摘要
   alembic/                  -- 迁移 (仅管常规表)
 
@@ -112,13 +116,17 @@ scripts/
   pull_minutes.py           -- 1min数据 (--test N / --resume)
   pull_stk_limit.py         -- 涨跌停 + 停复牌数据 (Phase 4)
   sync_incremental.py       -- 增量同步 (--dry-run)
-  daily_sync.py             -- 日终综合同步 (含moneyflow/news/anns)
+  daily_sync.py             -- 日终综合同步 (含moneyflow/news/anns/stk_auction/eco_cal/moneyflow_ind/index_global)
   pull_moneyflow.py         -- 个股资金流向 (P2-Plus)
   pull_news.py              -- 新闻快讯 (P2-Plus, 含fetch_latest_news公共函数供scheduler复用)
   pull_anns.py              -- 公司公告 (P2-Plus)
   pull_st_list.py           -- ST股票列表 (P2-Plus-Opt)
   pull_adj_factor.py        -- 复权因子 (P2-Plus-Opt)
   pull_sw_daily.py          -- 申万行业指数日线 (P2-Plus-Opt)
+  pull_stk_auction.py       -- 集合竞价成交 (P2-Plus-Data)
+  pull_eco_cal.py           -- 全球财经日历 (P2-Plus-Data)
+  pull_moneyflow_ind.py     -- THS行业资金流向 (P2-Plus-Data)
+  pull_index_global.py      -- 国际指数日线12个 (P2-Plus-Data)
   cleanup_minutes.py        -- 清理超6个月分钟数据分区 (P2-Plus)
 
 frontend/                   -- React 19 + TypeScript + Vite + Storybook
@@ -164,10 +172,13 @@ frontend/                   -- React 19 + TypeScript + Vite + Storybook
 | GET | `/api/v1/stock/{ts_code}/anns` | 公司公告 (P2-Plus) |
 | GET | `/api/v1/stock/{ts_code}/irm_qa` | 互动问答 (irm_qa_sh/irm_qa_sz) |
 | GET | `/api/v1/market/snapshot/{trade_date}` | 全市场截面 |
-| GET | `/api/v1/market/rankings` | 涨幅/跌幅/换手率排行 (P2-Plus) |
-| GET | `/api/v1/sector/rankings` | 板块涨跌幅排行 (P2-Plus) |
-| GET | `/api/v1/market/moneyflow` | 主力资金流向排行 (P2-Plus) |
-| GET | `/api/v1/market/global-indices` | 全球指数 (P2-Plus) |
+| GET | `/api/v1/market/rankings` | 涨幅/跌幅/换手率排行 (盘中实时rt_k/盘后daily) |
+| GET | `/api/v1/sector/rankings` | 板块涨跌幅排行 (盘中实时聚合/盘后sw_daily) |
+| GET | `/api/v1/market/moneyflow` | 主力资金流向排行 (盘后moneyflow_dc) |
+| GET | `/api/v1/market/global-indices` | 全球指数 (盘中实时rt_idx_k/盘后index_daily) |
+| GET | `/api/v1/market/auction` | 集合竞价成交 (P2-Plus-Data) |
+| GET | `/api/v1/market/eco-cal` | 全球财经日历 (P2-Plus-Data) |
+| GET | `/api/v1/market/moneyflow-ind` | THS行业资金流向 (P2-Plus-Data) |
 | GET | `/api/v1/market/news` | 市场新闻快讯 (P2-Plus) |
 | GET | `/api/v1/index/{ts_code}/daily` | 指数日线 |
 | GET | `/api/v1/classify/sw` | 申万行业分类 |
@@ -229,11 +240,11 @@ frontend/                   -- React 19 + TypeScript + Vite + Storybook
 | klinecharts | 内置指标/A股红涨绿跌/Canvas高性能 |
 | TradingEngine单例+DB持久化 | Phase 3 MVP内存态; Phase 4.6 接入sim_*表持久化+重启恢复 |
 | Redis: Memurai (Windows) | 原生Windows Redis替代, 端口6379 |
-| 实时行情: rt_k 1.2s轮询 | Tushare rt_k 实时日K快照, 50次/分钟上限, 替代旧的 rt_min 分钟K线 |
+| 实时行情: rt_k 1.2s全市场轮询 | 每1.2s ONE call `6*.SH,0*.SZ,3*.SZ,9*.BJ`→~5400股全量快照, 同时服务: 撮合(watched bars)+排行榜+板块聚合+WS推送, 极限50次/分钟 |
 | 模拟盘A股规则合规 | T+1/涨跌停/一字板/整手/tick, 与回测引擎规则对齐 |
 | Dashboard=信息决策中心 | P2-Plus: 交易组件各自路由已有, Dashboard改为K线+排行榜+新闻 |
 | 分钟数据6个月清理 | cleanup_minutes.py 自动DROP超期分区, 节省~67GB/年 |
-| 已接入所有Tushare权限 | moneyflow_dc/major_news/anns_d/concept/index_global等全量API |
+| 已接入所有Tushare权限 | moneyflow_dc/major_news/anns_d/concept/index_global/stk_auction/eco_cal/moneyflow_ind_ths等全量API |
 | 新闻9源轮询+WS推送 | 9个来源(sina/cls/eastmoney/wallstreetcn/10jqka/yuncaijing/fenghuang/jinrongjie/yicai)每5s轮询一个→Redis pub/sub→WS推送→前端自动刷新+来源彩色标签, 全天候, 3天清理, 去重 |
 | TushareService全量fields | 所有API默认只拉需要的字段, 减少传输量+解析开销 |
 | 批量INSERT(execute_values) | pull_news/pull_anns从逐行INSERT改为批量, 性能提升10-50x |
@@ -250,7 +261,7 @@ frontend/                   -- React 19 + TypeScript + Vite + Storybook
 - `stock_min_kline` 在 Alembic 迁移链之外，schema变更需手动SQL
 - API返回的DataFrame中有NaN值，`main.py` 里用 `_df_to_records()` 处理
 - klinecharts 为 Canvas 渲染，不支持 CSS 变量，颜色硬编码在 `COLORS` 常量
-- moneyflow_dc/stock_news/stock_anns/stock_st/adj_factor/sw_daily 表初始为空，首次需运行 `daily_sync.py` 或单独脚本拉取数据；之后新闻每5秒自动刷新+WS推送(全天候), 超3天自动清理, 收盘后 daily_sync 全量同步
+- moneyflow_dc/stock_news/stock_anns/stock_st/adj_factor/sw_daily/stk_auction/eco_cal/moneyflow_ind_ths 表初始为空，首次需运行 `daily_sync.py` 或单独脚本拉取数据；之后新闻每5秒自动刷新+WS推送(全天候), 超3天自动清理, 收盘后 daily_sync 全量同步
 - Tushare API 名称: 新闻=`news`（参考文档接口名），公告=`anns_d`（非`anns`）
 - 个股新闻查询用股票名称+代码数字在 content 中 ILIKE 匹配（Tushare major_news 不按个股分类）
 - stock_daily/daily_basic 有 trade_date 索引（手动创建，不在 Alembic 内）

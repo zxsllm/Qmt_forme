@@ -54,10 +54,12 @@ def pull_moneyflow(ts_svc: TushareService, conn, trade_dates: list[str]):
                 logger.warning("  [WARN] No data for %s", td)
                 continue
 
+            if "net_amount" in df.columns:
+                df = df.rename(columns={"net_amount": "net_mf_amount"})
+
             cols = [
-                "ts_code", "trade_date", "buy_sm_amount", "sell_sm_amount",
-                "buy_md_amount", "sell_md_amount", "buy_lg_amount", "sell_lg_amount",
-                "buy_elg_amount", "sell_elg_amount", "net_mf_amount",
+                "ts_code", "trade_date", "buy_sm_amount", "buy_md_amount",
+                "buy_lg_amount", "buy_elg_amount", "net_mf_amount",
             ]
             available = [c for c in cols if c in df.columns]
             df = df[available].dropna(subset=["ts_code", "trade_date"])

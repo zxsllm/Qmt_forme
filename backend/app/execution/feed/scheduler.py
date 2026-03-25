@@ -1,14 +1,14 @@
-"""MarketDataScheduler — feeds realtime data during trading hours.
+"""MarketDataScheduler — unified full-market rt_k polling.
 
 Data source: Tushare `rt_k` (实时日K线快照)
-- Gives latest price, day OHLCV, pre_close, bid/ask — close to real-time (~3-5s delay)
-- Supports batch query via comma-separated codes
-- Polled every 15 seconds for both price display and order matching
+- Every 1.2s: ONE call with wildcard `6*.SH,0*.SZ,3*.SZ,9*.BJ` → ~5400 stocks
+- Same result serves: order matching, WS broadcast, real-time rankings, sector aggregation
+- 50 calls/min = 1.2s interval (extreme rate)
 
 Lifecycle:
   - Auto-started at FastAPI startup on trade dates
   - watch_codes auto-collected from OMS positions + active orders
-  - During trading hours: polls rt_k → Redis broadcast → on_bar() matching
+  - During trading hours: full-market rt_k → snapshot cache + watched bars → matching
   - Non-trading hours / non-trade dates: sleeps efficiently
 """
 
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time as _time
 from datetime import date, datetime, time as dtime
 
 from app.shared.interfaces.models import BarData
@@ -28,7 +29,8 @@ MORNING_CLOSE = dtime(11, 30)
 AFTERNOON_OPEN = dtime(13, 0)
 AFTERNOON_CLOSE = dtime(15, 0)
 
-POLL_INTERVAL = 1.2  # 50 calls/min = 1.2s interval (rt_k API limit)
+POLL_INTERVAL = 1.2  # 50 calls/min extreme rate
+FULL_MARKET_PATTERN = "6*.SH,0*.SZ,3*.SZ,9*.BJ"
 
 SETTLEMENT_TIME = dtime(15, 1)
 SYNC_TIME = dtime(15, 30)
@@ -39,59 +41,88 @@ def _is_trading_time(now: datetime | None = None) -> bool:
     return (MORNING_OPEN <= t <= MORNING_CLOSE) or (AFTERNOON_OPEN <= t <= AFTERNOON_CLOSE)
 
 
-def _seconds_until_next_session(now: datetime | None = None) -> int:
-    dt = now or datetime.now()
-    t = dt.time()
-    if t < MORNING_OPEN:
-        target = dt.replace(hour=9, minute=30, second=0, microsecond=0)
-    elif MORNING_CLOSE < t < AFTERNOON_OPEN:
-        target = dt.replace(hour=13, minute=0, second=0, microsecond=0)
-    else:
-        from datetime import timedelta
-        next_day = dt.date() + timedelta(days=1)
-        target = datetime.combine(next_day, dtime(9, 30))
-    diff = (target - dt).total_seconds()
-    return max(int(diff), 10)
+MINS_PULL_INTERVAL = 60  # pull minute bars every 60s during trading
+
+# In-memory real-time market snapshot (set by scheduler, read by API)
+_rt_snapshot: dict = {}       # ts_code -> {name, close, pct_chg, vol, amount, ...}
+_rt_snapshot_ts: float = 0    # last update timestamp
+
+# Pre-computed rankings cache (rebuilt every rt_k tick, ~1.2s)
+_cached_rankings: dict[str, list[dict]] = {}   # "gain"/"lose"/"turnover" -> top-N
+_cached_sector_rankings: list[dict] = []       # full sorted sector list
+_cached_indices: list[dict] = []               # domestic index rows
+_RANKINGS_TOP_N = 50  # pre-cache more than needed
 
 
-async def _fetch_rt_k(ts_codes: list[str]) -> list[BarData]:
-    """Fetch realtime snapshots via Tushare rt_k (batch, runs in thread)."""
+def get_rt_snapshot() -> tuple[dict, float]:
+    return _rt_snapshot, _rt_snapshot_ts
 
-    def _sync_fetch() -> list[BarData]:
-        from app.research.data.tushare_service import TushareService
-        svc = TushareService()
-        now = datetime.now()
 
-        codes_str = ",".join(ts_codes)
-        try:
-            df = svc.rt_k(ts_code=codes_str)
-        except Exception:
-            logger.warning("rt_k batch fetch failed", exc_info=True)
-            return []
+def _rebuild_rankings_cache(snap: dict) -> None:
+    """Pre-compute all ranking lists from snapshot. Called once per rt_k tick."""
+    global _cached_rankings, _cached_sector_rankings, _cached_indices
 
-        if df.empty:
-            return []
+    valid = [v for v in snap.values() if v.get("close", 0) > 0 and v.get("vol", 0) > 0]
 
-        bars: list[BarData] = []
-        for _, row in df.iterrows():
-            ts_code = str(row.get("ts_code", ""))
-            if not ts_code or ts_code not in ts_codes:
-                continue
-            bars.append(BarData(
-                ts_code=ts_code,
-                timestamp=now,
-                open=float(row.get("open", 0)),
-                high=float(row.get("high", 0)),
-                low=float(row.get("low", 0)),
-                close=float(row.get("close", 0)),
-                vol=float(row.get("vol", 0)),
-                amount=float(row.get("amount", 0)),
-                pre_close=float(row["pre_close"]) if row.get("pre_close") else None,
-                freq="rt_k",
-            ))
-        return bars
+    gain = sorted(valid, key=lambda x: x.get("pct_chg", 0), reverse=True)
+    lose = sorted(valid, key=lambda x: x.get("pct_chg", 0))
+    turnover = sorted(valid, key=lambda x: x.get("amount", 0), reverse=True)
+    _cached_rankings = {
+        "gain": gain[:_RANKINGS_TOP_N],
+        "lose": lose[:_RANKINGS_TOP_N],
+        "turnover": turnover[:_RANKINGS_TOP_N],
+    }
 
-    return await asyncio.to_thread(_sync_fetch)
+    from collections import defaultdict
+    agg: dict[str, list[float]] = defaultdict(list)
+    for code, row in snap.items():
+        if row.get("close", 0) <= 0 or row.get("vol", 0) <= 0:
+            continue
+        pct = row.get("pct_chg")
+        ind = _industry_cache.get(code)
+        if pct is not None and ind:
+            agg[ind].append(pct)
+    sectors = []
+    for ind_name, pcts in agg.items():
+        if len(pcts) < 5:
+            continue
+        sectors.append({
+            "industry": ind_name,
+            "avg_pct_chg": round(sum(pcts) / len(pcts), 2),
+            "stock_count": len(pcts),
+        })
+    sectors.sort(key=lambda x: x["avg_pct_chg"], reverse=True)
+    _cached_sector_rankings = sectors
+
+    idx_codes = ["000001.SH", "399001.SZ", "399006.SZ", "000300.SH", "000905.SH", "000688.SH"]
+    _cached_indices = [snap[c] for c in idx_codes if c in snap]
+
+
+def get_rt_rankings(rank_type: str = "gain", limit: int = 10) -> list[dict] | None:
+    import time as _t
+    if not _rt_snapshot or _t.time() - _rt_snapshot_ts > 60:
+        return None
+    return _cached_rankings.get(rank_type, _cached_rankings.get("gain", []))[:limit]
+
+
+def get_rt_global_indices() -> list[dict] | None:
+    import time as _t
+    if not _rt_snapshot or _t.time() - _rt_snapshot_ts > 60:
+        return None
+    return _cached_indices if _cached_indices else None
+
+
+def get_rt_sector_rankings(limit: int = 30, direction: str = "gain") -> list[dict] | None:
+    import time as _t
+    if not _rt_snapshot or _t.time() - _rt_snapshot_ts > 60:
+        return None
+    if not _cached_sector_rankings:
+        return None
+    return _cached_sector_rankings[:limit]
+
+
+# ts_code → industry_name cache (loaded once at startup)
+_industry_cache: dict[str, str] = {}
 
 
 class MarketDataScheduler:
@@ -108,6 +139,157 @@ class MarketDataScheduler:
         self._settled_today = False
         self._synced_today = False
         self._last_news_pull: float = 0
+        self._last_mins_pull: float = 0
+        self._mins_backfilled = False
+        self._industry_loaded = False
+
+    def _maybe_pull_mins(self) -> None:
+        """Pull minute bars for watched stocks — fire-and-forget, every 60s."""
+        import time as _t
+        if _t.time() - self._last_mins_pull < MINS_PULL_INTERVAL:
+            return
+        self._last_mins_pull = _t.time()
+        codes = list(self._watch_codes)
+        if not codes:
+            return
+        asyncio.ensure_future(asyncio.to_thread(self._pull_mins_sync, codes))
+
+    @staticmethod
+    def _pull_mins_sync(codes: list[str]) -> None:
+        """Pull today's minute bars for given codes and upsert into DB."""
+        import os, sys, psycopg2
+        from io import StringIO
+        try:
+            from app.research.data.tushare_service import TushareService
+            svc = TushareService()
+            db_url = os.getenv("DATABASE_URL", "").replace(
+                "postgresql+asyncpg://", "postgresql://"
+            )
+            today = datetime.now().strftime("%Y-%m-%d")
+            start = f"{today} 09:30:00"
+            end = f"{today} 15:00:00"
+
+            conn = psycopg2.connect(db_url)
+            cur = conn.cursor()
+            total = 0
+            for code in codes:
+                try:
+                    df = svc.stk_mins(ts_code=code, freq="1min",
+                                      start_date=start, end_date=end)
+                    if df.empty:
+                        continue
+                    for col in ["ts_code", "trade_time"]:
+                        if col not in df.columns:
+                            continue
+                    df["freq"] = "1min"
+                    cols = ["ts_code", "trade_time", "open", "close", "high",
+                            "low", "vol", "amount", "freq"]
+                    available = [c for c in cols if c in df.columns]
+                    buf = StringIO()
+                    df[available].to_csv(buf, index=False, header=False,
+                                         sep="\t", na_rep="\\N")
+                    buf.seek(0)
+                    cur.execute(
+                        "DELETE FROM stock_min_kline WHERE ts_code=%s "
+                        "AND trade_time >= %s AND trade_time <= %s AND freq='1min'",
+                        (code, start, end),
+                    )
+                    cur.copy_from(buf, "stock_min_kline",
+                                  columns=available, sep="\t", null="\\N")
+                    conn.commit()
+                    total += len(df)
+                except Exception:
+                    conn.rollback()
+                    logger.warning("mins pull failed for %s", code, exc_info=True)
+            cur.close()
+            conn.close()
+            if total:
+                logger.info("mins pull: wrote %d bars for %d codes", total, len(codes))
+        except Exception:
+            logger.exception("mins pull error")
+
+    def _maybe_backfill_mins(self) -> None:
+        """One-time backfill of recent missing minute data for watched stocks."""
+        if self._mins_backfilled:
+            return
+        self._mins_backfilled = True
+        codes = list(self._watch_codes)
+        if not codes:
+            return
+        asyncio.ensure_future(asyncio.to_thread(self._backfill_mins_sync, codes))
+
+    @staticmethod
+    def _backfill_mins_sync(codes: list[str]) -> None:
+        """Fill missing recent minute data (last 5 trade days) for watched codes."""
+        import os, psycopg2
+        from io import StringIO
+        try:
+            from app.research.data.tushare_service import TushareService
+            svc = TushareService()
+            db_url = os.getenv("DATABASE_URL", "").replace(
+                "postgresql+asyncpg://", "postgresql://"
+            )
+            conn = psycopg2.connect(db_url)
+            cur = conn.cursor()
+
+            cur.execute(
+                "SELECT cal_date FROM trade_cal "
+                "WHERE is_open='1' AND cal_date <= %s "
+                "ORDER BY cal_date DESC LIMIT 5",
+                (datetime.now().strftime("%Y%m%d"),),
+            )
+            recent_dates = [r[0] for r in cur.fetchall()]
+
+            total = 0
+            for code in codes:
+                for td in recent_dates:
+                    try:
+                        y, m, d = td[:4], td[4:6], td[6:8]
+                        start = f"{y}-{m}-{d} 09:30:00"
+                        end = f"{y}-{m}-{d} 15:00:00"
+
+                        cur.execute(
+                            "SELECT COUNT(*) FROM stock_min_kline "
+                            "WHERE ts_code=%s AND trade_time >= %s AND trade_time <= %s",
+                            (code, start, end),
+                        )
+                        if cur.fetchone()[0] > 200:
+                            continue
+
+                        df = svc.stk_mins(ts_code=code, freq="1min",
+                                          start_date=start, end_date=end)
+                        if df.empty:
+                            continue
+                        df["freq"] = "1min"
+                        cols = ["ts_code", "trade_time", "open", "close", "high",
+                                "low", "vol", "amount", "freq"]
+                        available = [c for c in cols if c in df.columns]
+                        buf = StringIO()
+                        df[available].to_csv(buf, index=False, header=False,
+                                             sep="\t", na_rep="\\N")
+                        buf.seek(0)
+                        cur.execute(
+                            "DELETE FROM stock_min_kline WHERE ts_code=%s "
+                            "AND trade_time >= %s AND trade_time <= %s",
+                            (code, start, end),
+                        )
+                        cur.copy_from(buf, "stock_min_kline",
+                                      columns=available, sep="\t", null="\\N")
+                        conn.commit()
+                        total += len(df)
+                        logger.info("backfill mins: %s %s → %d bars", code, td, len(df))
+                    except Exception:
+                        conn.rollback()
+                        logger.warning("backfill mins failed: %s %s", code, td, exc_info=True)
+
+            cur.close()
+            conn.close()
+            if total:
+                logger.info("backfill mins complete: %d total bars", total)
+            else:
+                logger.info("backfill mins: all recent data present")
+        except Exception:
+            logger.exception("backfill mins error")
 
     def _maybe_pull_news(self) -> None:
         """Fire-and-forget news pull — never blocks the scheduler loop."""
@@ -177,6 +359,7 @@ class MarketDataScheduler:
         if not self._watch_codes:
             self.collect_watch_codes()
         await self._load_limits()
+        await self._load_industry_map()
         self._running = True
         self._task = asyncio.create_task(self._loop())
         logger.info("scheduler started (rt_k, %ds interval), watching %d codes",
@@ -191,7 +374,7 @@ class MarketDataScheduler:
         logger.info("scheduler stopped")
 
     # ------------------------------------------------------------------
-    # Main loop
+    # Main loop — unified full-market polling
     # ------------------------------------------------------------------
 
     async def _loop(self) -> None:
@@ -225,22 +408,35 @@ class MarketDataScheduler:
                 t = now.time()
 
                 self._maybe_pull_news()
+                self._maybe_backfill_mins()
 
                 if _is_trading_time(now):
-                    bars = await _fetch_rt_k(self._watch_codes)
-                    if bars:
-                        self._update_limits_from_bars(bars)
-                        await market_feed.publish_batch(bars)
-                        bars_dict = {b.ts_code: b for b in bars}
+                    self._maybe_pull_mins()
 
-                        from app.execution.engine import trading_engine
-                        filled = trading_engine.on_bar(bars_dict)
-                        if filled:
-                            logger.info("matched %d orders from %d bars", len(filled), len(bars))
-                        else:
-                            logger.debug("published %d bars, no fills", len(bars))
+                    t0 = _time.monotonic()
+                    result = await self._fetch_full_market()
+                    elapsed = _time.monotonic() - t0
 
-                    await asyncio.sleep(POLL_INTERVAL)
+                    if result:
+                        snapshot, watched_bars = result
+                        global _rt_snapshot, _rt_snapshot_ts
+                        _rt_snapshot = snapshot
+                        _rt_snapshot_ts = _time.time()
+                        _rebuild_rankings_cache(snapshot)
+
+                        if watched_bars:
+                            self._update_limits_from_bars(watched_bars)
+                            await market_feed.publish_batch(watched_bars)
+                            bars_dict = {b.ts_code: b for b in watched_bars}
+
+                            from app.execution.engine import trading_engine
+                            filled = trading_engine.on_bar(bars_dict)
+                            if filled:
+                                logger.info("matched %d orders | snapshot %d stocks | %.1fs",
+                                            len(filled), len(snapshot), elapsed)
+
+                    sleep = max(0.1, POLL_INTERVAL - elapsed)
+                    await asyncio.sleep(sleep)
 
                 elif t >= AFTERNOON_CLOSE:
                     if not self._settled_today and t >= SETTLEMENT_TIME:
@@ -259,6 +455,91 @@ class MarketDataScheduler:
             except Exception:
                 logger.exception("scheduler loop error")
                 await asyncio.sleep(30)
+
+    # ------------------------------------------------------------------
+    # Unified full-market fetch (snapshot + watched bars in ONE call)
+    # ------------------------------------------------------------------
+
+    async def _fetch_full_market(self) -> tuple[dict, list[BarData]] | None:
+        """Single rt_k call for entire market. Returns (snapshot_dict, watched_bars)."""
+        watch_set = set(self._watch_codes)
+
+        def _sync() -> tuple[dict, list[BarData]] | None:
+            from app.research.data.tushare_service import TushareService
+            svc = TushareService()
+            now_dt = datetime.now()
+
+            try:
+                df = svc.rt_k(ts_code=FULL_MARKET_PATTERN)
+            except Exception:
+                logger.warning("rt_k full-market fetch failed", exc_info=True)
+                return None
+            if df.empty:
+                return None
+
+            snapshot: dict = {}
+            watched_bars: list[BarData] = []
+
+            for _, row in df.iterrows():
+                code = str(row.get("ts_code", ""))
+                if not code:
+                    continue
+                pre_close = float(row["pre_close"]) if row.get("pre_close") else 0
+                close = float(row.get("close", 0))
+                pct_chg = round((close - pre_close) / pre_close * 100, 2) if pre_close else 0
+
+                snapshot[code] = {
+                    "ts_code": code,
+                    "name": str(row.get("name", "")),
+                    "close": close,
+                    "pct_chg": pct_chg,
+                    "vol": float(row.get("vol", 0)),
+                    "amount": float(row.get("amount", 0)),
+                    "pre_close": pre_close,
+                    "open": float(row.get("open", 0)),
+                    "high": float(row.get("high", 0)),
+                    "low": float(row.get("low", 0)),
+                }
+
+                if code in watch_set:
+                    watched_bars.append(BarData(
+                        ts_code=code,
+                        timestamp=now_dt,
+                        open=float(row.get("open", 0)),
+                        high=float(row.get("high", 0)),
+                        low=float(row.get("low", 0)),
+                        close=close,
+                        vol=float(row.get("vol", 0)),
+                        amount=float(row.get("amount", 0)),
+                        pre_close=pre_close if pre_close else None,
+                        freq="rt_k",
+                    ))
+
+            # rt_idx_k for global indices (BJ not supported by this API)
+            IDX = "000001.SH,399001.SZ,399006.SZ,000300.SH,000905.SH,000688.SH"
+            try:
+                idx_df = svc.rt_idx_k(ts_code=IDX)
+                if not idx_df.empty:
+                    for _, irow in idx_df.iterrows():
+                        ic = str(irow.get("ts_code", ""))
+                        if not ic:
+                            continue
+                        ipc = float(irow["pre_close"]) if irow.get("pre_close") else 0
+                        icl = float(irow.get("close", 0))
+                        ipct = round((icl - ipc) / ipc * 100, 2) if ipc else 0
+                        snapshot[ic] = {
+                            "ts_code": ic, "name": str(irow.get("name", "")),
+                            "close": icl, "pct_chg": ipct,
+                            "vol": float(irow.get("vol", 0)),
+                            "amount": float(irow.get("amount", 0)),
+                            "pre_close": ipc,
+                        }
+            except Exception:
+                logger.warning("rt_idx_k fetch failed", exc_info=True)
+
+            return snapshot, watched_bars
+
+        return await asyncio.to_thread(_sync)
 
     # ------------------------------------------------------------------
     # Auto-update price limits from rt_k's pre_close
@@ -305,11 +586,11 @@ class MarketDataScheduler:
         logger.info("triggering post-market data sync...")
         _trigger_background_sync()
 
-    NEWS_RETENTION_DAYS = 3
+    NEWS_RETENTION_DAYS = 30
 
     @staticmethod
     def _pull_news_sync() -> None:
-        """Pull latest news, purge old ones (>3 days), notify via Redis."""
+        """Pull latest news, purge old ones (>30 days), notify via Redis."""
         logger.info("news pull: calling Tushare...")
         try:
             import json
@@ -354,6 +635,35 @@ class MarketDataScheduler:
         except Exception:
             logger.warning("news refresh failed", exc_info=True)
 
+    async def _load_industry_map(self) -> None:
+        """Load stock→industry mapping from stock_basic for sector ranking."""
+        global _industry_cache
+        if self._industry_loaded:
+            return
+        self._industry_loaded = True
+        try:
+            import os, psycopg2
+            db_url = os.getenv("DATABASE_URL", "").replace(
+                "postgresql+asyncpg://", "postgresql://"
+            )
+
+            def _load():
+                conn = psycopg2.connect(db_url)
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT ts_code, industry FROM stock_basic "
+                    "WHERE list_status = 'L' AND industry IS NOT NULL"
+                )
+                result = {row[0]: row[1] for row in cur.fetchall()}
+                cur.close()
+                conn.close()
+                return result
+
+            _industry_cache = await asyncio.to_thread(_load)
+            logger.info("industry map loaded: %d stocks", len(_industry_cache))
+        except Exception:
+            logger.warning("failed to load industry map", exc_info=True)
+
     # ------------------------------------------------------------------
     # Price limits
     # ------------------------------------------------------------------
@@ -376,6 +686,7 @@ class MarketDataScheduler:
     # ------------------------------------------------------------------
 
     def status(self) -> dict:
+        snap_age = round(_time.time() - _rt_snapshot_ts, 1) if _rt_snapshot_ts else None
         return {
             "running": self._running,
             "trading_time": _is_trading_time(),
@@ -383,7 +694,9 @@ class MarketDataScheduler:
             "watch_codes": len(self._watch_codes),
             "codes": self._watch_codes[:10],
             "poll_interval": POLL_INTERVAL,
-            "data_source": "rt_k",
+            "snapshot_stocks": len(_rt_snapshot),
+            "snapshot_age_s": snap_age,
+            "data_source": "rt_k (full-market)",
         }
 
 

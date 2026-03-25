@@ -138,14 +138,15 @@ class DataLoader:
         end_time: str | datetime = "",
         freq: str = "1min",
     ) -> pd.DataFrame:
+        from datetime import datetime as _dt
         sql = "SELECT * FROM stock_min_kline WHERE ts_code = :c AND freq = :f"
         params: dict = {"c": ts_code, "f": freq}
         if start_time:
             sql += " AND trade_time >= :s"
-            params["s"] = str(start_time)
+            params["s"] = _dt.fromisoformat(str(start_time)) if isinstance(start_time, str) else start_time
         if end_time:
             sql += " AND trade_time <= :e"
-            params["e"] = str(end_time)
+            params["e"] = _dt.fromisoformat(str(end_time)) if isinstance(end_time, str) else end_time
         sql += " ORDER BY trade_time"
         return await self._query(sql, params)
 
@@ -345,13 +346,20 @@ class DataLoader:
 
     # ── P2-Plus: Global indices ──────────────────────────────────
 
+    GLOBAL_INDEX_NAMES: dict[str, str] = {  # 12 major international indices
+        "DJI": "道琼斯", "SPX": "标普500", "IXIC": "纳斯达克",
+        "FTSE": "富时100", "GDAXI": "德国DAX", "N225": "日经225",
+        "HSI": "恒生指数", "HKTECH": "恒生科技", "XIN9": "富时A50",
+        "KS11": "韩国综合", "TWII": "台湾加权", "SENSEX": "印度孟买",
+    }
+
     async def global_indices(self) -> pd.DataFrame:
-        codes = [
+        cn_codes = [
             "000001.SH", "399001.SZ", "399006.SZ", "000300.SH",
             "000905.SH", "000688.SH", "899050.BJ",
         ]
-        code_list = ",".join(f"'{c}'" for c in codes)
-        return await self._query(
+        code_list = ",".join(f"'{c}'" for c in cn_codes)
+        cn_df = await self._query(
             f"""
             SELECT i.ts_code, i.name,
                    d.close, d.pct_chg, d.vol
@@ -365,6 +373,24 @@ class DataLoader:
             ORDER BY d.ts_code
             """
         )
+
+        intl_codes = list(self.GLOBAL_INDEX_NAMES.keys())
+        intl_list = ",".join(f"'{c}'" for c in intl_codes)
+        intl_df = await self._query(
+            f"""
+            SELECT DISTINCT ON (ts_code) ts_code, close, pct_chg, vol
+            FROM index_global
+            WHERE ts_code IN ({intl_list})
+            ORDER BY ts_code, trade_date DESC
+            """
+        )
+        if not intl_df.empty:
+            intl_df["name"] = intl_df["ts_code"].map(self.GLOBAL_INDEX_NAMES)
+            order = list(self.GLOBAL_INDEX_NAMES.keys())
+            intl_df["_sort"] = intl_df["ts_code"].map({c: i for i, c in enumerate(order)})
+            intl_df = intl_df.sort_values("_sort").drop(columns="_sort")
+
+        return pd.concat([cn_df, intl_df], ignore_index=True)
 
     # ── ST stocks / Adj factor ────────────────────────────────────
 
@@ -505,3 +531,45 @@ class DataLoader:
             ORDER BY trade_date
         """
         return await self._query(sql, params)
+
+    # ── 集合竞价 ──────────────────────────────────────────────
+
+    async def stk_auction(self, trade_date: str, limit: int = 50) -> pd.DataFrame:
+        return await self._query(
+            "SELECT ts_code, trade_date, vol, price, amount, pre_close, "
+            "turnover_rate, volume_ratio, float_share "
+            "FROM stk_auction WHERE trade_date = :td "
+            "ORDER BY amount DESC LIMIT :lim",
+            {"td": trade_date, "lim": limit},
+        )
+
+    # ── 财经日历 ──────────────────────────────────────────────
+
+    async def eco_cal(
+        self, start_date: str = "", end_date: str = "", country: str = ""
+    ) -> pd.DataFrame:
+        sql = "SELECT date, time, currency, country, event, value, pre_value, fore_value FROM eco_cal WHERE 1=1"
+        params: dict = {}
+        if start_date:
+            sql += " AND date >= :s"
+            params["s"] = start_date
+        if end_date:
+            sql += " AND date <= :e"
+            params["e"] = end_date
+        if country:
+            sql += " AND country = :c"
+            params["c"] = country
+        sql += " ORDER BY date DESC, time DESC LIMIT 200"
+        return await self._query(sql, params)
+
+    # ── 行业资金流向 (THS) ────────────────────────────────────
+
+    async def moneyflow_ind_ths(self, trade_date: str, limit: int = 50) -> pd.DataFrame:
+        return await self._query(
+            "SELECT trade_date, ts_code, industry, lead_stock, close, pct_change, "
+            "company_num, pct_change_stock, close_price, "
+            "net_buy_amount, net_sell_amount, net_amount "
+            "FROM moneyflow_ind_ths WHERE trade_date = :td "
+            "ORDER BY net_amount DESC LIMIT :lim",
+            {"td": trade_date, "lim": limit},
+        )

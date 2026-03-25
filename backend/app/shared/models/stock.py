@@ -415,6 +415,90 @@ class SwDaily(Base):
     )
 
 
+class StkAuction(Base):
+    """Opening auction data from Tushare stk_auction API."""
+    __tablename__ = "stk_auction"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    trade_date: Mapped[str] = mapped_column(String(8), index=True)
+    vol: Mapped[float | None] = mapped_column(Float)
+    price: Mapped[float | None] = mapped_column(Float)
+    amount: Mapped[float | None] = mapped_column(Float)
+    pre_close: Mapped[float | None] = mapped_column(Float)
+    turnover_rate: Mapped[float | None] = mapped_column(Float)
+    volume_ratio: Mapped[float | None] = mapped_column(Float)
+    float_share: Mapped[float | None] = mapped_column(Float)
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "trade_date", name="uq_stk_auction_code_date"),
+    )
+
+
+class EcoCal(Base):
+    """Global economic calendar from Tushare eco_cal API."""
+    __tablename__ = "eco_cal"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    date: Mapped[str | None] = mapped_column(String(8), index=True)
+    time: Mapped[str | None] = mapped_column(String(8))
+    currency: Mapped[str | None] = mapped_column(String(16))
+    country: Mapped[str | None] = mapped_column(String(64))
+    event: Mapped[str | None] = mapped_column(Text)
+    value: Mapped[str | None] = mapped_column(String(64))
+    pre_value: Mapped[str | None] = mapped_column(String(64))
+    fore_value: Mapped[str | None] = mapped_column(String(64))
+
+    __table_args__ = (
+        UniqueConstraint("date", "time", "event", name="uq_eco_cal_date_time_event"),
+    )
+
+
+class MoneyflowIndThs(Base):
+    """THS industry money flow from Tushare moneyflow_ind_ths API."""
+    __tablename__ = "moneyflow_ind_ths"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[str] = mapped_column(String(8), index=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    industry: Mapped[str | None] = mapped_column(String(32))
+    lead_stock: Mapped[str | None] = mapped_column(String(16))
+    close: Mapped[float | None] = mapped_column(Float)
+    pct_change: Mapped[float | None] = mapped_column(Float)
+    company_num: Mapped[int | None] = mapped_column(Integer)
+    pct_change_stock: Mapped[float | None] = mapped_column(Float)
+    close_price: Mapped[float | None] = mapped_column(Float)
+    net_buy_amount: Mapped[float | None] = mapped_column(Float)
+    net_sell_amount: Mapped[float | None] = mapped_column(Float)
+    net_amount: Mapped[float | None] = mapped_column(Float)
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "trade_date", name="uq_mf_ind_ths_code_date"),
+    )
+
+
+class IndexGlobal(Base):
+    """International index daily bars from Tushare index_global API."""
+    __tablename__ = "index_global"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    trade_date: Mapped[str] = mapped_column(String(8), index=True)
+    open: Mapped[float | None] = mapped_column(Float)
+    close: Mapped[float | None] = mapped_column(Float)
+    high: Mapped[float | None] = mapped_column(Float)
+    low: Mapped[float | None] = mapped_column(Float)
+    pre_close: Mapped[float | None] = mapped_column(Float)
+    change: Mapped[float | None] = mapped_column(Float)
+    pct_chg: Mapped[float | None] = mapped_column(Float)
+    vol: Mapped[float | None] = mapped_column(Float)
+    amount: Mapped[float | None] = mapped_column(Float)
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "trade_date", name="uq_index_global_code_date"),
+    )
+
+
 class ConceptList(Base):
     """Concept/theme sector list from Tushare concept API."""
     __tablename__ = "concept_list"

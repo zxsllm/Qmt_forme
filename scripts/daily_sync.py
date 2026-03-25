@@ -47,6 +47,10 @@ def main():
     results["pull_st_list"] = run("pull_st_list.py")
     results["pull_adj_factor"] = run("pull_adj_factor.py")
     results["pull_sw_daily"] = run("pull_sw_daily.py")
+    results["pull_stk_auction"] = run("pull_stk_auction.py")
+    results["pull_eco_cal"] = run("pull_eco_cal.py")
+    results["pull_moneyflow_ind"] = run("pull_moneyflow_ind.py")
+    results["pull_index_global"] = run("pull_index_global.py")
 
     print(f"\n{'='*60}")
     print("  Daily Sync Summary")

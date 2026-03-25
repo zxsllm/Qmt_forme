@@ -113,6 +113,9 @@ class TushareService:
     def rt_k(self, **kwargs) -> pd.DataFrame:
         return self.query("rt_k", **kwargs)
 
+    def rt_idx_k(self, **kwargs) -> pd.DataFrame:
+        return self.query("rt_idx_k", **kwargs)
+
     # ── 指数 ─────────────────────────────────────────────────
 
     def index_basic(self, **kwargs) -> pd.DataFrame:
@@ -138,14 +141,42 @@ class TushareService:
         )
         return self.query("sw_daily", **kwargs)
 
+    def stk_auction(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "ts_code,trade_date,vol,price,amount,pre_close,turnover_rate,volume_ratio,float_share",
+        )
+        return self.query("stk_auction", **kwargs)
+
+    def stk_auction_o(self, **kwargs) -> pd.DataFrame:
+        """Historical opening auction OHLC (盘后更新). Has open/high/low/close/vwap."""
+        kwargs.setdefault(
+            "fields",
+            "ts_code,trade_date,open,high,low,close,vol,amount,vwap",
+        )
+        return self.query("stk_auction_o", **kwargs)
+
+    # ── 财经日历 ──────────────────────────────────────────────
+
+    def eco_cal(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault("fields", "date,time,currency,country,event,value,pre_value,fore_value")
+        return self.query("eco_cal", **kwargs)
+
     # ── 资金流向 ─────────────────────────────────────────────
+
+    def moneyflow_ind_ths(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "trade_date,ts_code,industry,lead_stock,close,pct_change,"
+            "company_num,pct_change_stock,close_price,net_buy_amount,net_sell_amount,net_amount",
+        )
+        return self.query("moneyflow_ind_ths", **kwargs)
 
     def moneyflow_dc(self, **kwargs) -> pd.DataFrame:
         kwargs.setdefault(
             "fields",
-            "ts_code,trade_date,buy_sm_amount,sell_sm_amount,"
-            "buy_md_amount,sell_md_amount,buy_lg_amount,sell_lg_amount,"
-            "buy_elg_amount,sell_elg_amount,net_mf_amount",
+            "ts_code,trade_date,buy_sm_amount,buy_md_amount,"
+            "buy_lg_amount,buy_elg_amount,net_amount",
         )
         return self.query("moneyflow_dc", **kwargs)
 

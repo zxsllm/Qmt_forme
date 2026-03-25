@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { init, dispose, type Chart } from 'klinecharts';
+import { init, dispose, registerIndicator, type Chart } from 'klinecharts';
 
 export type KlinePeriod = '1min' | 'daily' | 'weekly' | 'monthly';
 
@@ -12,6 +12,8 @@ interface BarData {
   close: number;
   vol: number;
   amount?: number;
+  pre_close?: number;
+  pct_chg?: number;
 }
 
 interface Props {
@@ -20,6 +22,7 @@ interface Props {
   height?: number;
   autoFill?: boolean;
   indicators?: string[];
+  preClose?: number;
 }
 
 function toTimestamp(d: string): number {
@@ -30,7 +33,22 @@ function toTimestamp(d: string): number {
   return new Date(`${y}-${m}-${day}T00:00:00`).getTime();
 }
 
-const OVERLAY_INDICATORS = new Set(['MA', 'EMA', 'SMA', 'BOLL']);
+const OVERLAY_INDICATORS = new Set(['MA', 'EMA', 'SMA', 'BOLL', 'AVG_PRICE']);
+
+registerIndicator({
+  name: 'AVG_PRICE',
+  shortName: '均价',
+  figures: [{ key: 'avgPrice', title: '均价: ', type: 'line' }],
+  calc: (kLineDataList) => {
+    let cumTurnover = 0;
+    let cumVolume = 0;
+    return kLineDataList.map((d) => {
+      cumTurnover += d.turnover ?? 0;
+      cumVolume += d.volume ?? 0;
+      return { avgPrice: cumVolume > 0 ? cumTurnover / cumVolume : d.close };
+    });
+  },
+});
 
 const COLORS = {
   up: '#f87171',
@@ -109,6 +127,8 @@ function toKlineData(data: BarData[]) {
     close: d.close,
     volume: d.vol,
     turnover: d.amount ?? 0,
+    pre_close: d.pre_close,
+    pct_chg: d.pct_chg,
   }));
 }
 
@@ -118,23 +138,78 @@ export default function KlineChart({
   height = 400,
   autoFill,
   indicators = ['MA', 'VOL'],
+  preClose,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<Chart | null>(null);
   const indicatorsRef = useRef(indicators);
   const periodRef = useRef(period);
+  const preCloseRef = useRef(preClose);
   indicatorsRef.current = indicators;
   periodRef.current = period;
+  preCloseRef.current = preClose;
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     const isArea = period === '1min';
-    const styles = isArea ? AREA_STYLES : CHART_STYLES;
-    const chart = init(container, { styles });
+    const baseStyles = isArea ? AREA_STYLES : CHART_STYLES;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tooltipCustom = (cbData: any) => {
+      const cur = cbData?.current;
+      if (!cur) return [];
+      const tc = COLORS.t3;
+      const base = [
+        { title: { text: 'Time: ', color: tc }, value: '{time}' },
+        { title: { text: 'Open: ', color: tc }, value: '{open}' },
+        { title: { text: 'High: ', color: tc }, value: '{high}' },
+        { title: { text: 'Low: ', color: tc }, value: '{low}' },
+        { title: { text: 'Close: ', color: tc }, value: '{close}' },
+        { title: { text: 'Volume: ', color: tc }, value: '{volume}' },
+      ];
+      let ref: number | undefined;
+      if (isArea) {
+        ref = preCloseRef.current;
+      } else {
+        ref = cur.pre_close ?? cbData?.prev?.close;
+      }
+      if (ref && ref > 0) {
+        const chg = ((cur.close - ref) / ref) * 100;
+        const color = chg >= 0 ? COLORS.up : COLORS.down;
+        base.push({ title: { text: '涨跌幅: ', color: tc }, value: { text: `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%`, color } } as any);
+      }
+      return base;
+    };
+
+    const styles = {
+      ...baseStyles,
+      candle: {
+        ...baseStyles.candle,
+        tooltip: { showRule: 'always', showType: 'standard', custom: tooltipCustom },
+      },
+    };
+
+    const chart = init(container, {
+      styles,
+      customApi: {
+        formatBigNumber: (value: string) => {
+          const n = parseFloat(value);
+          if (isNaN(n)) return value;
+          const abs = Math.abs(n);
+          if (abs >= 1e8) return (n / 1e8).toFixed(2) + '亿';
+          if (abs >= 1e4) return (n / 1e4).toFixed(2) + '万';
+          return value;
+        },
+      },
+    });
     if (!chart) return;
     chartRef.current = chart;
+
+    if (isArea) {
+      chart.createIndicator('AVG_PRICE', true, { id: 'candle_pane' });
+    }
 
     for (const ind of indicatorsRef.current) {
       if (OVERLAY_INDICATORS.has(ind)) {

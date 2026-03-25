@@ -86,15 +86,22 @@ export default function Dashboard() {
     queryKey: ['kline-data', code, period],
     queryFn: fetchFn,
     enabled: !!code,
+    refetchInterval: period === '1min' ? 30_000 : undefined,
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const bars: any[] = (klineData as { data?: any[] } | undefined)?.data ?? [];
-  const latest = period === 'daily' ? bars[bars.length - 1] : undefined;
-  const latestClose = (latest as Record<string, unknown>)?.close as number | undefined;
-  const latestPctChg = (latest as Record<string, unknown>)?.pct_chg as number | undefined;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const preCloseFromApi = (klineData as any)?.pre_close as number | undefined;
+  const lastBar = bars.length > 0 ? bars[bars.length - 1] : undefined;
+  const latestClose = (lastBar as Record<string, unknown>)?.close as number | undefined;
+  const latestPctChg = (lastBar as Record<string, unknown>)?.pct_chg as number | undefined;
+  const preClose = preCloseFromApi ?? (lastBar as Record<string, unknown>)?.pre_close as number | undefined;
+  const computedPctChg = latestPctChg ?? (latestClose && preClose && preClose > 0
+    ? ((latestClose - preClose) / preClose) * 100
+    : undefined);
 
-  const pctColor = (latestPctChg ?? 0) >= 0 ? '#ff6f91' : '#4ade80';
+  const pctColor = (computedPctChg ?? 0) >= 0 ? '#ff6f91' : '#4ade80';
 
   const titleExtra = (
     <Space size={8} align="center">
@@ -161,9 +168,9 @@ export default function Dashboard() {
           <span style={{ color: pctColor, fontWeight: 600, fontSize: 14 }}>
             ¥{latestClose.toFixed(2)}
           </span>
-          {latestPctChg != null && (
+          {computedPctChg != null && (
             <span style={{ color: pctColor, fontSize: 12 }}>
-              {latestPctChg >= 0 ? '+' : ''}{latestPctChg.toFixed(2)}%
+              {computedPctChg >= 0 ? '+' : ''}{computedPctChg.toFixed(2)}%
             </span>
           )}
         </>
@@ -179,7 +186,13 @@ export default function Dashboard() {
         <div className="flex flex-col h-full">
           <div style={{ flex: 1, minHeight: 0 }}>
             <ErrorBoundary fallbackMsg="K线图表加载失败">
-              <KlineChart data={bars} period={period} autoFill indicators={['MA', 'VOL']} />
+              <KlineChart
+                data={bars}
+                period={period}
+                autoFill
+                indicators={period === '1min' ? ['VOL'] : ['MA', 'VOL']}
+                preClose={preClose}
+              />
             </ErrorBoundary>
           </div>
           <StockNewsPanel tsCode={code} height={150} />
