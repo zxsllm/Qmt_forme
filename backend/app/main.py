@@ -300,33 +300,46 @@ async def get_stock_minutes(
     end: str = Query("", description="datetime"),
     days: int = Query(1, ge=1, le=30, description="默认1天(今天), 最多30天"),
 ):
-    if not start:
-        from datetime import timedelta
-        start_dt = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
-        start = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-
     import pandas as pd
+    from datetime import timedelta
+
+    now = datetime.now()
+    today_str = now.strftime("%Y-%m-%d")
+    in_trading_hours = 9 <= now.hour < 16
+    user_gave_start = bool(start)
+
+    if not start:
+        start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
+        start = start_dt.strftime("%Y-%m-%d %H:%M:%S")
 
     loader = DataLoader()
     df = await loader.minutes(ts_code, start, end)
 
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    if df.empty and not user_gave_start and days == 1:
+        fallback_start = (now - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        df = await loader.minutes(ts_code, fallback_start, "")
+        if not df.empty:
+            latest_date = str(df["trade_time"].iloc[-1])[:10]
+            df = df[df["trade_time"].astype(str).str[:10] == latest_date]
+
     has_today = False
     if not df.empty:
         last_ts = str(df["trade_time"].iloc[-1])
         has_today = today_str in last_ts
 
-    if not has_today:
+    if not has_today and in_trading_hours:
         def _fetch_today_mins():
             from app.research.data.tushare_service import TushareService
             svc = TushareService()
-            return svc.stk_mins(ts_code=ts_code, freq="1min")
+            return svc.stk_mins(ts_code=ts_code, freq="1min",
+                                start_date=f"{today_str} 09:00:00",
+                                end_date=f"{today_str} 15:30:00")
         try:
             rt_df = await asyncio.to_thread(_fetch_today_mins)
             if not rt_df.empty:
-                rt_df = rt_df.rename(columns={"trade_time": "trade_time"})
                 if "trade_time" in rt_df.columns:
                     rt_df["trade_time"] = pd.to_datetime(rt_df["trade_time"])
+                    rt_df = rt_df[rt_df["trade_time"].dt.strftime("%Y-%m-%d") == today_str]
                     rt_df = rt_df.sort_values("trade_time")
                     if not df.empty:
                         df = pd.concat([df, rt_df], ignore_index=True)
