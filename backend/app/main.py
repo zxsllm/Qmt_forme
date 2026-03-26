@@ -319,31 +319,20 @@ async def get_stock_minutes(
     loader = DataLoader()
     df = await loader.minutes(ts_code, start, end)
 
+    if not user_gave_start and days == 1 and in_trading_hours:
+        from app.execution.feed.scheduler import get_intraday_minutes
+        rt_bars = get_intraday_minutes(ts_code)
+        if rt_bars:
+            rt_df = pd.DataFrame(rt_bars)
+            rt_df["trade_time"] = pd.to_datetime(rt_df["trade_time"])
+            df = rt_df.sort_values("trade_time")
+
     if df.empty and not user_gave_start and days == 1:
         fallback_start = (now - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
         df = await loader.minutes(ts_code, fallback_start, "")
         if not df.empty:
             latest_date = str(df["trade_time"].iloc[-1])[:10]
             df = df[df["trade_time"].astype(str).str[:10] == latest_date]
-
-    has_today = False
-    if not df.empty:
-        last_ts = str(df["trade_time"].iloc[-1])
-        has_today = today_str in last_ts
-
-    if not has_today and in_trading_hours:
-        from app.execution.feed.scheduler import get_intraday_minutes
-        rt_bars = get_intraday_minutes(ts_code)
-        if rt_bars:
-            rt_df = pd.DataFrame(rt_bars)
-            rt_df["trade_time"] = pd.to_datetime(rt_df["trade_time"])
-            rt_df = rt_df.sort_values("trade_time")
-            if not df.empty:
-                df = pd.concat([df, rt_df], ignore_index=True)
-                df = df.drop_duplicates(subset=["ts_code", "trade_time"], keep="last")
-                df = df.sort_values("trade_time")
-            else:
-                df = rt_df
 
     start_date_str = start[:10].replace("-", "") if start else ""
 
