@@ -209,12 +209,16 @@ async def get_moneyflow(limit: int = Query(10, ge=1, le=50)):
 @app.get("/api/v1/market/global-indices")
 async def get_global_indices():
     from app.execution.feed.scheduler import get_rt_global_indices
-    rt = get_rt_global_indices()
-    if rt is not None:
-        return {"count": len(rt), "data": rt, "source": "realtime"}
     loader = DataLoader()
+    rt_domestic = get_rt_global_indices()
     df = await loader.global_indices()
-    return {"count": len(df), "data": _df_to_records(df), "source": "daily"}
+    all_records = _df_to_records(df)
+    if rt_domestic:
+        rt_codes = {r["ts_code"] for r in rt_domestic}
+        intl = [r for r in all_records if r.get("ts_code") not in rt_codes]
+        merged = rt_domestic + intl
+        return {"count": len(merged), "data": merged, "source": "realtime+daily"}
+    return {"count": len(all_records), "data": all_records, "source": "daily"}
 
 
 @app.get("/api/v1/market/news")
@@ -328,27 +332,18 @@ async def get_stock_minutes(
         has_today = today_str in last_ts
 
     if not has_today and in_trading_hours:
-        def _fetch_today_mins():
-            from app.research.data.tushare_service import TushareService
-            svc = TushareService()
-            return svc.stk_mins(ts_code=ts_code, freq="1min",
-                                start_date=f"{today_str} 09:00:00",
-                                end_date=f"{today_str} 15:30:00")
-        try:
-            rt_df = await asyncio.to_thread(_fetch_today_mins)
-            if not rt_df.empty:
-                if "trade_time" in rt_df.columns:
-                    rt_df["trade_time"] = pd.to_datetime(rt_df["trade_time"])
-                    rt_df = rt_df[rt_df["trade_time"].dt.strftime("%Y-%m-%d") == today_str]
-                    rt_df = rt_df.sort_values("trade_time")
-                    if not df.empty:
-                        df = pd.concat([df, rt_df], ignore_index=True)
-                        df = df.drop_duplicates(subset=["ts_code", "trade_time"], keep="last")
-                        df = df.sort_values("trade_time")
-                    else:
-                        df = rt_df
-        except Exception:
-            logging.getLogger(__name__).warning("stk_mins fallback failed for %s", ts_code, exc_info=True)
+        from app.execution.feed.scheduler import get_intraday_minutes
+        rt_bars = get_intraday_minutes(ts_code)
+        if rt_bars:
+            rt_df = pd.DataFrame(rt_bars)
+            rt_df["trade_time"] = pd.to_datetime(rt_df["trade_time"])
+            rt_df = rt_df.sort_values("trade_time")
+            if not df.empty:
+                df = pd.concat([df, rt_df], ignore_index=True)
+                df = df.drop_duplicates(subset=["ts_code", "trade_time"], keep="last")
+                df = df.sort_values("trade_time")
+            else:
+                df = rt_df
 
     start_date_str = start[:10].replace("-", "") if start else ""
 

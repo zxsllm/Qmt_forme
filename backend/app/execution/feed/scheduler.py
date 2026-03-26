@@ -53,6 +53,74 @@ _cached_sector_rankings: list[dict] = []       # full sorted sector list
 _cached_indices: list[dict] = []               # domestic index rows
 _RANKINGS_TOP_N = 50  # pre-cache more than needed
 
+# ---------------------------------------------------------------------------
+# Intraday minute-bar aggregator: builds 1-min OHLCV from rt_k snapshots
+# ---------------------------------------------------------------------------
+_intraday_mins: dict[str, dict[str, dict]] = {}  # ts_code -> { "HH:MM" -> bar }
+_intraday_date: str = ""  # e.g. "2026-03-26"
+_intraday_prev_vol: dict[str, float] = {}  # ts_code -> last-seen cumulative vol
+
+
+def _aggregate_minute_bars(snap: dict) -> None:
+    """Called every rt_k tick. Aggregate snapshots into per-minute OHLCV bars."""
+    global _intraday_mins, _intraday_date, _intraday_prev_vol
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    minute_key = now.strftime("%H:%M")
+
+    if today != _intraday_date:
+        _intraday_mins = {}
+        _intraday_prev_vol = {}
+        _intraday_date = today
+
+    for code, row in snap.items():
+        price = row.get("close", 0)
+        if price <= 0:
+            continue
+        cum_vol = row.get("vol", 0)
+        cum_amount = row.get("amount", 0)
+
+        if code not in _intraday_mins:
+            _intraday_mins[code] = {}
+        bars = _intraday_mins[code]
+
+        prev_vol = _intraday_prev_vol.get(code, 0)
+        delta_vol = max(0, cum_vol - prev_vol) if prev_vol > 0 else 0
+
+        if minute_key not in bars:
+            bars[minute_key] = {
+                "open": price, "high": price, "low": price, "close": price,
+                "vol": delta_vol, "amount": 0,
+            }
+        else:
+            b = bars[minute_key]
+            b["high"] = max(b["high"], price)
+            b["low"] = min(b["low"], price)
+            b["close"] = price
+            b["vol"] += delta_vol
+
+        _intraday_prev_vol[code] = cum_vol
+
+
+def get_intraday_minutes(ts_code: str) -> list[dict]:
+    """Return today's minute bars for a single stock, sorted by time."""
+    bars = _intraday_mins.get(ts_code, {})
+    if not bars:
+        return []
+    result = []
+    prefix = _intraday_date
+    for mk in sorted(bars.keys()):
+        b = bars[mk]
+        result.append({
+            "ts_code": ts_code,
+            "trade_time": f"{prefix} {mk}:00",
+            "open": b["open"], "high": b["high"],
+            "low": b["low"], "close": b["close"],
+            "vol": b["vol"], "amount": b["amount"],
+            "freq": "1min",
+        })
+    return result
+
 
 def get_rt_snapshot() -> tuple[dict, float]:
     return _rt_snapshot, _rt_snapshot_ts
@@ -423,6 +491,7 @@ class MarketDataScheduler:
                         _rt_snapshot = snapshot
                         _rt_snapshot_ts = _time.time()
                         _rebuild_rankings_cache(snapshot)
+                        _aggregate_minute_bars(snapshot)
 
                         if watched_bars:
                             self._update_limits_from_bars(watched_bars)
