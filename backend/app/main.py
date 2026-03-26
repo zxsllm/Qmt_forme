@@ -319,13 +319,28 @@ async def get_stock_minutes(
     loader = DataLoader()
     df = await loader.minutes(ts_code, start, end)
 
-    if not user_gave_start and days == 1 and in_trading_hours:
+    if not user_gave_start and days == 1:
         from app.execution.feed.scheduler import get_intraday_minutes
         rt_bars = get_intraday_minutes(ts_code)
         if rt_bars:
             rt_df = pd.DataFrame(rt_bars)
             rt_df["trade_time"] = pd.to_datetime(rt_df["trade_time"])
             df = rt_df.sort_values("trade_time")
+
+    if df.empty and not user_gave_start and days == 1:
+        def _fetch_today_mins():
+            from app.research.data.tushare_service import TushareService
+            svc = TushareService()
+            return svc.stk_mins(ts_code=ts_code, freq="1min",
+                                start_date=f"{today_str} 09:00:00",
+                                end_date=f"{today_str} 15:30:00")
+        try:
+            stk_df = await asyncio.to_thread(_fetch_today_mins)
+            if not stk_df.empty and "trade_time" in stk_df.columns:
+                stk_df["trade_time"] = pd.to_datetime(stk_df["trade_time"])
+                df = stk_df.sort_values("trade_time")
+        except Exception:
+            pass
 
     if df.empty and not user_gave_start and days == 1:
         fallback_start = (now - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
