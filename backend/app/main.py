@@ -408,13 +408,18 @@ async def get_stock_minutes(
         df = df.sort_values("trade_time")
 
     pre_close_val = None
-    auc_row = await loader._query(
-        "SELECT pre_close FROM stk_auction WHERE ts_code = :c "
-        "ORDER BY trade_date DESC LIMIT 1",
-        {"c": ts_code},
-    )
-    if not auc_row.empty:
-        pre_close_val = float(auc_row["pre_close"].iloc[0])
+    from app.execution.feed.scheduler import get_rt_snapshot
+    snap, snap_ts = get_rt_snapshot()
+    if ts_code in snap:
+        pre_close_val = snap[ts_code].get("pre_close")
+    if not pre_close_val:
+        auc_row = await loader._query(
+            "SELECT pre_close FROM stk_auction WHERE ts_code = :c "
+            "ORDER BY trade_date DESC LIMIT 1",
+            {"c": ts_code},
+        )
+        if not auc_row.empty:
+            pre_close_val = float(auc_row["pre_close"].iloc[0])
 
     return {"count": len(df), "data": _df_to_records(df), "pre_close": pre_close_val}
 
