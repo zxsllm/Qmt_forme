@@ -2,7 +2,11 @@ import { useQuery } from '@tanstack/react-query';
 import { api, type RankingRow } from '../../services/api';
 import RankTable, { pctColor } from './RankTable';
 
-export default function StockLosePanel() {
+interface Props {
+  onStockClick?: (tsCode: string) => void;
+}
+
+export default function StockLosePanel({ onStockClick }: Props) {
   const { data } = useQuery({
     queryKey: ['market-rankings', 'lose'],
     queryFn: () => api.marketRankings('lose', 10),
@@ -13,6 +17,7 @@ export default function StockLosePanel() {
     <RankTable<RankingRow>
       title="跌幅榜 TOP10"
       data={data?.data ?? []}
+      onRowClick={onStockClick ? (r) => onStockClick(r.ts_code) : undefined}
       columns={[
         { key: 'name', title: '名称', render: (r) => r.name, width: '36%' },
         {

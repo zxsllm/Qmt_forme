@@ -275,6 +275,9 @@ export const api = {
   sectorRankings: (limit = 10) =>
     fetchJson<ApiList<SectorRankRow>>(`/api/v1/sector/rankings?limit=${limit}`),
 
+  sectorStocks: (industry: string) =>
+    fetchJson<ApiList<SectorStockRow>>(`/api/v1/sector/${encodeURIComponent(industry)}/stocks`),
+
   moneyFlow: (limit = 10) =>
     fetchJson<ApiList<MoneyFlowRow>>(`/api/v1/market/moneyflow?limit=${limit}`),
 
@@ -319,6 +322,16 @@ export interface SectorRankRow {
   industry: string;
   avg_pct_chg: number;
   stock_count: number;
+}
+
+export interface SectorStockRow {
+  ts_code: string;
+  name: string;
+  close: number | null;
+  pct_chg: number | null;
+  vol: number | null;
+  amount: number | null;
+  circ_mv: number | null;
 }
 
 export interface MoneyFlowRow {

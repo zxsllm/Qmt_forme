@@ -12,6 +12,7 @@ interface Props<T> {
   title: string;
   data: T[];
   columns: Column<T>[];
+  onRowClick?: (row: T, idx: number) => void;
 }
 
 function pctColor(v: number | null | undefined): string {
@@ -21,7 +22,7 @@ function pctColor(v: number | null | undefined): string {
 
 export { pctColor };
 
-export default function RankTable<T>({ title, data, columns }: Props<T>) {
+export default function RankTable<T>({ title, data, columns, onRowClick }: Props<T>) {
   return (
     <div
       style={{
@@ -78,7 +79,14 @@ export default function RankTable<T>({ title, data, columns }: Props<T>) {
             {data.map((row, idx) => (
               <tr
                 key={idx}
-                style={{ borderBottom: '1px solid rgba(148,186,215,0.06)' }}
+                onClick={onRowClick ? () => onRowClick(row, idx) : undefined}
+                style={{
+                  borderBottom: '1px solid rgba(148,186,215,0.06)',
+                  cursor: onRowClick ? 'pointer' : undefined,
+                  transition: 'background 0.15s',
+                }}
+                onMouseEnter={(e) => onRowClick && (e.currentTarget.style.background = 'rgba(148,186,215,0.08)')}
+                onMouseLeave={(e) => onRowClick && (e.currentTarget.style.background = '')}
               >
                 {columns.map((col) => (
                   <td

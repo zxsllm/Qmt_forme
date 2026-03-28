@@ -46,14 +46,19 @@ class DataLoader:
         )
 
     async def search_stocks(self, q: str, limit: int = 20) -> pd.DataFrame:
-        """Search stocks by ts_code or name prefix (for autocomplete)."""
-        like = f"{q}%"
+        """Search stocks by ts_code prefix or name (prefix + contains)."""
+        prefix = f"{q}%"
+        contains = f"%{q}%"
         return await self._query(
             "SELECT ts_code, name, industry, list_status "
             "FROM stock_basic "
-            "WHERE (ts_code ILIKE :q OR name ILIKE :q) AND list_status = 'L' "
-            "ORDER BY ts_code LIMIT :lim",
-            {"q": like, "lim": limit},
+            "WHERE (ts_code ILIKE :prefix OR name ILIKE :contains) "
+            "  AND list_status = 'L' "
+            "ORDER BY "
+            "  CASE WHEN ts_code ILIKE :prefix OR name ILIKE :prefix THEN 0 ELSE 1 END, "
+            "  ts_code "
+            "LIMIT :lim",
+            {"prefix": prefix, "contains": contains, "lim": limit},
         )
 
     async def trade_calendar(
@@ -187,6 +192,35 @@ class DataLoader:
             )
         return await self._query("SELECT * FROM index_classify ORDER BY index_code")
 
+    async def sector_stocks(self, industry: str) -> pd.DataFrame:
+        return await self._query(
+            "SELECT d.ts_code, s.name, d.close, d.pct_chg, d.vol, d.amount, "
+            "  b.circ_mv "
+            "FROM stock_daily d "
+            "JOIN stock_basic s ON d.ts_code = s.ts_code "
+            "LEFT JOIN daily_basic b ON d.ts_code = b.ts_code AND d.trade_date = b.trade_date "
+            "WHERE s.industry = :ind AND d.trade_date = ("
+            "  SELECT MAX(trade_date) FROM stock_daily"
+            ") ORDER BY d.pct_chg DESC",
+            {"ind": industry},
+        )
+
+    async def circ_mv_map(self, ts_codes: list[str]) -> dict[str, float]:
+        if not ts_codes:
+            return {}
+        placeholders = ", ".join(f":c{i}" for i in range(len(ts_codes)))
+        params = {f"c{i}": c for i, c in enumerate(ts_codes)}
+        df = await self._query(
+            f"SELECT ts_code, circ_mv FROM daily_basic "
+            f"WHERE ts_code IN ({placeholders}) AND trade_date = ("
+            f"  SELECT MAX(trade_date) FROM daily_basic"
+            f")",
+            params,
+        )
+        if df.empty:
+            return {}
+        return dict(zip(df["ts_code"], df["circ_mv"]))
+
     # ── Cross-sectional snapshot ────────────────────────────────────
 
     async def market_snapshot(self, trade_date: str) -> pd.DataFrame:
@@ -298,19 +332,6 @@ class DataLoader:
         td = await self.latest_trade_date()
         if not td:
             return pd.DataFrame()
-
-        df = await self._query(
-            """
-            SELECT ts_code, name AS industry, pct_change AS avg_pct_chg,
-                   close, pe, pb, vol, amount
-            FROM sw_daily
-            WHERE trade_date = :td
-            ORDER BY pct_change DESC
-            """,
-            {"td": td},
-        )
-        if not df.empty:
-            return df
 
         return await self._query(
             """

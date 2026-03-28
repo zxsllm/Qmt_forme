@@ -106,9 +106,9 @@ async def health():
 @app.get("/api/v1/stock/search")
 async def search_stocks(q: str = Query("", min_length=1, description="code, name or pinyin")):
     """Search stocks by ts_code, name prefix, or pinyin initials (max 20)."""
-    if q.isalpha() and q.upper() == q:
+    if q.isascii() and q.replace(" ", "").isalpha():
         from app.shared.data.pinyin_cache import search_by_pinyin
-        results = await search_by_pinyin(q, limit=20)
+        results = await search_by_pinyin(q.upper(), limit=20)
         if results:
             return {"count": len(results), "data": results}
     loader = DataLoader()
@@ -172,6 +172,44 @@ async def get_sw_classify(level: str = Query("", description="L1/L2/L3")):
 
 
 # ── P2-Plus: Rankings / MoneyFlow / GlobalIndices / News / K-line ──
+
+
+@app.get("/api/v1/sector/{industry}/stocks")
+async def get_sector_stocks(industry: str):
+    from app.execution.feed.scheduler import get_rt_snapshot, _industry_cache
+    from datetime import date as _date
+
+    snap, snap_ts = get_rt_snapshot()
+    snap_is_today = (
+        snap and snap_ts > 0
+        and _date.fromtimestamp(snap_ts) == _date.today()
+    )
+
+    loader = DataLoader()
+
+    if snap_is_today:
+        codes_in_sector = [c for c, ind in _industry_cache.items() if ind == industry]
+        circ_mv_map = await loader.circ_mv_map(codes_in_sector) if codes_in_sector else {}
+        stocks = []
+        for code in codes_in_sector:
+            row = snap.get(code, {})
+            if row.get("close", 0) <= 0:
+                continue
+            stocks.append({
+                "ts_code": code,
+                "name": row.get("name", ""),
+                "close": row.get("close"),
+                "pct_chg": row.get("pct_chg"),
+                "vol": row.get("vol"),
+                "amount": row.get("amount"),
+                "circ_mv": circ_mv_map.get(code),
+            })
+        if stocks:
+            stocks.sort(key=lambda x: x.get("pct_chg", 0) or 0, reverse=True)
+            return {"count": len(stocks), "data": stocks, "source": "realtime"}
+
+    df = await loader.sector_stocks(industry)
+    return {"count": len(df), "data": _df_to_records(df), "source": "daily"}
 
 
 @app.get("/api/v1/market/rankings")

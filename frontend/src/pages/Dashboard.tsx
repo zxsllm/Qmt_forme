@@ -37,6 +37,11 @@ export default function Dashboard() {
 
   const { connected } = useMarketFeed();
 
+  const handleStockSelect = useCallback((tsCode: string) => {
+    setCode(tsCode);
+    setInputVal(tsCode);
+  }, []);
+
   const onSearchInput = useCallback((text: string) => {
     setInputVal(text);
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -200,10 +205,10 @@ export default function Dashboard() {
       </Panel>
 
       <div className="flex shrink-0" style={{ height: 280, gap: 10 }}>
-        <SectorGainPanel />
-        <SectorLosePanel />
-        <StockGainPanel />
-        <StockLosePanel />
+        <SectorGainPanel onStockClick={handleStockSelect} />
+        <SectorLosePanel onStockClick={handleStockSelect} />
+        <StockGainPanel onStockClick={handleStockSelect} />
+        <StockLosePanel onStockClick={handleStockSelect} />
         <TurnoverPanel />
         <MoneyFlowPanel />
         <GlobalIndexPanel />

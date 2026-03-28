@@ -181,10 +181,13 @@ def get_rt_global_indices() -> list[dict] | None:
 
 
 def get_rt_sector_rankings(limit: int = 30, direction: str = "gain") -> list[dict] | None:
+    """Return cached sector rankings. Valid until midnight (post-close data is final)."""
     import time as _t
-    if not _rt_snapshot or _t.time() - _rt_snapshot_ts > 60:
-        return None
     if not _cached_sector_rankings:
+        return None
+    from datetime import date as _date
+    snap_date = _date.fromtimestamp(_rt_snapshot_ts) if _rt_snapshot_ts else None
+    if snap_date != _date.today():
         return None
     return _cached_sector_rankings[:limit]
 
@@ -478,7 +481,13 @@ class MarketDataScheduler:
                 self._maybe_pull_news()
                 self._maybe_backfill_mins()
 
-                if _is_trading_time(now):
+                is_trading = _is_trading_time(now)
+                if not hasattr(self, '_last_trading_log') or _time.time() - self._last_trading_log > 60:
+                    logger.info("loop tick: now=%s is_trading=%s today_is_trading=%s",
+                                now.strftime("%H:%M:%S"), is_trading, self._today_is_trading)
+                    self._last_trading_log = _time.time()
+
+                if is_trading:
                     self._maybe_pull_mins()
 
                     t0 = _time.monotonic()
@@ -531,6 +540,7 @@ class MarketDataScheduler:
 
     async def _fetch_full_market(self) -> tuple[dict, list[BarData]] | None:
         """Single rt_k call for entire market. Returns (snapshot_dict, watched_bars)."""
+        logger.info("_fetch_full_market called, watch=%d codes", len(self._watch_codes))
         watch_set = set(self._watch_codes)
 
         def _sync() -> tuple[dict, list[BarData]] | None:
@@ -543,8 +553,10 @@ class MarketDataScheduler:
             except Exception:
                 logger.warning("rt_k full-market fetch failed", exc_info=True)
                 return None
-            if df.empty:
+            if df is None or df.empty:
+                logger.warning("rt_k returned empty data — Tushare may be unavailable or market not open")
                 return None
+            logger.info("rt_k snapshot: %d stocks", len(df))
 
             snapshot: dict = {}
             watched_bars: list[BarData] = []
