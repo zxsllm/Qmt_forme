@@ -210,3 +210,96 @@ class TushareService:
     def concept_detail(self, **kwargs) -> pd.DataFrame:
         kwargs.setdefault("fields", "id,concept_name,ts_code,name")
         return self.query("concept_detail", **kwargs)
+
+    # ── 财务数据 ─────────────────────────────────────────────
+
+    def fina_indicator(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "ts_code,ann_date,end_date,eps,dt_eps,profit_dedt,roe,roe_waa,roe_dt,"
+            "roa,netprofit_margin,grossprofit_margin,debt_to_assets,ocfps,bps,"
+            "current_ratio,quick_ratio,netprofit_yoy,dt_netprofit_yoy,tr_yoy,or_yoy",
+        )
+        return self.query("fina_indicator", **kwargs)
+
+    def income(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "ts_code,ann_date,f_ann_date,end_date,report_type,"
+            "total_revenue,revenue,oper_cost,sell_exp,admin_exp,fin_exp,rd_exp,"
+            "operate_profit,total_profit,income_tax,n_income,n_income_attr_p,basic_eps",
+        )
+        return self.query("income", **kwargs)
+
+    def forecast(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "ts_code,ann_date,end_date,type,p_change_min,p_change_max,"
+            "net_profit_min,net_profit_max,last_parent_net,summary,change_reason",
+        )
+        return self.query("forecast", **kwargs)
+
+    def fina_mainbz(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "ts_code,end_date,bz_item,bz_sales,bz_profit,bz_cost,curr_type",
+        )
+        return self.query("fina_mainbz", **kwargs)
+
+    def disclosure_date(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "ts_code,ann_date,end_date,pre_date,actual_date,modify_date",
+        )
+        return self.query("disclosure_date", **kwargs)
+
+    # ── 打板/情绪面 ──────────────────────────────────────────
+
+    def limit_list_ths(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "trade_date,ts_code,name,pct_chg,limit_type,first_lu_time,last_lu_time,"
+            "open_num,limit_amount,turnover_rate,tag,status",
+        )
+        return self.query("limit_list_ths", **kwargs)
+
+    def limit_list_d(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "trade_date,ts_code,name,industry,close,pct_chg,amount,limit_amount,"
+            "float_mv,first_time,last_time,open_times,limit_times,limit",
+        )
+        return self.query("limit_list_d", **kwargs)
+
+    def limit_step(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault("fields", "ts_code,name,trade_date,nums")
+        return self.query("limit_step", **kwargs)
+
+    def top_list(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "trade_date,ts_code,name,close,pct_change,turnover_rate,"
+            "amount,l_sell,l_buy,l_amount,net_amount,net_rate,reason",
+        )
+        return self.query("top_list", **kwargs)
+
+    def hm_detail(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "trade_date,ts_code,ts_name,buy_amount,sell_amount,net_amount,hm_name,tag",
+        )
+        return self.query("hm_detail", **kwargs)
+
+    def limit_cpt_list(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "ts_code,name,trade_date,days,up_stat,cons_nums,up_nums,pct_chg,rank",
+        )
+        return self.query("limit_cpt_list", **kwargs)
+
+    def dc_hot(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "trade_date,data_type,ts_code,ts_name,rank,pct_change,current_price",
+        )
+        return self.query("dc_hot", **kwargs)

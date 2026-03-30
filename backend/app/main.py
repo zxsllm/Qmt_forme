@@ -292,6 +292,247 @@ async def get_stock_anns(ts_code: str, limit: int = Query(20, ge=1, le=100)):
     return {"count": len(df), "data": _df_to_records(df)}
 
 
+@app.get("/api/v1/market/news/classified")
+async def get_classified_news(
+    scope: str = Query("", description="macro/industry/stock/mixed, empty=all"),
+    time_slot: str = Query("", description="pre_open/intraday/after_hours, empty=all"),
+    sentiment: str = Query("", description="positive/negative/neutral, empty=all"),
+    limit: int = Query(50, ge=1, le=500),
+):
+    """Get classified news with filters."""
+    from app.core.database import async_session
+    from sqlalchemy import text
+    async with async_session() as session:
+        wheres, params = [], {}
+        if scope:
+            wheres.append("nc.news_scope = :scope")
+            params["scope"] = scope
+        if time_slot:
+            wheres.append("nc.time_slot = :time_slot")
+            params["time_slot"] = time_slot
+        if sentiment:
+            wheres.append("nc.sentiment = :sentiment")
+            params["sentiment"] = sentiment
+        where_sql = ("WHERE " + " AND ".join(wheres)) if wheres else ""
+        sql = text(f"""
+            SELECT n.id, n.datetime, n.content, n.channels, n.source,
+                   nc.news_scope, nc.time_slot, nc.sentiment,
+                   nc.related_codes, nc.related_industries, nc.keywords
+            FROM stock_news n
+            JOIN news_classified nc ON n.id = nc.news_id
+            {where_sql}
+            ORDER BY n.datetime DESC
+            LIMIT :limit
+        """)
+        params["limit"] = limit
+        result = await session.execute(sql, params)
+        rows = result.fetchall()
+    data = []
+    for r in rows:
+        data.append({
+            "id": r[0], "datetime": r[1], "content": r[2],
+            "channels": r[3], "source": r[4],
+            "news_scope": r[5], "time_slot": r[6], "sentiment": r[7],
+            "related_codes": r[8], "related_industries": r[9], "keywords": r[10],
+        })
+    return {"count": len(data), "data": data}
+
+
+@app.get("/api/v1/market/anns/classified")
+async def get_classified_anns(
+    ann_type: str = Query("", description="earnings_forecast/holder_change/buyback/... empty=all"),
+    sentiment: str = Query("", description="positive/negative/neutral, empty=all"),
+    limit: int = Query(50, ge=1, le=500),
+):
+    """Get classified announcements with filters."""
+    from app.core.database import async_session
+    from sqlalchemy import text
+    async with async_session() as session:
+        wheres, params = [], {}
+        if ann_type:
+            wheres.append("ac.ann_type = :ann_type")
+            params["ann_type"] = ann_type
+        if sentiment:
+            wheres.append("ac.sentiment = :sentiment")
+            params["sentiment"] = sentiment
+        where_sql = ("WHERE " + " AND ".join(wheres)) if wheres else ""
+        sql = text(f"""
+            SELECT a.id, a.ts_code, a.ann_date, a.title, a.url,
+                   ac.ann_type, ac.sentiment, ac.keywords
+            FROM stock_anns a
+            JOIN anns_classified ac ON a.id = ac.anns_id
+            {where_sql}
+            ORDER BY a.ann_date DESC, a.id DESC
+            LIMIT :limit
+        """)
+        params["limit"] = limit
+        result = await session.execute(sql, params)
+        rows = result.fetchall()
+    data = []
+    for r in rows:
+        data.append({
+            "id": r[0], "ts_code": r[1], "ann_date": r[2], "title": r[3],
+            "url": r[4], "ann_type": r[5], "sentiment": r[6], "keywords": r[7],
+        })
+    return {"count": len(data), "data": data}
+
+
+@app.get("/api/v1/market/news/stats")
+async def get_news_stats():
+    """Get news classification statistics for dashboard."""
+    from app.core.database import async_session
+    from sqlalchemy import text
+    async with async_session() as session:
+        result = await session.execute(text("""
+            SELECT news_scope, time_slot, sentiment, COUNT(*)
+            FROM news_classified
+            GROUP BY news_scope, time_slot, sentiment
+            ORDER BY COUNT(*) DESC
+        """))
+        rows = result.fetchall()
+    stats = [
+        {"scope": r[0], "time_slot": r[1], "sentiment": r[2], "count": r[3]}
+        for r in rows
+    ]
+    return {"data": stats}
+
+
+# ── Sentiment / Limit Board endpoints ─────────────────────────
+
+@app.get("/api/v1/sentiment/limit-board")
+async def get_limit_board(
+    trade_date: str = Query("", description="YYYYMMDD, defaults to latest"),
+    limit_type: str = Query("", description="U=涨停 D=跌停 Z=炸板, empty=all"),
+):
+    from app.core.database import async_session
+    from sqlalchemy import text
+    async with async_session() as session:
+        if not trade_date:
+            r = await session.execute(text(
+                "SELECT trade_date FROM limit_list_ths ORDER BY trade_date DESC LIMIT 1"
+            ))
+            row = r.fetchone()
+            trade_date = row[0] if row else ""
+        if not trade_date:
+            return {"count": 0, "data": [], "trade_date": ""}
+        wheres = ["trade_date = :td"]
+        params: dict = {"td": trade_date}
+        if limit_type:
+            lt_map = {"U": "涨停板", "D": "跌停板", "Z": "炸板股"}
+            wheres.append("limit_type = :lt")
+            params["lt"] = lt_map.get(limit_type, limit_type)
+        where_sql = " AND ".join(wheres)
+        result = await session.execute(text(f"""
+            SELECT ts_code, name, pct_chg, trade_date, limit_type,
+                   limit_amount, turnover_rate, tag, status,
+                   open_num, first_lu_time, last_lu_time
+            FROM limit_list_ths WHERE {where_sql}
+            ORDER BY first_lu_time ASC NULLS LAST
+        """), params)
+        rows = result.fetchall()
+    cols = ["ts_code", "name", "pct_chg", "trade_date", "limit_type",
+            "limit_amount", "turnover_rate", "tag", "status",
+            "open_num", "first_lu_time", "last_lu_time"]
+    data = [dict(zip(cols, r)) for r in rows]
+    for d in data:
+        for k, v in d.items():
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                d[k] = None
+    return {"count": len(data), "data": data, "trade_date": trade_date}
+
+
+@app.get("/api/v1/sentiment/limit-step")
+async def get_limit_step(
+    trade_date: str = Query("", description="YYYYMMDD, defaults to latest"),
+):
+    from app.core.database import async_session
+    from sqlalchemy import text
+    async with async_session() as session:
+        if not trade_date:
+            r = await session.execute(text(
+                "SELECT trade_date FROM limit_step ORDER BY trade_date DESC LIMIT 1"
+            ))
+            row = r.fetchone()
+            trade_date = row[0] if row else ""
+        if not trade_date:
+            return {"count": 0, "data": [], "trade_date": ""}
+        result = await session.execute(text("""
+            SELECT ts_code, name, trade_date, nums
+            FROM limit_step WHERE trade_date = :td
+            ORDER BY CAST(nums AS INTEGER) DESC NULLS LAST
+        """), {"td": trade_date})
+        rows = result.fetchall()
+    cols = ["ts_code", "name", "trade_date", "nums"]
+    data = [dict(zip(cols, r)) for r in rows]
+    return {"count": len(data), "data": data, "trade_date": trade_date}
+
+
+@app.get("/api/v1/sentiment/dragon-tiger")
+async def get_dragon_tiger(
+    trade_date: str = Query("", description="YYYYMMDD, defaults to latest"),
+    limit: int = Query(30, ge=1, le=100),
+):
+    from app.core.database import async_session
+    from sqlalchemy import text
+    async with async_session() as session:
+        if not trade_date:
+            r = await session.execute(text(
+                "SELECT trade_date FROM top_list ORDER BY trade_date DESC LIMIT 1"
+            ))
+            row = r.fetchone()
+            trade_date = row[0] if row else ""
+        if not trade_date:
+            return {"count": 0, "data": [], "trade_date": ""}
+        result = await session.execute(text("""
+            SELECT ts_code, name, trade_date, close, pct_change,
+                   turnover_rate, amount, l_sell, l_buy, l_amount,
+                   net_amount, net_rate, reason
+            FROM top_list WHERE trade_date = :td
+            ORDER BY amount DESC NULLS LAST
+            LIMIT :lim
+        """), {"td": trade_date, "lim": limit})
+        rows = result.fetchall()
+    cols = ["ts_code", "name", "trade_date", "close", "pct_change",
+            "turnover_rate", "amount", "l_sell", "l_buy", "l_amount",
+            "net_amount", "net_rate", "reason"]
+    data = [dict(zip(cols, r)) for r in rows]
+    for d in data:
+        for k, v in d.items():
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                d[k] = None
+    return {"count": len(data), "data": data, "trade_date": trade_date}
+
+
+@app.get("/api/v1/sentiment/hot-list")
+async def get_hot_list(
+    trade_date: str = Query("", description="YYYYMMDD, defaults to latest"),
+    limit: int = Query(30, ge=1, le=100),
+):
+    from app.core.database import async_session
+    from sqlalchemy import text
+    async with async_session() as session:
+        if not trade_date:
+            r = await session.execute(text(
+                "SELECT trade_date FROM dc_hot ORDER BY trade_date DESC LIMIT 1"
+            ))
+            row = r.fetchone()
+            trade_date = row[0] if row else ""
+        if not trade_date:
+            return {"count": 0, "data": [], "trade_date": ""}
+        result = await session.execute(text("""
+            SELECT ts_code, ts_name, data_type, trade_date, pct_change,
+                   rank, current_price
+            FROM dc_hot WHERE trade_date = :td
+            ORDER BY rank ASC NULLS LAST
+            LIMIT :lim
+        """), {"td": trade_date, "lim": limit})
+        rows = result.fetchall()
+    cols = ["ts_code", "ts_name", "data_type", "trade_date", "pct_change",
+            "rank", "current_price"]
+    data = [dict(zip(cols, r)) for r in rows]
+    return {"count": len(data), "data": data, "trade_date": trade_date}
+
+
 @app.get("/api/v1/stock/{ts_code}/irm_qa")
 async def get_stock_irm_qa(ts_code: str, limit: int = Query(20, ge=1, le=100)):
     import pandas as pd
@@ -366,22 +607,32 @@ async def get_stock_minutes(
             df = rt_df.sort_values("trade_time")
 
     if df.empty and not user_gave_start and days == 1:
-        def _fetch_today_mins():
+        # Fallback 1: Tushare stk_mins (prioritize fresh data over stale DB)
+        def _fetch_latest_mins():
             from app.research.data.tushare_service import TushareService
             svc = TushareService()
-            return svc.stk_mins(ts_code=ts_code, freq="1min",
-                                start_date=f"{today_str} 09:00:00",
-                                end_date=f"{today_str} 15:30:00")
+            for days_back in range(0, 8):
+                d = now - timedelta(days=days_back)
+                ds = d.strftime("%Y-%m-%d")
+                result = svc.stk_mins(
+                    ts_code=ts_code, freq="1min",
+                    start_date=f"{ds} 09:00:00",
+                    end_date=f"{ds} 15:30:00",
+                )
+                if not result.empty:
+                    return result
+            return pd.DataFrame()
         try:
-            stk_df = await asyncio.to_thread(_fetch_today_mins)
+            stk_df = await asyncio.to_thread(_fetch_latest_mins)
             if not stk_df.empty and "trade_time" in stk_df.columns:
                 stk_df["trade_time"] = pd.to_datetime(stk_df["trade_time"])
                 df = stk_df.sort_values("trade_time")
         except Exception:
-            pass
+            logger.warning("stk_mins fallback failed for %s", ts_code, exc_info=True)
 
     if df.empty and not user_gave_start and days == 1:
-        fallback_start = (now - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        # Fallback 2: DB wider range (30 days) — pick the most recent day
+        fallback_start = (now - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
         df = await loader.minutes(ts_code, fallback_start, "")
         if not df.empty:
             latest_date = str(df["trade_time"].iloc[-1])[:10]

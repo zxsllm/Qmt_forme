@@ -3,11 +3,12 @@ import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { Menu } from 'antd';
 import {
   LineChartOutlined,
-  FundOutlined,
-  UnorderedListOutlined,
-  HistoryOutlined,
-  SafetyCertificateOutlined,
+  SwapOutlined,
   ExperimentOutlined,
+  SettingOutlined,
+  NotificationOutlined,
+  FireOutlined,
+  BarChartOutlined,
   DashboardOutlined,
 } from '@ant-design/icons';
 import SidebarNews from '../components/SidebarNews';
@@ -15,12 +16,12 @@ import SidebarNews from '../components/SidebarNews';
 const menuItems = [
   { key: '/', icon: <DashboardOutlined />, label: '控制台' },
   { key: '/kline', icon: <LineChartOutlined />, label: 'K线图表' },
-  { key: '/positions', icon: <FundOutlined />, label: '持仓' },
-  { key: '/orders', icon: <UnorderedListOutlined />, label: '订单' },
-  { key: '/history', icon: <HistoryOutlined />, label: '历史' },
-  { key: '/risk', icon: <SafetyCertificateOutlined />, label: '风控' },
-  { key: '/strategy', icon: <ExperimentOutlined />, label: '策略' },
-  { key: '/backtest', icon: <HistoryOutlined />, label: '回测' },
+  { key: '/trading', icon: <SwapOutlined />, label: '交易中心' },
+  { key: '/strategy', icon: <ExperimentOutlined />, label: '策略研究' },
+  { key: '/system', icon: <SettingOutlined />, label: '系统监控' },
+  { key: '/news', icon: <NotificationOutlined />, label: '消息中心' },
+  { key: '/sentiment', icon: <FireOutlined />, label: '情绪看板' },
+  { key: '/fundamental', icon: <BarChartOutlined />, label: '基本面' },
 ];
 
 export default function MainLayout() {
@@ -54,7 +55,7 @@ export default function MainLayout() {
             {collapsed ? 'AT' : 'AI Trade'}
           </span>
           {!collapsed && (
-            <span style={{ color: '#334155', fontSize: 11, marginLeft: 'auto' }}>v0.2</span>
+            <span style={{ color: '#334155', fontSize: 11, marginLeft: 'auto' }}>v0.3</span>
           )}
         </div>
 

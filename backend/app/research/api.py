@@ -19,6 +19,10 @@ from app.shared.models import BacktestRun, StrategyMeta
 from app.research.backtest.engine import BacktestEngine
 from app.research.backtest.report import ReportGenerator
 from app.research.strategies.ma_crossover import MACrossover
+from app.research.strategies.overnight_gap import (
+    OvernightGapStrategy,
+    run_backtest as run_overnight_backtest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +30,10 @@ router = APIRouter(prefix="/api/v1/backtest", tags=["backtest"])
 
 STRATEGY_REGISTRY: dict[str, type] = {
     "ma_crossover": MACrossover,
+    "overnight_gap": OvernightGapStrategy,
 }
+
+CUSTOM_BACKTEST_STRATEGIES = {"overnight_gap"}
 
 
 class RunBacktestRequest(BaseModel):
@@ -55,6 +62,84 @@ async def _run_backtest_async(config: BacktestConfig, strategy_cls: type) -> dic
         "filtered_signals": [f.model_dump() for f in result.filtered_signals],
         "started_at": result.started_at.isoformat() if result.started_at else None,
         "finished_at": result.finished_at.isoformat() if result.finished_at else None,
+    }
+
+
+async def _run_overnight_backtest(req: RunBacktestRequest) -> dict:
+    """Run the OvernightGap V2 strategy via its own independent backtest loop."""
+    params = {**OvernightGapStrategy.default_params, **req.strategy_params}
+    started = datetime.now()
+    summary = await run_overnight_backtest(
+        start_date=req.start_date,
+        end_date=req.end_date,
+        initial_capital=req.initial_capital,
+        max_buy=params.get("max_buy", 3),
+        lot_size=params.get("lot_size", 100),
+        mode=params.get("mode", "signal"),
+        entry_minute=params.get("entry_minute", 1450),
+        buy_threshold=params.get("buy_threshold", 0.45),
+    )
+    finished = datetime.now()
+
+    equity_curve: list[dict] = []
+    prev_equity = req.initial_capital
+    for i, v in enumerate(summary.equity_curve):
+        daily_ret = (v - prev_equity) / prev_equity if prev_equity > 0 and i > 0 else 0.0
+        equity_curve.append({
+            "date": summary.trade_log[i].trade_date if i < len(summary.trade_log) else "",
+            "total_asset": round(v, 2),
+            "cash": round(v, 2),
+            "market_value": 0.0,
+            "daily_return": round(daily_ret, 6),
+            "benchmark_return": 0.0,
+        })
+        prev_equity = v
+
+    trades = [
+        {
+            "signal_date": r.trade_date,
+            "trade_date": r.trade_date,
+            "ts_code": r.ts_code,
+            "side": "BUY",
+            "price": r.buy_price,
+            "qty": r.qty,
+            "amount": round(r.buy_price * r.qty, 2),
+            "fee": r.buy_fee + r.sell_fee,
+            "slippage": 0.0,
+            "reason": (f"{r.buy_minute//100}:{r.buy_minute%100:02d}买@{r.buy_score:.3f} | "
+                       f"卖出@{r.next_date} {r.sell_price} | 盈亏{r.pnl:+.0f} ({r.ret:+.1f}%)"),
+        }
+        for r in summary.trade_log
+    ]
+
+    return {
+        "config": {
+            "strategy_name": "overnight_gap",
+            "strategy_params": params,
+            "start_date": req.start_date,
+            "end_date": req.end_date,
+            "initial_capital": req.initial_capital,
+            "benchmark": req.benchmark,
+            "universe": [],
+        },
+        "stats": {
+            "total_return": summary.total_return,
+            "annual_return": summary.annual_return,
+            "max_drawdown": summary.max_drawdown,
+            "max_drawdown_amount": 0.0,
+            "sharpe_ratio": summary.sharpe_ratio,
+            "sortino_ratio": 0.0,
+            "win_rate": summary.win_rate,
+            "profit_factor": summary.profit_factor,
+            "total_trades": summary.total_trades,
+            "avg_holding_days": 1.0,
+            "benchmark_return": 0.0,
+        },
+        "equity_curve": equity_curve,
+        "trades": trades,
+        "filtered_signals": [],
+        "started_at": started.isoformat(),
+        "finished_at": finished.isoformat(),
     }
 
 
@@ -91,7 +176,10 @@ async def run_backtest(req: RunBacktestRequest):
         await session.close()
 
     try:
-        data = await _run_backtest_async(config, strategy_cls)
+        if req.strategy_name in CUSTOM_BACKTEST_STRATEGIES:
+            data = await _run_overnight_backtest(req)
+        else:
+            data = await _run_backtest_async(config, strategy_cls)
     except Exception as e:
         session = async_session()
         try:

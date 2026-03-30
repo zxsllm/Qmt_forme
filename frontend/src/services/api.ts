@@ -304,6 +304,48 @@ export const api = {
 
   stockMinutes: (code: string, start = '', end = '') =>
     fetchJson<ApiList<MinuteBar>>(`/api/v1/stock/${code}/minutes?start=${start}&end=${end}`),
+
+  // ── Classified News / Anns ────────────────────────────────
+  classifiedNews: (params: { scope?: string; time_slot?: string; sentiment?: string; limit?: number } = {}) =>
+    fetchJson<ApiList<ClassifiedNewsItem>>(
+      `/api/v1/market/news/classified?scope=${params.scope || ''}&time_slot=${params.time_slot || ''}&sentiment=${params.sentiment || ''}&limit=${params.limit || 50}`,
+    ),
+
+  classifiedAnns: (params: { ann_type?: string; sentiment?: string; limit?: number } = {}) =>
+    fetchJson<ApiList<ClassifiedAnnItem>>(
+      `/api/v1/market/anns/classified?ann_type=${params.ann_type || ''}&sentiment=${params.sentiment || ''}&limit=${params.limit || 50}`,
+    ),
+
+  newsStats: () =>
+    fetchJson<{ data: NewsStatRow[] }>('/api/v1/market/news/stats'),
+
+  // ── Sentiment ─────────────────────────────────────────────
+  limitBoard: (params: { trade_date?: string; limit_type?: string } = {}) =>
+    fetchJson<{ count: number; data: LimitBoardItem[]; trade_date: string }>(
+      `/api/v1/sentiment/limit-board?trade_date=${params.trade_date || ''}&limit_type=${params.limit_type || ''}`,
+    ),
+
+  limitStep: (trade_date = '') =>
+    fetchJson<{ count: number; data: LimitStepItem[]; trade_date: string }>(
+      `/api/v1/sentiment/limit-step?trade_date=${trade_date}`,
+    ),
+
+  dragonTiger: (trade_date = '', limit = 30) =>
+    fetchJson<{ count: number; data: DragonTigerItem[]; trade_date: string }>(
+      `/api/v1/sentiment/dragon-tiger?trade_date=${trade_date}&limit=${limit}`,
+    ),
+
+  hotList: (trade_date = '', limit = 30) =>
+    fetchJson<{ count: number; data: HotListItem[]; trade_date: string }>(
+      `/api/v1/sentiment/hot-list?trade_date=${trade_date}&limit=${limit}`,
+    ),
+
+  // ── Feed control ──────────────────────────────────────────
+  startFeed: () =>
+    postJson<{ status: string }>('/api/v1/feed/start', {}),
+
+  stopFeed: () =>
+    postJson<{ status: string }>('/api/v1/feed/stop', {}),
 };
 
 // ── P2-Plus types ────────────────────────────────────────
@@ -461,4 +503,88 @@ export interface BacktestRunSummary {
   stats: BacktestStats | null;
   started_at: string;
   finished_at: string | null;
+}
+
+// ── Classified News / Anns types ─────────────────────────────
+
+export interface ClassifiedNewsItem {
+  id: number;
+  datetime: string;
+  content: string;
+  channels: string | null;
+  source: string | null;
+  news_scope: string;
+  time_slot: string;
+  sentiment: string;
+  related_codes: string | null;
+  related_industries: string | null;
+  keywords: string | null;
+}
+
+export interface ClassifiedAnnItem {
+  id: number;
+  ts_code: string;
+  ann_date: string;
+  title: string;
+  url: string | null;
+  ann_type: string;
+  sentiment: string;
+  keywords: string | null;
+}
+
+export interface NewsStatRow {
+  scope: string;
+  time_slot: string;
+  sentiment: string;
+  count: number;
+}
+
+// ── Sentiment types ──────────────────────────────────────────
+
+export interface LimitBoardItem {
+  ts_code: string;
+  name: string;
+  pct_chg: number | null;
+  trade_date: string;
+  limit_type: string;
+  limit_amount: number | null;
+  turnover_rate: number | null;
+  tag: string | null;
+  status: string | null;
+  open_num: number | null;
+  first_lu_time: string | null;
+  last_lu_time: string | null;
+}
+
+export interface LimitStepItem {
+  ts_code: string;
+  name: string;
+  trade_date: string;
+  nums: string;
+}
+
+export interface DragonTigerItem {
+  ts_code: string;
+  name: string;
+  trade_date: string;
+  close: number | null;
+  pct_change: number | null;
+  turnover_rate: number | null;
+  amount: number | null;
+  l_sell: number | null;
+  l_buy: number | null;
+  l_amount: number | null;
+  net_amount: number | null;
+  net_rate: number | null;
+  reason: string | null;
+}
+
+export interface HotListItem {
+  ts_code: string;
+  ts_name: string;
+  data_type: string | null;
+  trade_date: string;
+  pct_change: number | null;
+  rank: number | null;
+  current_price: number | null;
 }

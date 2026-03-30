@@ -516,3 +516,306 @@ class ConceptDetail(Base):
     ts_code: Mapped[str] = mapped_column(String(16), primary_key=True)
     concept_name: Mapped[str | None] = mapped_column(String(64))
     name: Mapped[str | None] = mapped_column(String(32))
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.8: 四维能力建设 — 基本面
+# ---------------------------------------------------------------------------
+
+class FinaIndicator(Base):
+    """Key financial indicators from Tushare fina_indicator API."""
+    __tablename__ = "fina_indicator"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    ann_date: Mapped[str | None] = mapped_column(String(8))
+    end_date: Mapped[str] = mapped_column(String(8), index=True)
+    eps: Mapped[float | None] = mapped_column(Float)
+    dt_eps: Mapped[float | None] = mapped_column(Float)
+    profit_dedt: Mapped[float | None] = mapped_column(Float)
+    roe: Mapped[float | None] = mapped_column(Float)
+    roe_waa: Mapped[float | None] = mapped_column(Float)
+    roe_dt: Mapped[float | None] = mapped_column(Float)
+    roa: Mapped[float | None] = mapped_column(Float)
+    netprofit_margin: Mapped[float | None] = mapped_column(Float)
+    grossprofit_margin: Mapped[float | None] = mapped_column(Float)
+    debt_to_assets: Mapped[float | None] = mapped_column(Float)
+    ocfps: Mapped[float | None] = mapped_column(Float)
+    bps: Mapped[float | None] = mapped_column(Float)
+    current_ratio: Mapped[float | None] = mapped_column(Float)
+    quick_ratio: Mapped[float | None] = mapped_column(Float)
+    netprofit_yoy: Mapped[float | None] = mapped_column(Float)
+    dt_netprofit_yoy: Mapped[float | None] = mapped_column(Float)
+    tr_yoy: Mapped[float | None] = mapped_column(Float)
+    or_yoy: Mapped[float | None] = mapped_column(Float)
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "end_date", name="uq_fina_indicator_code_end"),
+    )
+
+
+class Income(Base):
+    """Income statement from Tushare income API."""
+    __tablename__ = "income"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    ann_date: Mapped[str | None] = mapped_column(String(8))
+    f_ann_date: Mapped[str | None] = mapped_column(String(8))
+    end_date: Mapped[str] = mapped_column(String(8), index=True)
+    report_type: Mapped[str | None] = mapped_column(String(4))
+    total_revenue: Mapped[float | None] = mapped_column(Float)
+    revenue: Mapped[float | None] = mapped_column(Float)
+    oper_cost: Mapped[float | None] = mapped_column(Float)
+    sell_exp: Mapped[float | None] = mapped_column(Float)
+    admin_exp: Mapped[float | None] = mapped_column(Float)
+    fin_exp: Mapped[float | None] = mapped_column(Float)
+    rd_exp: Mapped[float | None] = mapped_column(Float)
+    operate_profit: Mapped[float | None] = mapped_column(Float)
+    total_profit: Mapped[float | None] = mapped_column(Float)
+    income_tax: Mapped[float | None] = mapped_column(Float)
+    n_income: Mapped[float | None] = mapped_column(Float)
+    n_income_attr_p: Mapped[float | None] = mapped_column(Float)
+    basic_eps: Mapped[float | None] = mapped_column(Float)
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "end_date", "report_type", name="uq_income_code_end_rpt"),
+    )
+
+
+class Forecast(Base):
+    """Earnings forecast from Tushare forecast API."""
+    __tablename__ = "forecast"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    ann_date: Mapped[str | None] = mapped_column(String(8), index=True)
+    end_date: Mapped[str] = mapped_column(String(8))
+    type: Mapped[str | None] = mapped_column(String(16))
+    p_change_min: Mapped[float | None] = mapped_column(Float)
+    p_change_max: Mapped[float | None] = mapped_column(Float)
+    net_profit_min: Mapped[float | None] = mapped_column(Float)
+    net_profit_max: Mapped[float | None] = mapped_column(Float)
+    last_parent_net: Mapped[float | None] = mapped_column(Float)
+    summary: Mapped[str | None] = mapped_column(Text)
+    change_reason: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "ann_date", "end_date", name="uq_forecast_code_ann_end"),
+    )
+
+
+class FinaMainbz(Base):
+    """Main business composition from Tushare fina_mainbz API."""
+    __tablename__ = "fina_mainbz"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    end_date: Mapped[str] = mapped_column(String(8), index=True)
+    bz_item: Mapped[str | None] = mapped_column(String(128))
+    bz_sales: Mapped[float | None] = mapped_column(Float)
+    bz_profit: Mapped[float | None] = mapped_column(Float)
+    bz_cost: Mapped[float | None] = mapped_column(Float)
+    curr_type: Mapped[str | None] = mapped_column(String(8))
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "end_date", "bz_item", name="uq_fina_mainbz_code_end_item"),
+    )
+
+
+class DisclosureDate(Base):
+    """Financial report disclosure schedule from Tushare disclosure_date API."""
+    __tablename__ = "disclosure_date"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    ann_date: Mapped[str | None] = mapped_column(String(8))
+    end_date: Mapped[str] = mapped_column(String(8), index=True)
+    pre_date: Mapped[str | None] = mapped_column(String(8))
+    actual_date: Mapped[str | None] = mapped_column(String(8))
+    modify_date: Mapped[str | None] = mapped_column(String(8))
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "end_date", name="uq_disclosure_date_code_end"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.8: 四维能力建设 — 情绪面
+# ---------------------------------------------------------------------------
+
+class LimitListThs(Base):
+    """THS limit-up/down board list from Tushare limit_list_ths API."""
+    __tablename__ = "limit_list_ths"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[str] = mapped_column(String(8), index=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str | None] = mapped_column(String(32))
+    pct_chg: Mapped[float | None] = mapped_column(Float)
+    limit_type: Mapped[str | None] = mapped_column(String(16))
+    first_lu_time: Mapped[str | None] = mapped_column(String(32))
+    last_lu_time: Mapped[str | None] = mapped_column(String(32))
+    open_num: Mapped[int | None] = mapped_column(Integer)
+    limit_amount: Mapped[float | None] = mapped_column(Float)
+    turnover_rate: Mapped[float | None] = mapped_column(Float)
+    tag: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str | None] = mapped_column(String(16))
+
+    __table_args__ = (
+        UniqueConstraint("trade_date", "ts_code", "limit_type", name="uq_limit_list_ths_dtcl"),
+    )
+
+
+class LimitStats(Base):
+    """Daily limit-up/down/bomb statistics from Tushare limit_list_d API."""
+    __tablename__ = "limit_stats"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[str] = mapped_column(String(8), index=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str | None] = mapped_column(String(32))
+    industry: Mapped[str | None] = mapped_column(String(32))
+    close: Mapped[float | None] = mapped_column(Float)
+    pct_chg: Mapped[float | None] = mapped_column(Float)
+    amount: Mapped[float | None] = mapped_column(Float)
+    limit_amount: Mapped[float | None] = mapped_column(Float)
+    float_mv: Mapped[float | None] = mapped_column(Float)
+    first_time: Mapped[str | None] = mapped_column(String(16))
+    last_time: Mapped[str | None] = mapped_column(String(16))
+    open_times: Mapped[int | None] = mapped_column(Integer)
+    limit_times: Mapped[int | None] = mapped_column(Integer)
+    limit: Mapped[str | None] = mapped_column(String(8))
+
+    __table_args__ = (
+        UniqueConstraint("trade_date", "ts_code", "limit", name="uq_limit_stats_dtcl"),
+    )
+
+
+class LimitStep(Base):
+    """Consecutive limit-up ladder from Tushare limit_step API."""
+    __tablename__ = "limit_step"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[str] = mapped_column(String(8), index=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str | None] = mapped_column(String(32))
+    nums: Mapped[int | None] = mapped_column(Integer)
+
+    __table_args__ = (
+        UniqueConstraint("trade_date", "ts_code", name="uq_limit_step_dtc"),
+    )
+
+
+class TopList(Base):
+    """Dragon-tiger board daily details from Tushare top_list API."""
+    __tablename__ = "top_list"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[str] = mapped_column(String(8), index=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str | None] = mapped_column(String(32))
+    close: Mapped[float | None] = mapped_column(Float)
+    pct_change: Mapped[float | None] = mapped_column(Float)
+    turnover_rate: Mapped[float | None] = mapped_column(Float)
+    amount: Mapped[float | None] = mapped_column(Float)
+    l_sell: Mapped[float | None] = mapped_column(Float)
+    l_buy: Mapped[float | None] = mapped_column(Float)
+    l_amount: Mapped[float | None] = mapped_column(Float)
+    net_amount: Mapped[float | None] = mapped_column(Float)
+    net_rate: Mapped[float | None] = mapped_column(Float)
+    reason: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        UniqueConstraint("trade_date", "ts_code", name="uq_top_list_dtc"),
+    )
+
+
+class HmDetail(Base):
+    """Hot money (游资) daily trading details from Tushare hm_detail API."""
+    __tablename__ = "hm_detail"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[str] = mapped_column(String(8), index=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    ts_name: Mapped[str | None] = mapped_column(String(32))
+    buy_amount: Mapped[float | None] = mapped_column(Float)
+    sell_amount: Mapped[float | None] = mapped_column(Float)
+    net_amount: Mapped[float | None] = mapped_column(Float)
+    hm_name: Mapped[str | None] = mapped_column(String(64))
+    tag: Mapped[str | None] = mapped_column(String(32))
+
+    __table_args__ = (
+        UniqueConstraint("trade_date", "ts_code", "hm_name", name="uq_hm_detail_dtcn"),
+    )
+
+
+class LimitCptList(Base):
+    """Strongest limit-up sector statistics from Tushare limit_cpt_list API."""
+    __tablename__ = "limit_cpt_list"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[str] = mapped_column(String(8), index=True)
+    ts_code: Mapped[str | None] = mapped_column(String(16))
+    name: Mapped[str | None] = mapped_column(String(64))
+    days: Mapped[int | None] = mapped_column(Integer)
+    up_stat: Mapped[str | None] = mapped_column(String(32))
+    cons_nums: Mapped[int | None] = mapped_column(Integer)
+    up_nums: Mapped[int | None] = mapped_column(Integer)
+    pct_chg: Mapped[float | None] = mapped_column(Float)
+    rank: Mapped[int | None] = mapped_column(Integer)
+
+    __table_args__ = (
+        UniqueConstraint("trade_date", "ts_code", name="uq_limit_cpt_list_dtc"),
+    )
+
+
+class DcHot(Base):
+    """Eastmoney App hot stock list from Tushare dc_hot API."""
+    __tablename__ = "dc_hot"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[str] = mapped_column(String(8), index=True)
+    data_type: Mapped[str | None] = mapped_column(String(32))
+    ts_code: Mapped[str | None] = mapped_column(String(16), index=True)
+    ts_name: Mapped[str | None] = mapped_column(String(32))
+    rank: Mapped[int | None] = mapped_column(Integer)
+    pct_change: Mapped[float | None] = mapped_column(Float)
+    current_price: Mapped[float | None] = mapped_column(Float)
+
+    __table_args__ = (
+        UniqueConstraint("trade_date", "ts_code", "data_type", name="uq_dc_hot_dtcdt"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.8: 四维能力建设 — 消息面分类
+# ---------------------------------------------------------------------------
+
+class NewsClassified(Base):
+    """Classification result for stock_news entries."""
+    __tablename__ = "news_classified"
+
+    news_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    news_scope: Mapped[str] = mapped_column(String(16), index=True)
+    time_slot: Mapped[str] = mapped_column(String(16), index=True)
+    sentiment: Mapped[str] = mapped_column(String(16), index=True, default="neutral")
+    related_codes: Mapped[str | None] = mapped_column(Text)
+    related_industries: Mapped[str | None] = mapped_column(Text)
+    keywords: Mapped[str | None] = mapped_column(Text)
+    classified_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("NOW()")
+    )
+
+
+class AnnsClassified(Base):
+    """Classification result for stock_anns entries."""
+    __tablename__ = "anns_classified"
+
+    anns_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ann_type: Mapped[str] = mapped_column(String(32), index=True)
+    sentiment: Mapped[str] = mapped_column(String(16), index=True, default="neutral")
+    keywords: Mapped[str | None] = mapped_column(Text)
+    classified_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("NOW()")
+    )

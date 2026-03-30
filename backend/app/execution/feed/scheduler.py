@@ -713,6 +713,46 @@ class MarketDataScheduler:
                     "market:news",
                     json.dumps({"type": "news_update", "count": count}),
                 )
+                # Classify newly inserted news inline
+                try:
+                    from app.shared.news_classifier import NewsClassifier
+                    clf = NewsClassifier()
+                    with psycopg2.connect(db_url) as conn2:
+                        with conn2.cursor() as cur2:
+                            cur2.execute("SELECT ts_code, name FROM stock_basic WHERE name IS NOT NULL")
+                            stock_rows = cur2.fetchall()
+                            cur2.execute("SELECT DISTINCT industry_name FROM index_classify WHERE industry_name IS NOT NULL")
+                            ind_names = [r[0] for r in cur2.fetchall()]
+                            clf.load_reference_data(stock_rows, ind_names)
+
+                            cur2.execute(
+                                "SELECT n.id, n.content, n.datetime FROM stock_news n "
+                                "LEFT JOIN news_classified nc ON n.id = nc.news_id "
+                                "WHERE nc.news_id IS NULL ORDER BY n.id"
+                            )
+                            unclassified = cur2.fetchall()
+                            from psycopg2.extras import execute_values
+                            batch = []
+                            for nid, content, dt_str in unclassified:
+                                r = clf.classify_news(nid, content or "", dt_str or "")
+                                d = r.to_db_dict(nid)
+                                batch.append((
+                                    d["news_id"], d["news_scope"], d["time_slot"],
+                                    d["sentiment"], d["related_codes"],
+                                    d["related_industries"], d["keywords"],
+                                ))
+                            if batch:
+                                execute_values(
+                                    cur2,
+                                    "INSERT INTO news_classified "
+                                    "(news_id, news_scope, time_slot, sentiment, related_codes, related_industries, keywords) "
+                                    "VALUES %s ON CONFLICT (news_id) DO NOTHING",
+                                    batch,
+                                )
+                        conn2.commit()
+                    logger.info("news classify: classified %d new items", len(batch) if batch else 0)
+                except Exception:
+                    logger.warning("inline news classification failed", exc_info=True)
         except Exception:
             logger.warning("news refresh failed", exc_info=True)
 

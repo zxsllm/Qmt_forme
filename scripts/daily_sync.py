@@ -1,8 +1,7 @@
 """
 Daily sync — run after market close to refresh all data.
 
-Calls sync_incremental.py + pull_stk_limit.py in sequence.
-Minute data is NOT included (too slow for daily sync; use pull_minutes.py separately).
+Includes incremental minute data sync (~5-10 min for 1 day).
 
 Usage:
     python scripts/daily_sync.py              # sync everything
@@ -52,6 +51,18 @@ def main():
     results["pull_moneyflow_ind"] = run("pull_moneyflow_ind.py")
     results["pull_index_global"] = run("pull_index_global.py")
 
+    # Incremental minute data sync (last ~5-10 min for 1 day of data)
+    results["sync_minutes"] = run("sync_minutes_incremental.py")
+
+    # Financial data (daily mode: forecast+disclosure always, fina_indicator/income only for new periods)
+    results["pull_fina"] = run("pull_fina.py", ["--daily"])
+
+    # Limit board / sentiment data (daily)
+    results["pull_limit_board"] = run("pull_limit_board.py")
+
+    # Classify new news + announcements (incremental, only unclassified)
+    results["classify_news"] = run("classify_news.py")
+
     print(f"\n{'='*60}")
     print("  Daily Sync Summary")
     print(f"{'='*60}")
@@ -61,9 +72,7 @@ def main():
 
     all_ok = all(results.values())
     if all_ok:
-        print("  All syncs completed successfully.")
-        print("  Note: Minute data not included. Run separately if needed:")
-        print("    python scripts/pull_minutes.py --resume")
+        print("  All syncs completed successfully (including minute data).")
     else:
         print("  Some syncs failed. Check output above.")
     print()

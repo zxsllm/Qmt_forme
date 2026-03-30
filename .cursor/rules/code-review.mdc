@@ -1,0 +1,70 @@
+---
+description: 代码审查纪律 — 每次完成代码后必须调用 code-reviewer
+globs:
+alwaysApply: true
+---
+
+# 代码审查纪律
+
+## 强制规则
+
+**每次完成一个 Step 或重大代码变更后，必须调用 code-reviewer subagent 进行审查。**
+
+这不是可选项。跳过审查 = 违反项目纪律。
+
+## 何时触发
+
+- 完成计划文件中的一个 Step（checkbox 级别）
+- 完成一个完整功能（新 API、新页面、新脚本）
+- 修复重大 bug 后
+- 重构涉及多文件时
+
+## 何时可以跳过
+
+- 仅更新文档/注释
+- 仅修改配置/环境变量
+- 单行 typo 修复
+
+## 审查流程
+
+### 1. 收集变更范围
+
+列出本次变更涉及的所有文件和主要改动点。
+
+### 2. 调用 code-reviewer subagent
+
+使用 Task tool 派遣 code-reviewer，提供以下上下文：
+
+- **变更摘要**: 做了什么、为什么做
+- **对应计划**: 对应哪个 Step / 哪个需求
+- **涉及文件**: 所有新增/修改的文件列表
+- **关键代码段**: 核心逻辑变更
+
+参考模板: `C:\Users\MSI\.cursor\superpowers\skills\requesting-code-review\code-reviewer.md`
+Agent 定义: `C:\Users\MSI\.cursor\superpowers\agents\code-reviewer.md`
+
+### 3. 处理审查结果
+
+| 级别 | 行动 |
+|------|------|
+| Critical | **必须立即修复**，不得继续下一步 |
+| Important | 当前 Step 内修复，不得拖延 |
+| Minor | 记录到 TODO，可在后续批次处理 |
+
+### 4. 审查通过后
+
+- 更新计划文件 checkbox
+- 更新 AGENTS.md 进度
+
+## Superpowers 技能参考
+
+完整的 Superpowers 技能库位于: `C:\Users\MSI\.cursor\superpowers\skills\`
+
+可用技能:
+- `brainstorming` — 需求澄清与方案设计
+- `writing-plans` — 编写实施计划
+- `test-driven-development` — 测试驱动开发
+- `systematic-debugging` — 系统化调试
+- `requesting-code-review` — 请求代码审查
+- `subagent-driven-development` — 子代理驱动开发
+- `verification-before-completion` — 完成前验证

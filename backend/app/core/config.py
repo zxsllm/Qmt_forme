@@ -17,7 +17,7 @@ class Settings:
 
     # Data pull range
     DATA_START_DATE: str = "20250922"
-    DATA_END_DATE: str = "20260321"
+    DATA_END_DATE: str = "20260328"
 
 
 settings = Settings()

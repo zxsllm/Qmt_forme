@@ -4,12 +4,12 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import MainLayout from './layouts/MainLayout';
 import Dashboard from './pages/Dashboard';
 import KlinePage from './pages/KlinePage';
-import PositionsPage from './pages/PositionsPage';
-import OrdersPage from './pages/OrdersPage';
-import HistoryPage from './pages/HistoryPage';
-import RiskPage from './pages/RiskPage';
+import TradingPage from './pages/TradingPage';
 import StrategyPage from './pages/StrategyPage';
-import BacktestPage from './pages/BacktestPage';
+import SystemPage from './pages/SystemPage';
+import NewsPage from './pages/NewsPage';
+import SentimentPage from './pages/SentimentPage';
+import FundamentalPage from './pages/FundamentalPage';
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, retry: 1 } },
@@ -35,12 +35,12 @@ export default function App() {
             <Route element={<MainLayout />}>
               <Route index element={<Dashboard />} />
               <Route path="/kline" element={<KlinePage />} />
-              <Route path="/positions" element={<PositionsPage />} />
-              <Route path="/orders" element={<OrdersPage />} />
-              <Route path="/history" element={<HistoryPage />} />
-              <Route path="/risk" element={<RiskPage />} />
+              <Route path="/trading" element={<TradingPage />} />
               <Route path="/strategy" element={<StrategyPage />} />
-              <Route path="/backtest" element={<BacktestPage />} />
+              <Route path="/system" element={<SystemPage />} />
+              <Route path="/news" element={<NewsPage />} />
+              <Route path="/sentiment" element={<SentimentPage />} />
+              <Route path="/fundamental" element={<FundamentalPage />} />
             </Route>
           </Routes>
         </BrowserRouter>

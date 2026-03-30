@@ -1,8 +1,11 @@
 import { useState } from 'react';
-import { Button, Switch, Tag, Space, InputNumber, Input, Modal, Form, message } from 'antd';
+import {
+  Button, Switch, Tag, Space, InputNumber, Input, Modal, Form, message,
+  Select, Table, Spin, Tabs,
+} from 'antd';
 import { PlayCircleOutlined, PauseCircleOutlined } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api } from '../services/api';
+import { api, type BacktestRunResult, type BacktestStats, type TradeRecord } from '../services/api';
 import Panel from '../components/Panel';
 
 const AVAILABLE = [
@@ -14,7 +17,9 @@ const AVAILABLE = [
   },
 ];
 
-export default function StrategyPage() {
+// ── Strategy Management Tab ──────────────────────────────────
+
+function StrategyManageTab() {
   const qc = useQueryClient();
   const [configTarget, setConfigTarget] = useState<typeof AVAILABLE[0] | null>(null);
   const [form] = Form.useForm();
@@ -62,69 +67,63 @@ export default function StrategyPage() {
   };
 
   return (
-    <div className="flex flex-col h-full" style={{ padding: 18, gap: 12 }}>
-      <Panel title="策略管理" className="flex-1">
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14 }}>
-          {AVAILABLE.map((s) => {
-            const running = runningMap.get(s.name);
-            return (
-              <div
-                key={s.name}
-                style={{
-                  width: 340,
-                  padding: 18,
-                  background: 'rgba(255,255,255,0.03)',
-                  border: '1px solid rgba(148,186,215,0.14)',
-                  borderRadius: 18,
-                  transition: 'border-color 120ms ease, background 120ms ease',
-                }}
-              >
-                <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
-                  <span style={{ color: '#e6f1fa', fontWeight: 600, fontSize: 14 }}>{s.label}</span>
-                  {running ? (
-                    <Tag color="green">运行中</Tag>
-                  ) : (
-                    <Tag color="default">已停止</Tag>
-                  )}
-                </div>
-                <div style={{ color: '#93a9bc', fontSize: 12, marginBottom: 14 }}>{s.desc}</div>
-                {running && (
-                  <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>
-                    信号: {running.signals_today} 今日 / {running.total_signals} 总计
-                    · {running.total_codes} 只股票
-                  </div>
+    <>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14 }}>
+        {AVAILABLE.map((s) => {
+          const running = runningMap.get(s.name);
+          return (
+            <div
+              key={s.name}
+              style={{
+                width: 340,
+                padding: 18,
+                background: 'rgba(255,255,255,0.03)',
+                border: '1px solid rgba(148,186,215,0.14)',
+                borderRadius: 18,
+              }}
+            >
+              <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
+                <span style={{ color: '#e6f1fa', fontWeight: 600, fontSize: 14 }}>{s.label}</span>
+                {running ? (
+                  <Tag color="green">运行中</Tag>
+                ) : (
+                  <Tag color="default">已停止</Tag>
                 )}
-                <Space>
-                  {running ? (
-                    <Button
-                      size="small" danger
-                      icon={<PauseCircleOutlined />}
-                      onClick={() => stopMut.mutate(s.name)}
-                      loading={stopMut.isPending}
-                    >
-                      停止
-                    </Button>
-                  ) : (
-                    <Button
-                      size="small" type="primary"
-                      icon={<PlayCircleOutlined />}
-                      onClick={() => {
-                        setConfigTarget(s);
-                        form.setFieldsValue({
-                          ...s.params,
-                          codes: '000001.SZ',
-                        });
-                      }}
-                    >
-                      配置启动
-                    </Button>
-                  )}
-                </Space>
               </div>
-            );
-          })}
-        </div>
-      </Panel>
+              <div style={{ color: '#93a9bc', fontSize: 12, marginBottom: 14 }}>{s.desc}</div>
+              {running && (
+                <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>
+                  信号: {running.signals_today} 今日 / {running.total_signals} 总计
+                  · {running.total_codes} 只股票
+                </div>
+              )}
+              <Space>
+                {running ? (
+                  <Button
+                    size="small" danger
+                    icon={<PauseCircleOutlined />}
+                    onClick={() => stopMut.mutate(s.name)}
+                    loading={stopMut.isPending}
+                  >
+                    停止
+                  </Button>
+                ) : (
+                  <Button
+                    size="small" type="primary"
+                    icon={<PlayCircleOutlined />}
+                    onClick={() => {
+                      setConfigTarget(s);
+                      form.setFieldsValue({ ...s.params, codes: '000001.SZ' });
+                    }}
+                  >
+                    配置启动
+                  </Button>
+                )}
+              </Space>
+            </div>
+          );
+        })}
+      </div>
 
       <Modal
         title={`启动策略 · ${configTarget?.label ?? ''}`}
@@ -157,6 +156,224 @@ export default function StrategyPage() {
           </Form.Item>
         </Form>
       </Modal>
+    </>
+  );
+}
+
+// ── Backtest Tab ─────────────────────────────────────────────
+
+const formatPct = (v: number | null | undefined) => {
+  if (v == null || isNaN(v)) return '--';
+  return `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+};
+const formatNum = (v: number | null | undefined) => {
+  if (v == null || isNaN(v)) return '--';
+  return v.toFixed(2);
+};
+
+function BacktestTab() {
+  const [result, setResult] = useState<BacktestRunResult | null>(null);
+
+  const { data: strategies } = useQuery({
+    queryKey: ['strategies'],
+    queryFn: api.listStrategies,
+  });
+
+  const mutation = useMutation({
+    mutationFn: api.runBacktest,
+    onSuccess: (data) => {
+      setResult(data);
+      message.success(`回测完成：${data.stats.total_trades} 笔交易`);
+    },
+    onError: (err: Error) => message.error(`回测失败：${err.message}`),
+  });
+
+  const onFinish = (values: Record<string, unknown>) => {
+    const universeStr = values.universe as string || '';
+    mutation.mutate({
+      strategy_name: values.strategy_name as string,
+      strategy_params: strategies?.find(s => s.name === values.strategy_name)?.default_params || {},
+      start_date: values.start_date as string,
+      end_date: values.end_date as string,
+      initial_capital: (values.initial_capital as number) || 1_000_000,
+      benchmark: (values.benchmark as string) || '000300.SH',
+      universe: universeStr ? universeStr.split(',').map(s => s.trim()) : [],
+    });
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <Form layout="inline" onFinish={onFinish} initialValues={{
+        strategy_name: 'ma_crossover',
+        start_date: '20260101',
+        end_date: '20260320',
+        initial_capital: 1000000,
+        benchmark: '000300.SH',
+        universe: '000001.SZ,600519.SH',
+      }}>
+        <Form.Item name="strategy_name" label="策略" rules={[{ required: true }]}>
+          <Select style={{ width: 160 }}>
+            {strategies?.map(s => (
+              <Select.Option key={s.name} value={s.name}>{s.description || s.name}</Select.Option>
+            ))}
+          </Select>
+        </Form.Item>
+        <Form.Item name="start_date" label="开始" rules={[{ required: true }]}>
+          <Input style={{ width: 100 }} placeholder="YYYYMMDD" />
+        </Form.Item>
+        <Form.Item name="end_date" label="结束" rules={[{ required: true }]}>
+          <Input style={{ width: 100 }} placeholder="YYYYMMDD" />
+        </Form.Item>
+        <Form.Item name="initial_capital" label="初始资金">
+          <InputNumber style={{ width: 120 }} min={10000} step={100000} />
+        </Form.Item>
+        <Form.Item name="universe" label="股票池">
+          <Input style={{ width: 240 }} placeholder="000001.SZ,600519.SH (空=全市场)" />
+        </Form.Item>
+        <Form.Item>
+          <Button type="primary" htmlType="submit" loading={mutation.isPending}>
+            运行回测
+          </Button>
+        </Form.Item>
+      </Form>
+
+      {mutation.isPending && (
+        <div className="flex flex-col items-center justify-center py-12" style={{ gap: 12 }}>
+          <Spin size="large" />
+          <div style={{ color: '#93a9bc', fontSize: 13 }}>回测运行中，请耐心等待...</div>
+        </div>
+      )}
+
+      {result && <ResultPanel result={result} />}
+    </div>
+  );
+}
+
+function ResultPanel({ result }: { result: BacktestRunResult }) {
+  const s = result.stats;
+  return (
+    <>
+      <StatsCards stats={s} />
+      <EquityCurveTable equity={result.equity_curve} />
+      <TradesTable trades={result.trades} />
+    </>
+  );
+}
+
+function StatsCards({ stats }: { stats: BacktestStats }) {
+  const items: { label: string; value: string; color?: string }[] = [
+    { label: '总收益', value: formatPct(stats.total_return), color: stats.total_return >= 0 ? '#ff6f91' : '#4ade80' },
+    { label: '年化收益', value: formatPct(stats.annual_return), color: stats.annual_return >= 0 ? '#ff6f91' : '#4ade80' },
+    { label: '最大回撤', value: formatPct(stats.max_drawdown), color: '#4ade80' },
+    { label: '夏普比率', value: formatNum(stats.sharpe_ratio) },
+    { label: '索提诺', value: formatNum(stats.sortino_ratio) },
+    { label: '胜率', value: formatPct(stats.win_rate) },
+    { label: '盈亏比', value: formatNum(stats.profit_factor) },
+    { label: '交易次数', value: String(stats.total_trades) },
+    { label: '平均持仓', value: `${stats.avg_holding_days}天` },
+    { label: '基准收益', value: formatPct(stats.benchmark_return) },
+  ];
+
+  return (
+    <div className="grid grid-cols-5" style={{ gap: 10 }}>
+      {items.map(item => (
+        <div
+          key={item.label}
+          style={{
+            padding: '10px 14px',
+            textAlign: 'center',
+            background: 'rgba(255,255,255,0.03)',
+            border: '1px solid rgba(148,186,215,0.12)',
+            borderRadius: 16,
+          }}
+        >
+          <div style={{ fontSize: 11, color: '#93a9bc', marginBottom: 4, letterSpacing: '0.04em' }}>
+            {item.label}
+          </div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: item.color || '#e6f1fa' }}>
+            {item.value}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function EquityCurveTable({ equity }: { equity: BacktestRunResult['equity_curve'] }) {
+  const columns = [
+    { title: '日期', dataIndex: 'date', key: 'date', width: 100 },
+    { title: '总资产', dataIndex: 'total_asset', key: 'total_asset', render: formatNum, width: 120 },
+    { title: '现金', dataIndex: 'cash', key: 'cash', render: formatNum, width: 120 },
+    { title: '市值', dataIndex: 'market_value', key: 'market_value', render: formatNum, width: 120 },
+    {
+      title: '日收益', dataIndex: 'daily_return', key: 'daily_return', width: 90,
+      render: (v: number) => (
+        <span style={{ color: v >= 0 ? '#ff6f91' : '#4ade80' }}>
+          {(v * 100).toFixed(2)}%
+        </span>
+      ),
+    },
+  ];
+
+  return (
+    <Panel title="权益曲线" noPadding>
+      <Table
+        dataSource={equity}
+        columns={columns}
+        rowKey="date"
+        size="small"
+        pagination={{ pageSize: 15, size: 'small' }}
+        scroll={{ y: 300 }}
+      />
+    </Panel>
+  );
+}
+
+function TradesTable({ trades }: { trades: TradeRecord[] }) {
+  const columns = [
+    { title: '信号日', dataIndex: 'signal_date', key: 'signal_date', width: 90 },
+    { title: '成交日', dataIndex: 'trade_date', key: 'trade_date', width: 90 },
+    { title: '代码', dataIndex: 'ts_code', key: 'ts_code', width: 100 },
+    {
+      title: '方向', dataIndex: 'side', key: 'side', width: 60,
+      render: (v: string) => <Tag color={v === 'BUY' ? 'red' : 'green'}>{v}</Tag>,
+    },
+    { title: '价格', dataIndex: 'price', key: 'price', render: formatNum, width: 80 },
+    { title: '数量', dataIndex: 'qty', key: 'qty', width: 80 },
+    { title: '金额', dataIndex: 'amount', key: 'amount', render: formatNum, width: 110 },
+    { title: '手续费', dataIndex: 'fee', key: 'fee', render: formatNum, width: 80 },
+    { title: '原因', dataIndex: 'reason', key: 'reason', ellipsis: true },
+  ];
+
+  return (
+    <Panel title={`交易明细 (${trades.length}笔)`} noPadding>
+      <Table
+        dataSource={trades}
+        columns={columns}
+        rowKey={(_, i) => String(i)}
+        size="small"
+        pagination={{ pageSize: 15, size: 'small' }}
+        scroll={{ y: 300 }}
+      />
+    </Panel>
+  );
+}
+
+// ── Main Page ────────────────────────────────────────────────
+
+export default function StrategyPage() {
+  return (
+    <div className="flex flex-col h-full overflow-auto" style={{ padding: 18, gap: 12 }}>
+      <Panel className="flex-1" noPadding>
+        <Tabs
+          defaultActiveKey="manage"
+          style={{ height: '100%', padding: '0 10px' }}
+          items={[
+            { key: 'manage', label: '策略管理', children: <StrategyManageTab /> },
+            { key: 'backtest', label: '回测', children: <BacktestTab /> },
+          ]}
+        />
+      </Panel>
     </div>
   );
 }
