@@ -819,3 +819,82 @@ class AnnsClassified(Base):
     classified_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=text("NOW()")
     )
+
+
+# ---------------------------------------------------------------------------
+# Convertible Bond (可转债)
+# ---------------------------------------------------------------------------
+
+class CbBasic(Base):
+    """Convertible bond basic info from Tushare cb_basic API."""
+    __tablename__ = "cb_basic"
+
+    ts_code: Mapped[str] = mapped_column(String(16), primary_key=True)
+    bond_short_name: Mapped[str | None] = mapped_column(String(32))
+    stk_code: Mapped[str | None] = mapped_column(String(16), index=True)
+    stk_short_name: Mapped[str | None] = mapped_column(String(32))
+    maturity: Mapped[float | None] = mapped_column(Float)
+    maturity_date: Mapped[str | None] = mapped_column(String(8))
+    list_date: Mapped[str | None] = mapped_column(String(8))
+    delist_date: Mapped[str | None] = mapped_column(String(8))
+    exchange: Mapped[str | None] = mapped_column(String(8))
+    conv_start_date: Mapped[str | None] = mapped_column(String(8))
+    conv_end_date: Mapped[str | None] = mapped_column(String(8))
+    conv_price: Mapped[float | None] = mapped_column(Float)
+    first_conv_price: Mapped[float | None] = mapped_column(Float)
+    issue_size: Mapped[float | None] = mapped_column(Float)
+    remain_size: Mapped[float | None] = mapped_column(Float)
+    call_clause: Mapped[str | None] = mapped_column(Text)
+    put_clause: Mapped[str | None] = mapped_column(Text)
+    reset_clause: Mapped[str | None] = mapped_column(Text)
+    conv_clause: Mapped[str | None] = mapped_column(Text)
+    par: Mapped[float | None] = mapped_column(Float)
+    issue_price: Mapped[float | None] = mapped_column(Float)
+
+
+class CbDaily(Base):
+    """Convertible bond daily quotes from Tushare cb_daily API."""
+    __tablename__ = "cb_daily"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    trade_date: Mapped[str] = mapped_column(String(8), index=True)
+    pre_close: Mapped[float | None] = mapped_column(Float)
+    open: Mapped[float | None] = mapped_column(Float)
+    high: Mapped[float | None] = mapped_column(Float)
+    low: Mapped[float | None] = mapped_column(Float)
+    close: Mapped[float | None] = mapped_column(Float)
+    change: Mapped[float | None] = mapped_column(Float)
+    pct_chg: Mapped[float | None] = mapped_column(Float)
+    vol: Mapped[float | None] = mapped_column(Float)
+    amount: Mapped[float | None] = mapped_column(Float)
+    bond_value: Mapped[float | None] = mapped_column(Float)
+    bond_over_rate: Mapped[float | None] = mapped_column(Float)
+    cb_value: Mapped[float | None] = mapped_column(Float)
+    cb_over_rate: Mapped[float | None] = mapped_column(Float)
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "trade_date", name="uq_cb_daily_code_date"),
+    )
+
+
+class CbCall(Base):
+    """Convertible bond redemption/call events from Tushare cb_call API."""
+    __tablename__ = "cb_call"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    call_type: Mapped[str | None] = mapped_column(String(16))
+    is_call: Mapped[str | None] = mapped_column(String(64), index=True)
+    ann_date: Mapped[str | None] = mapped_column(String(8), index=True)
+    call_date: Mapped[str | None] = mapped_column(String(8))
+    call_price: Mapped[float | None] = mapped_column(Float)
+    call_price_tax: Mapped[float | None] = mapped_column(Float)
+    call_vol: Mapped[float | None] = mapped_column(Float)
+    call_amount: Mapped[float | None] = mapped_column(Float)
+    payment_date: Mapped[str | None] = mapped_column(String(8))
+    call_reg_date: Mapped[str | None] = mapped_column(String(8))
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "ann_date", "call_type", name="uq_cb_call_code_ann_type"),
+    )

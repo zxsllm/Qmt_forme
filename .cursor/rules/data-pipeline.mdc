@@ -1,0 +1,101 @@
+---
+description: 数据流水线注册表 — 所有数据源、拉取频率、触发方式、前端消费者。讨论数据同步/拉取/调度/更新频率/前端数据源/为什么数据没更新时读此文件
+globs: 
+alwaysApply: false
+---
+
+# 数据流水线注册表
+
+## 实时数据（scheduler 高频轮询）
+
+| 数据 | Tushare API | DB表 | 频率 | 触发位置 | 前端消费者 |
+|------|------------|------|------|---------|-----------|
+| 全市场快照 | `rt_k` | 内存 `_rt_snapshot` | 1.2s（盘中） | scheduler._fetch_full_market | Dashboard排行榜(30s) / WS推送行情 |
+| 新闻快讯 | 9源(news) | stock_news → news_classified | 5s | scheduler._pull_news_sync | SidebarNews(10s) / NewsPage(30s) |
+| 分钟K线(持仓) | `stk_mins` | stock_min_kline | 60s（盘中） | scheduler._maybe_pull_mins | Dashboard分时(30s) / KlinePage |
+| 风控预警源 | forecast/stock_st/cb_call | forecast+stock_st+cb_call | 10min | scheduler._pull_alerts_sync | SystemPage风控(打开刷新) / SentimentPage盘前(2min) |
+
+## 日频数据（daily_sync 收盘后）
+
+### Phase 1: 轻量日频（<5分钟）
+| 数据 | 脚本 | DB表 | 说明 |
+|------|------|------|------|
+| 日线+基本面 | sync_incremental.py | stock_daily + daily_basic | 增量，按最新日期补 |
+| 涨跌停价 | pull_stk_limit.py | stock_limit | 按trade_date |
+| ST列表 | pull_st_list.py | stock_st | 按trade_date |
+| 业绩预告+披露 | pull_fina.py --daily | forecast + disclosure_date | ann_date增量 |
+| 打板数据(7API) | pull_limit_board.py | limit_list_ths/limit_stats/limit_step/top_list/hm_detail/limit_cpt_list/dc_hot | 统一脚本 |
+| 可转债 | pull_cb.py | cb_basic/cb_daily/cb_call | basic全量/daily增量/call全量 |
+| 新闻分类 | classify_news.py | news_classified + anns_classified | 增量分类未处理记录 |
+
+### Phase 2: 其他日频（中等耗时）
+| 数据 | 脚本 | DB表 |
+|------|------|------|
+| 个股资金流 | pull_moneyflow.py | moneyflow_dc |
+| 新闻(批量) | pull_news.py | stock_news |
+| 公告(批量) | pull_anns.py | stock_anns |
+| 复权因子 | pull_adj_factor.py | adj_factor |
+| 申万行业日线 | pull_sw_daily.py | sw_daily |
+| 集合竞价 | pull_stk_auction.py | stk_auction |
+| 财经日历 | pull_eco_cal.py | eco_cal |
+| 行业资金流 | pull_moneyflow_ind.py | moneyflow_ind_ths |
+| 全球指数 | pull_index_global.py | index_global |
+| 概念板块 | pull_concept.py | concept_list + concept_detail |
+
+### Phase 3: 重型数据（30-60分钟）
+| 数据 | 脚本 | DB表 | 说明 |
+|------|------|------|------|
+| 全市场分钟线 | sync_minutes_incremental.py | stock_min_kline(分区) | ~5500股逐个拉，最慢 |
+
+## 低频/手动数据（init 或按需）
+
+| 数据 | 脚本 | DB表 | 频率 |
+|------|------|------|------|
+| 股票列表 | init_data.py | stock_basic | 项目初始化 / 偶尔刷新 |
+| 交易日历 | init_data.py | trade_cal | 每年初补 |
+| 指数列表 | init_data.py | index_basic | 项目初始化 |
+| 指数日线 | pull_batch1.py | index_daily | daily_sync 未注册，手动 |
+| 财务指标/利润表 | pull_fina.py(全量) | fina_indicator + income | 按季手动 |
+| 分钟分区管理 | create_min_partitions.py | DDL | 每月手动建新分区 |
+
+## 前端数据刷新策略
+
+| 页面/组件 | 数据源 | 刷新方式 | 间隔 |
+|-----------|--------|---------|------|
+| Dashboard K线 | DB(stock_daily/min_kline) | polling(分时30s) | 日线不轮询 |
+| Dashboard 排行榜(6个) | DB(内存snapshot) | polling | 30s |
+| SidebarNews | DB(stock_news) | polling | 10s |
+| TradingPage 持仓/订单 | DB(sim_*) | polling | 3-5s |
+| StrategyPage | DB(strategy_meta等) | polling | 3s |
+| SystemPage 风控预警 | DB(forecast/stock_st/cb_call) | 打开刷新+focus刷新 | 无轮询 |
+| SystemPage 行情/审计 | DB | polling | 5s |
+| NewsPage 新闻 | DB(news_classified) | polling | 30s |
+| NewsPage 公告 | DB(anns_classified) | polling | 60s |
+| SentimentPage 涨停榜等 | DB(limit_list_ths等) | polling | 60s |
+| SentimentPage 盘前计划 | DB(多表聚合) | polling | 2min |
+| SentimentPage 温度/龙头 | DB(聚合计算) | 打开刷新 | stale 2-5min |
+| FundamentalPage | DB(fina_indicator等) | 打开刷新 | stale 5min |
+
+## 触发链路
+
+```
+scheduler (常驻asyncio)
+├─ 盘中 1.2s → rt_k → 内存snapshot → WS推送 + 排行榜
+├─ 全天 5s   → news → DB → Redis pub/sub → WS → 前端
+├─ 全天 10min→ forecast/ST/CB → DB（前端下次刷新可见）
+├─ 盘中 60s  → stk_mins(持仓股) → DB
+├─ 15:01     → settlement（结算）
+└─ 15:30     → daily_sync.py（Phase1→2→3 串行）
+
+startup (后端启动时)
+└─ expected_td vs daily_latest → 仅数据真正落后时触发 daily_sync
+    └─ 16点前 expected_td=上一交易日（避免盘前误触发）
+```
+
+## 数据不更新排查清单
+
+1. **前端没数据** → 确认 API 返回 → 确认 DB 有数据 → 确认 pull 脚本跑过
+2. **DB 没数据** → 确认 daily_sync 日志 `logs/daily_sync_YYYYMMDD.log`
+3. **Tushare 没数据** → 确认 ann_date（可能T+1才入库）/ 确认接口权限
+4. **盘前数据旧** → scheduler 的 10min alert pull 会补；daily_sync 仅收盘后跑
+5. **分钟线缺失** → 确认分区存在(create_min_partitions) + sync_minutes 跑完

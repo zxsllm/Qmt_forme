@@ -55,23 +55,25 @@ def pull_for_date(svc: TushareService, conn, trade_date: str):
     """Pull all board data for one trading day."""
     failed = []
 
-    # 1. limit_list_ths
-    try:
-        cols = ["trade_date", "ts_code", "name", "pct_chg", "limit_type",
-                "first_lu_time", "last_lu_time", "open_num", "limit_amount",
-                "turnover_rate", "tag", "status"]
-        df = svc.limit_list_ths(trade_date=trade_date)
-        if not df.empty:
-            rows = _df_to_tuples(df, cols)
-            with conn.cursor() as cur:
-                execute_values(cur,
-                    f"INSERT INTO limit_list_ths ({','.join(cols)}) VALUES %s "
-                    "ON CONFLICT (trade_date, ts_code, limit_type) DO NOTHING", rows)
-            conn.commit()
-            logger.info("  limit_list_ths %s: %d rows", trade_date, len(rows))
-    except Exception as e:
-        conn.rollback()
-        failed.append(("limit_list_ths", e))
+    # 1. limit_list_ths (must call once per limit_type: 涨停池/跌停池/炸板池)
+    cols = ["trade_date", "ts_code", "name", "pct_chg", "limit_type",
+            "first_lu_time", "last_lu_time", "open_num", "limit_amount",
+            "turnover_rate", "tag", "status"]
+    for lt in ["涨停池", "跌停池", "炸板池"]:
+        try:
+            import time as _t; _t.sleep(1.3)
+            df = svc.limit_list_ths(trade_date=trade_date, limit_type=lt)
+            if not df.empty:
+                rows = _df_to_tuples(df, cols)
+                with conn.cursor() as cur:
+                    execute_values(cur,
+                        f"INSERT INTO limit_list_ths ({','.join(cols)}) VALUES %s "
+                        "ON CONFLICT (trade_date, ts_code, limit_type) DO NOTHING", rows)
+                conn.commit()
+                logger.info("  limit_list_ths %s [%s]: %d rows", trade_date, lt, len(rows))
+        except Exception as e:
+            conn.rollback()
+            failed.append((f"limit_list_ths_{lt}", e))
 
     # 2. limit_list_d → limit_stats
     for lt in ["U", "D", "Z"]:

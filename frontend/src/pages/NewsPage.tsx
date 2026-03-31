@@ -1,21 +1,41 @@
 import { useState } from 'react';
-import { Tabs, Select, Tag, Table, Empty, Card, Statistic, Row, Col } from 'antd';
+import { Tabs, Select, Tag, Table, Empty, Card, Statistic, Row, Col, DatePicker } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useQuery } from '@tanstack/react-query';
+import dayjs, { type Dayjs } from 'dayjs';
 import { api, type ClassifiedNewsItem, type ClassifiedAnnItem } from '../services/api';
 import Panel from '../components/Panel';
 
-const SCOPE_LABELS: Record<string, { text: string; color: string }> = {
-  macro: { text: '宏观', color: '#6bc7ff' },
-  industry: { text: '行业', color: '#f59e0b' },
-  stock: { text: '个股', color: '#a78bfa' },
-  mixed: { text: '综合', color: '#64748b' },
+const { RangePicker } = DatePicker;
+
+type DateRange = [Dayjs, Dayjs];
+
+function fmtDateRange(range: DateRange | null): { start_date: string; end_date: string } {
+  if (!range) return { start_date: '', end_date: '' };
+  return {
+    start_date: range[0].format('YYYY-MM-DD'),
+    end_date: range[1].format('YYYY-MM-DD'),
+  };
+}
+
+const tagStyle = (bg: string, fg: string): React.CSSProperties => ({
+  background: bg,
+  color: fg,
+  border: 'none',
+  borderRadius: 4,
+});
+
+const SCOPE_LABELS: Record<string, { text: string; bg: string; fg: string }> = {
+  macro:    { text: '宏观', bg: 'rgba(107,199,255,0.18)', fg: '#6bc7ff' },
+  industry: { text: '行业', bg: 'rgba(245,158,11,0.18)',  fg: '#f59e0b' },
+  stock:    { text: '个股', bg: 'rgba(167,139,250,0.18)', fg: '#a78bfa' },
+  mixed:    { text: '未分类', bg: 'rgba(100,116,139,0.18)', fg: '#94a3b8' },
 };
 
-const SENTIMENT_LABELS: Record<string, { text: string; color: string }> = {
-  positive: { text: '利好', color: '#ef4444' },
-  negative: { text: '利空', color: '#22c55e' },
-  neutral: { text: '中性', color: '#64748b' },
+const SENTIMENT_LABELS: Record<string, { text: string; bg: string; fg: string }> = {
+  positive: { text: '利好', bg: 'rgba(239,68,68,0.18)',  fg: '#ef4444' },
+  negative: { text: '利空', bg: 'rgba(34,197,94,0.18)',  fg: '#22c55e' },
+  neutral:  { text: '中性', bg: 'rgba(100,116,139,0.18)', fg: '#94a3b8' },
 };
 
 const TIME_SLOT_LABELS: Record<string, string> = {
@@ -43,8 +63,8 @@ const newsColumns: ColumnsType<ClassifiedNewsItem> = [
   {
     title: '类型', dataIndex: 'news_scope', width: 70,
     render: (v: string) => {
-      const s = SCOPE_LABELS[v] || { text: v, color: '#64748b' };
-      return <Tag color={s.color}>{s.text}</Tag>;
+      const s = SCOPE_LABELS[v] || { text: v, bg: 'rgba(100,116,139,0.18)', fg: '#94a3b8' };
+      return <Tag style={tagStyle(s.bg, s.fg)}>{s.text}</Tag>;
     },
   },
   {
@@ -54,8 +74,8 @@ const newsColumns: ColumnsType<ClassifiedNewsItem> = [
   {
     title: '情绪', dataIndex: 'sentiment', width: 60,
     render: (v: string) => {
-      const s = SENTIMENT_LABELS[v] || { text: v, color: '#64748b' };
-      return <Tag color={s.color}>{s.text}</Tag>;
+      const s = SENTIMENT_LABELS[v] || { text: v, bg: 'rgba(100,116,139,0.18)', fg: '#94a3b8' };
+      return <Tag style={tagStyle(s.bg, s.fg)}>{s.text}</Tag>;
     },
   },
   {
@@ -78,13 +98,16 @@ const annColumns: ColumnsType<ClassifiedAnnItem> = [
   { title: '代码', dataIndex: 'ts_code', width: 100 },
   {
     title: '类型', dataIndex: 'ann_type', width: 90,
-    render: (v: string) => <Tag>{ANN_TYPE_LABELS[v] || v}</Tag>,
+    render: (v: string) => {
+      const text = ANN_TYPE_LABELS[v] || v;
+      return <Tag style={tagStyle('rgba(107,199,255,0.15)', '#8ab4d0')}>{text}</Tag>;
+    },
   },
   {
     title: '情绪', dataIndex: 'sentiment', width: 60,
     render: (v: string) => {
-      const s = SENTIMENT_LABELS[v] || { text: v, color: '#64748b' };
-      return <Tag color={s.color}>{s.text}</Tag>;
+      const s = SENTIMENT_LABELS[v] || { text: v, bg: 'rgba(100,116,139,0.18)', fg: '#94a3b8' };
+      return <Tag style={tagStyle(s.bg, s.fg)}>{s.text}</Tag>;
     },
   },
   {
@@ -94,10 +117,11 @@ const annColumns: ColumnsType<ClassifiedAnnItem> = [
   },
 ];
 
-function NewsStatsBar() {
+function NewsStatsBar({ dateRange }: { dateRange: DateRange | null }) {
+  const { start_date, end_date } = fmtDateRange(dateRange);
   const { data } = useQuery({
-    queryKey: ['news-stats'],
-    queryFn: api.newsStats,
+    queryKey: ['news-stats', start_date, end_date],
+    queryFn: () => api.newsStats({ start_date, end_date }),
     staleTime: 60_000,
   });
 
@@ -119,10 +143,10 @@ function NewsStatsBar() {
           <Statistic title="总计" value={total} valueStyle={{ fontSize: 18, color: '#e6f1fa' }} />
         </Card>
       </Col>
-      {Object.entries(SCOPE_LABELS).map(([key, { text, color }]) => (
+      {Object.entries(SCOPE_LABELS).map(([key, { text, fg }]) => (
         <Col span={4} key={key}>
           <Card size="small" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(148,186,215,0.12)' }}>
-            <Statistic title={text} value={byScope[key] || 0} valueStyle={{ fontSize: 18, color }} />
+            <Statistic title={text} value={byScope[key] || 0} valueStyle={{ fontSize: 18, color: fg }} />
           </Card>
         </Col>
       ))}
@@ -139,14 +163,15 @@ function NewsStatsBar() {
   );
 }
 
-function ClassifiedNewsTab() {
+function ClassifiedNewsTab({ dateRange }: { dateRange: DateRange | null }) {
   const [scope, setScope] = useState('');
   const [timeSlot, setTimeSlot] = useState('');
   const [sentiment, setSentiment] = useState('');
+  const { start_date, end_date } = fmtDateRange(dateRange);
 
   const { data, isLoading } = useQuery({
-    queryKey: ['classified-news', scope, timeSlot, sentiment],
-    queryFn: () => api.classifiedNews({ scope, time_slot: timeSlot, sentiment, limit: 200 }),
+    queryKey: ['classified-news', scope, timeSlot, sentiment, start_date, end_date],
+    queryFn: () => api.classifiedNews({ scope, time_slot: timeSlot, sentiment, start_date, end_date, limit: 200 }),
     refetchInterval: 30_000,
   });
 
@@ -185,13 +210,14 @@ function ClassifiedNewsTab() {
   );
 }
 
-function ClassifiedAnnsTab() {
+function ClassifiedAnnsTab({ dateRange }: { dateRange: DateRange | null }) {
   const [annType, setAnnType] = useState('');
   const [sentiment, setSentiment] = useState('');
+  const { start_date, end_date } = fmtDateRange(dateRange);
 
   const { data, isLoading } = useQuery({
-    queryKey: ['classified-anns', annType, sentiment],
-    queryFn: () => api.classifiedAnns({ ann_type: annType, sentiment, limit: 200 }),
+    queryKey: ['classified-anns', annType, sentiment, start_date, end_date],
+    queryFn: () => api.classifiedAnns({ ann_type: annType, sentiment, start_date, end_date, limit: 200 }),
     refetchInterval: 60_000,
   });
 
@@ -225,9 +251,22 @@ function ClassifiedAnnsTab() {
 }
 
 export default function NewsPage() {
+  const [dateRange, setDateRange] = useState<DateRange | null>(null);
+
   return (
     <div className="flex flex-col h-full overflow-auto" style={{ padding: 18, gap: 12 }}>
-      <NewsStatsBar />
+      <div className="flex items-center" style={{ gap: 8 }}>
+        <span style={{ color: '#93a9bc', fontSize: 13 }}>时间范围:</span>
+        <RangePicker
+          value={dateRange}
+          onChange={(v) => setDateRange(v as DateRange | null)}
+          size="small"
+          allowClear
+          placeholder={['开始日期', '结束日期']}
+          style={{ width: 240 }}
+        />
+      </div>
+      <NewsStatsBar dateRange={dateRange} />
       <Panel className="flex-1" noPadding>
         <Tabs
           defaultActiveKey="news"
@@ -236,12 +275,12 @@ export default function NewsPage() {
             {
               key: 'news',
               label: '分类新闻',
-              children: <ClassifiedNewsTab />,
+              children: <ClassifiedNewsTab dateRange={dateRange} />,
             },
             {
               key: 'anns',
               label: '分类公告',
-              children: <ClassifiedAnnsTab />,
+              children: <ClassifiedAnnsTab dateRange={dateRange} />,
             },
           ]}
         />

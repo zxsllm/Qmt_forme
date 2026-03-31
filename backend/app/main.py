@@ -297,6 +297,8 @@ async def get_classified_news(
     scope: str = Query("", description="macro/industry/stock/mixed, empty=all"),
     time_slot: str = Query("", description="pre_open/intraday/after_hours, empty=all"),
     sentiment: str = Query("", description="positive/negative/neutral, empty=all"),
+    start_date: str = Query("", description="YYYY-MM-DD"),
+    end_date: str = Query("", description="YYYY-MM-DD"),
     limit: int = Query(50, ge=1, le=500),
 ):
     """Get classified news with filters."""
@@ -313,7 +315,14 @@ async def get_classified_news(
         if sentiment:
             wheres.append("nc.sentiment = :sentiment")
             params["sentiment"] = sentiment
+        if start_date:
+            wheres.append("n.datetime >= :start_dt")
+            params["start_dt"] = start_date + " 00:00:00"
+        if end_date:
+            wheres.append("n.datetime <= :end_dt")
+            params["end_dt"] = end_date + " 23:59:59"
         where_sql = ("WHERE " + " AND ".join(wheres)) if wheres else ""
+
         sql = text(f"""
             SELECT n.id, n.datetime, n.content, n.channels, n.source,
                    nc.news_scope, nc.time_slot, nc.sentiment,
@@ -378,17 +387,31 @@ async def get_classified_anns(
 
 
 @app.get("/api/v1/market/news/stats")
-async def get_news_stats():
+async def get_news_stats(
+    start_date: str = Query("", description="YYYY-MM-DD"),
+    end_date: str = Query("", description="YYYY-MM-DD"),
+):
     """Get news classification statistics for dashboard."""
     from app.core.database import async_session
     from sqlalchemy import text
     async with async_session() as session:
-        result = await session.execute(text("""
-            SELECT news_scope, time_slot, sentiment, COUNT(*)
-            FROM news_classified
-            GROUP BY news_scope, time_slot, sentiment
+        wheres: list[str] = []
+        params: dict = {}
+        if start_date:
+            wheres.append("n.datetime >= :start_dt")
+            params["start_dt"] = start_date + " 00:00:00"
+        if end_date:
+            wheres.append("n.datetime <= :end_dt")
+            params["end_dt"] = end_date + " 23:59:59"
+        where_sql = ("WHERE " + " AND ".join(wheres)) if wheres else ""
+        result = await session.execute(text(f"""
+            SELECT nc.news_scope, nc.time_slot, nc.sentiment, COUNT(*)
+            FROM news_classified nc
+            JOIN stock_news n ON n.id = nc.news_id
+            {where_sql}
+            GROUP BY nc.news_scope, nc.time_slot, nc.sentiment
             ORDER BY COUNT(*) DESC
-        """))
+        """), params)
         rows = result.fetchall()
     stats = [
         {"scope": r[0], "time_slot": r[1], "sentiment": r[2], "count": r[3]}
@@ -404,6 +427,7 @@ async def get_limit_board(
     trade_date: str = Query("", description="YYYYMMDD, defaults to latest"),
     limit_type: str = Query("", description="U=涨停 D=跌停 Z=炸板, empty=all"),
 ):
+    _LT_MAP = {"U": "涨停池", "D": "跌停池", "Z": "炸板池"}
     from app.core.database import async_session
     from sqlalchemy import text
     async with async_session() as session:
@@ -418,9 +442,9 @@ async def get_limit_board(
         wheres = ["trade_date = :td"]
         params: dict = {"td": trade_date}
         if limit_type:
-            lt_map = {"U": "涨停板", "D": "跌停板", "Z": "炸板股"}
+            db_lt = _LT_MAP.get(limit_type, limit_type)
             wheres.append("limit_type = :lt")
-            params["lt"] = lt_map.get(limit_type, limit_type)
+            params["lt"] = db_lt
         where_sql = " AND ".join(wheres)
         result = await session.execute(text(f"""
             SELECT ts_code, name, pct_chg, trade_date, limit_type,
@@ -767,3 +791,163 @@ async def get_moneyflow_ind(
         return {"count": 0, "data": [], "trade_date": ""}
     df = await loader.moneyflow_ind_ths(trade_date, limit)
     return {"count": len(df), "data": _df_to_records(df), "trade_date": trade_date}
+
+
+# ── Fundamental endpoints ─────────────────────────────────────
+
+@app.get("/api/v1/fundamental/industries")
+async def get_fundamental_industries():
+    from app.core.database import async_session
+    from app.shared.fundamental import industry_list
+    async with async_session() as session:
+        data = await industry_list(session)
+    return {"data": data}
+
+
+@app.get("/api/v1/fundamental/concepts")
+async def get_fundamental_concepts():
+    from app.core.database import async_session
+    from app.shared.fundamental import concept_list_all
+    async with async_session() as session:
+        data = await concept_list_all(session)
+    return {"data": data}
+
+
+@app.get("/api/v1/fundamental/industry/{industry}")
+async def get_industry_profile(industry: str):
+    from app.core.database import async_session
+    from app.shared.fundamental import industry_profile
+    async with async_session() as session:
+        data = await industry_profile(session, industry)
+    return {"count": len(data), "data": data}
+
+
+@app.get("/api/v1/fundamental/concept/{code}")
+async def get_concept_stocks(code: str):
+    from app.core.database import async_session
+    from app.shared.fundamental import concept_stocks
+    async with async_session() as session:
+        data = await concept_stocks(session, code)
+    return {"count": len(data), "data": data}
+
+
+@app.get("/api/v1/fundamental/company/{ts_code}")
+async def get_company_profile(ts_code: str):
+    from app.core.database import async_session
+    from app.shared.fundamental import company_profile
+    async with async_session() as session:
+        data = await company_profile(session, ts_code)
+    return data
+
+
+@app.get("/api/v1/fundamental/events")
+async def get_event_calendar(
+    start: str = Query("", description="YYYYMMDD"),
+    end: str = Query("", description="YYYYMMDD"),
+):
+    from datetime import datetime, timedelta
+    from app.core.database import async_session
+    from app.shared.fundamental import event_calendar
+    if not start:
+        start = datetime.now().strftime("%Y%m%d")
+    if not end:
+        end = (datetime.now() + timedelta(days=30)).strftime("%Y%m%d")
+    async with async_session() as session:
+        data = await event_calendar(session, start, end)
+    return data
+
+
+# ── Sentiment analysis endpoints ──────────────────────────────
+
+@app.get("/api/v1/sentiment/temperature")
+async def get_market_temperature(
+    trade_date: str = Query("", description="YYYYMMDD, defaults to latest"),
+):
+    from app.core.database import async_session
+    from app.shared.sentiment import market_temperature
+    async with async_session() as session:
+        return await market_temperature(session, trade_date)
+
+
+@app.get("/api/v1/sentiment/leaders")
+async def get_board_leaders(
+    trade_date: str = Query("", description="YYYYMMDD, defaults to latest"),
+    concept: str = Query("", description="Filter by concept/tag keyword"),
+):
+    from app.core.database import async_session
+    from app.shared.sentiment import board_leader
+    async with async_session() as session:
+        return await board_leader(session, trade_date, concept)
+
+
+@app.get("/api/v1/sentiment/continuation/{ts_code}")
+async def get_continuation_analysis(ts_code: str):
+    from app.core.database import async_session
+    from app.shared.sentiment import continuation_analysis
+    async with async_session() as session:
+        return await continuation_analysis(session, ts_code)
+
+
+@app.get("/api/v1/sentiment/hot-money")
+async def get_hot_money_signal(
+    trade_date: str = Query("", description="YYYYMMDD, defaults to latest"),
+):
+    from app.core.database import async_session
+    from app.shared.sentiment import hot_money_signal
+    async with async_session() as session:
+        return await hot_money_signal(session, trade_date)
+
+
+@app.get("/api/v1/premarket/plan")
+async def get_premarket_plan(
+    date: str = Query("", description="YYYYMMDD, defaults to today"),
+):
+    from datetime import datetime
+    from app.core.database import async_session
+    from app.shared.premarket import generate_premarket_plan
+    if not date:
+        date = datetime.now().strftime("%Y%m%d")
+    async with async_session() as session:
+        return await generate_premarket_plan(session, date)
+
+
+# ── Technical signal endpoints ────────────────────────────────
+
+@app.get("/api/v1/tech/{ts_code}/volume")
+async def get_volume_anomaly(ts_code: str, trade_date: str = Query("")):
+    from app.core.database import async_session
+    from app.shared.tech_signal import volume_anomaly
+    async with async_session() as session:
+        return await volume_anomaly(session, ts_code, trade_date)
+
+
+@app.get("/api/v1/tech/{ts_code}/gaps")
+async def get_gaps(ts_code: str, trade_date: str = Query("")):
+    from app.core.database import async_session
+    from app.shared.tech_signal import gap_analysis
+    async with async_session() as session:
+        return await gap_analysis(session, ts_code, trade_date)
+
+
+@app.get("/api/v1/tech/{ts_code}/support-resistance")
+async def get_support_resistance(ts_code: str, days: int = Query(60, ge=10, le=250)):
+    from app.core.database import async_session
+    from app.shared.tech_signal import support_resistance
+    async with async_session() as session:
+        return await support_resistance(session, ts_code, days)
+
+
+@app.get("/api/v1/tech/{ts_code}/risk-check")
+async def get_tech_risk_check(ts_code: str, trade_date: str = Query("")):
+    from app.core.database import async_session
+    from app.shared.tech_signal import risk_check
+    async with async_session() as session:
+        return await risk_check(session, ts_code, trade_date)
+
+
+@app.get("/api/v1/risk/alerts")
+async def get_risk_alerts():
+    from app.core.database import async_session
+    from app.shared.risk_alerts import generate_risk_alerts
+    async with async_session() as session:
+        return await generate_risk_alerts(session)

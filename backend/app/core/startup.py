@@ -91,8 +91,14 @@ async def startup_checks() -> dict:
 
     await _ensure_trade_cal_coverage()
 
-    last_td = await last_trade_date()
     is_today_td = await is_trade_date()
+    now = datetime.now()
+
+    if is_today_td and now.hour < 16:
+        from datetime import timedelta
+        expected_td = await last_trade_date(before=date.today() - timedelta(days=1))
+    else:
+        expected_td = await last_trade_date()
 
     # ---- Data freshness ----
     cal_latest = await _latest_date("trade_cal", "cal_date")
@@ -103,7 +109,7 @@ async def startup_checks() -> dict:
         "trade_cal": cal_latest,
         "stock_daily": daily_latest,
         "stock_limit": limit_latest,
-        "last_trade_date": last_td,
+        "expected_trade_date": expected_td,
     }
 
     needs_sync = False
@@ -113,15 +119,15 @@ async def startup_checks() -> dict:
         logger.warning("trade_cal stale: latest=%s today=%s", cal_latest, today_str)
         needs_sync = True
 
-    if daily_latest and daily_latest < last_td:
-        gap = _date_gap(daily_latest, last_td)
-        logger.warning("stock_daily behind %d days: %s → %s", gap, daily_latest, last_td)
+    if daily_latest and daily_latest < expected_td:
+        gap = _date_gap(daily_latest, expected_td)
+        logger.warning("stock_daily behind %d days: %s → %s", gap, daily_latest, expected_td)
         needs_sync = True
     else:
-        logger.info("stock_daily up-to-date: %s", daily_latest)
+        logger.info("stock_daily up-to-date: %s (expected: %s)", daily_latest, expected_td)
 
-    if limit_latest and limit_latest < last_td:
-        logger.warning("stock_limit behind: %s → %s", limit_latest, last_td)
+    if limit_latest and limit_latest < expected_td:
+        logger.warning("stock_limit behind: %s → %s", limit_latest, expected_td)
         needs_sync = True
 
     if needs_sync:

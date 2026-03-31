@@ -7,8 +7,8 @@
 - **当前Phase**: Phase 4.8 四维能力建设 (消息面/基本面/情绪面/技术面)
 - **当前子计划**: `.cursor/plans/四维能力建设子计划_31334356.plan.md`
 - **主计划**: `.cursor/plans/ai_trade_量化交易系统_725fc656.plan.md`
-- **路线**: 完成四维剩余步骤 → 模拟盘验证 → Phase 5 (QMT实盘) → Phase 6 (AI/ML)
-- **最后更新**: 2026-03-30
+- **路线**: 四维核心完成(剩A1-Step5质量迭代可选) → 模拟盘验证 → Phase 5 (QMT实盘) → Phase 6 (AI/ML)
+- **最后更新**: 2026-03-31
 
 ### 四维能力建设详细进度
 
@@ -18,21 +18,21 @@
 | A 消息面 | A1-Step5 | ⏳ | 分类质量迭代 (人工纠正UI + 关键词库优化 + 大模型接口预留) |
 | A 消息面 | A2 | 📋 | 更多消息源 (待用户提供) |
 | B 基本面 | B-Step1 | ✅ | 5个财务表(fina_indicator/income/forecast/fina_mainbz/disclosure_date) + pull_fina.py |
-| B 基本面 | B-Step2 | ❌ | concept_list/concept_detail表已建但数据为空，pull_concept.py未创建 |
+| B 基本面 | B-Step2 | ✅ | concept_list(879) + concept_detail(34444) + pull_concept.py + 注册daily_sync |
 | B 基本面 | B-Step3 | ✅ | 公司画像数据 (fina_mainbz + disclosure_date) |
-| B 基本面 | B-Step4 | ⏳ | 行业画像+公司筛选器 (fundamental.py + API + FundamentalPage) |
+| B 基本面 | B-Step4 | ✅ | fundamental.py分析模块 + 6个API + FundamentalPage(行业/概念/公司画像) |
 | C 情绪面 | C-Step1~3 | ✅ | 7个情绪表 + pull_limit_board.py统一脚本 + 4个sentiment API + SentimentPage |
-| C 情绪面 | C-Step4 | ⏳ | 情绪分析引擎 (market_temperature/board_leader/continuation_analysis) |
-| C 情绪面 | C-Step5 | ⏳ | 盘前计划系统 (消息+涨停+基本面 → 关注列表+风险警示) |
-| D 技术面 | D-Step1 | ⏳ | 技术信号检测 (连板计数/量能异动/缺口/支撑压力) |
-| D 技术面 | D-Step2 | ⏳ | 风控辅助规则 (断板预警/天量见天价 → risk模块) |
+| C 情绪面 | C-Step4 | ✅ | sentiment.py(temperature/leader/continuation/hot_money) + 4个分析API |
+| C 情绪面 | C-Step5 | ✅ | premarket.py(昨日总结+关注列表+风险警示) + /premarket/plan API |
+| D 技术面 | D-Step1 | ✅ | tech_signal.py(连板/量能/缺口/支撑压力) + 3个API |
+| D 技术面 | D-Step2 | ✅ | risk_check(断板预警/天量见天价/大阴线反转) + API |
 
 > ✅ 已完成  ⏳ 待做  ❌ 标记错误需返工  📋 暂不可执行
 
 ## 数据时效
 
-- **数据覆盖**: 20250922 ~ 20260323 (半年滚动)
-- **最后拉取**: 2026-03-23
+- **数据覆盖**: 20250922 ~ 20260331 (半年滚动)
+- **最后拉取**: 2026-03-31
 - **分钟分区**: 2025-09 ~ 2026-03 (超范围需先建分区)
 - **注意**: 离线快照，增量更新见 `scripts/daily_sync.py`
 
@@ -53,6 +53,9 @@
 | P4.8-B | 基本面数据 (5个财务表 + pull_fina.py + daily_sync注册) |
 | P4.8-C | 情绪面数据 (7个打板表 + pull_limit_board.py + 4 sentiment API + SentimentPage) |
 | 路由重构 | 合并8→5+3路由 (trading/strategy/system + news/sentiment/fundamental) |
+| P4.8-B补 | 概念板块879+34444映射 + fundamental.py + 6个API + FundamentalPage |
+| P4.8-CD | sentiment.py + premarket.py + tech_signal.py + 12个分析API |
+| 可转债+风控预警 | cb_basic/cb_daily/cb_call 3张表 + pull_cb.py + risk_alerts.py预警引擎 + SystemPage风控预警面板 |
 
 ## 项目文件地图
 
@@ -75,6 +78,11 @@ backend/app/
       data_loader.py     -- DataLoader (异步统一数据访问层)
       pinyin_cache.py    -- 拼音首字母搜索缓存
     news_classifier.py   -- 规则引擎: 新闻/公告分类
+    fundamental.py       -- 基本面分析 (行业画像/公司画像/事件日历)
+    sentiment.py         -- 情绪分析引擎 (温度/龙头/连板/游资)
+    premarket.py         -- 盘前计划 (昨日总结+关注列表+风险警示)
+    tech_signal.py       -- 技术信号 (量能/缺口/支撑压力/风控辅助)
+    risk_alerts.py       -- 风控预警 (ST/业绩预告/可转债强赎)
   research/
     data/tushare_service.py -- TushareService (39个方法, 频次控制+重试+fields优化)
     indicators/          -- MA/EMA/WMA/MACD/RSI/KDJ/BOLL
@@ -112,6 +120,7 @@ scripts/
   classify_news.py       -- 新闻/公告分类回填+增量
   pull_fina.py           -- 财务数据 (--daily轻量模式)
   pull_limit_board.py    -- 涨跌停/龙虎榜/游资/连板/热榜 (统一7个API)
+  pull_cb.py             -- 可转债数据 (cb_basic全量 + cb_daily增量 + cb_call全量)
   sync_incremental.py    -- 增量同步
   create_min_partitions.py -- 分钟K线月分区
   cleanup_minutes.py     -- 清理超6个月分钟分区
@@ -148,7 +157,9 @@ stock_basic(5811) / trade_cal(181) / stock_daily(632K) / daily_basic(632K) / sto
 
 **情绪面**: limit_list_ths / limit_stats / limit_step / top_list / hm_detail / limit_cpt_list / dc_hot
 
-**其他数据**: moneyflow_dc / stock_st / adj_factor / sw_daily / stk_auction / eco_cal / moneyflow_ind_ths / concept_list(空!) / concept_detail(空!)
+**可转债**: cb_basic(1094) / cb_daily(48040) / cb_call(2000)
+
+**其他数据**: moneyflow_dc / stock_st / adj_factor / sw_daily / stk_auction / eco_cal / moneyflow_ind_ths / concept_list(879) / concept_detail(34444)
 
 **交易系统**: sim_orders / sim_trades / sim_positions / sim_account(1) / audit_log / strategy_meta / backtest_run / promotion_history
 
@@ -191,6 +202,7 @@ stock_basic(5811) / trade_cal(181) / stock_daily(632K) / daily_basic(632K) / sto
 | POST | `/api/v1/account/reset` | 账户重置 |
 | GET | `/api/v1/risk/status` | 风控状态 |
 | POST/DELETE | `/api/v1/risk/kill-switch` | 紧急停机 |
+| GET | `/api/v1/risk/alerts` | 风控预警(ST/业绩预告/可转债强赎) |
 | POST | `/api/v1/backtest/run` | 提交回测 |
 | GET | `/api/v1/backtest/list` | 回测历史 |
 | GET | `/api/v1/backtest/result/{run_id}` | 回测结果 |
@@ -231,6 +243,9 @@ stock_basic(5811) / trade_cal(181) / stock_daily(632K) / daily_basic(632K) / sto
 | 情绪面统一脚本 | pull_limit_board.py 一次拉7个API, 日频 |
 | pull_fina --daily | forecast+disclosure日拉, fina_indicator/income按季自动检测 |
 | 路由合并5+3 | 交易系统3合1, 释放slot给消息/情绪/基本面 |
+| Tushare满权限 | 满积分+满接口, 所有API均可调用, 无需考虑积分限制 |
+| 可转债数据 | cb_basic/cb_daily/cb_call, pull_cb.py 注册daily_sync |
+| 风控预警引擎 | risk_alerts.py 三类预警(ST/业绩预告/可转债强赎), SystemPage面板 |
 
 ## 隔离规则
 
@@ -245,7 +260,8 @@ stock_basic(5811) / trade_cal(181) / stock_daily(632K) / daily_basic(632K) / sto
 - klinecharts Canvas渲染, 颜色硬编码在 `COLORS` 常量
 - 个股新闻用 `content ILIKE '%股票名%'` 匹配 (Tushare不按个股分类)
 - stock_daily/daily_basic 有手动创建的 trade_date 索引 (不在Alembic内)
-- concept_list/concept_detail 表已建但数据为空, pull_concept.py 未创建
+- pull_concept.py 已创建并注册到 daily_sync, concept_list(879) + concept_detail(34444) 已入库
+- pull_cb.py 已创建并注册到 daily_sync, cb_basic(1094) / cb_daily(48040) / cb_call(2000) 已入库
 
 ## 代码审查
 

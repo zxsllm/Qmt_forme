@@ -166,28 +166,28 @@ def _rebuild_rankings_cache(snap: dict) -> None:
     _cached_indices = [snap[c] for c in idx_codes if c in snap]
 
 
+def _snapshot_is_today() -> bool:
+    """Check if the rt snapshot was taken today (valid even after market close)."""
+    if not _rt_snapshot or not _rt_snapshot_ts:
+        return False
+    from datetime import date as _date
+    return _date.fromtimestamp(_rt_snapshot_ts) == _date.today()
+
+
 def get_rt_rankings(rank_type: str = "gain", limit: int = 10) -> list[dict] | None:
-    import time as _t
-    if not _rt_snapshot or _t.time() - _rt_snapshot_ts > 60:
+    if not _snapshot_is_today():
         return None
     return _cached_rankings.get(rank_type, _cached_rankings.get("gain", []))[:limit]
 
 
 def get_rt_global_indices() -> list[dict] | None:
-    import time as _t
-    if not _rt_snapshot or _t.time() - _rt_snapshot_ts > 60:
+    if not _snapshot_is_today():
         return None
     return _cached_indices if _cached_indices else None
 
 
 def get_rt_sector_rankings(limit: int = 30, direction: str = "gain") -> list[dict] | None:
-    """Return cached sector rankings. Valid until midnight (post-close data is final)."""
-    import time as _t
-    if not _cached_sector_rankings:
-        return None
-    from datetime import date as _date
-    snap_date = _date.fromtimestamp(_rt_snapshot_ts) if _rt_snapshot_ts else None
-    if snap_date != _date.today():
+    if not _snapshot_is_today() or not _cached_sector_rankings:
         return None
     return _cached_sector_rankings[:limit]
 
@@ -199,11 +199,13 @@ _industry_cache: dict[str, str] = {}
 class MarketDataScheduler:
 
     NEWS_REFRESH_INTERVAL = 5  # poll news every 5s
+    ALERT_REFRESH_INTERVAL = 600  # poll forecast/ST/CB every 10min
 
     def __init__(self):
         self._running = False
         self._task: asyncio.Task | None = None
         self._news_task: asyncio.Task | None = None
+        self._alert_task: asyncio.Task | None = None
         self._watch_codes: list[str] = []
         self._today_is_trading: bool | None = None
         self._last_check_date: date | None = None
@@ -211,6 +213,7 @@ class MarketDataScheduler:
         self._synced_today = False
         self._last_news_pull: float = 0
         self._last_mins_pull: float = 0
+        self._last_alert_pull: float = 0
         self._mins_backfilled = False
         self._industry_loaded = False
 
@@ -382,6 +385,100 @@ class MarketDataScheduler:
 
         self._news_task = asyncio.ensure_future(_pull_with_timeout())
 
+    def _maybe_pull_alerts(self) -> None:
+        """Fire-and-forget alert data pull (forecast/ST/CB) — every 10 min."""
+        import time as _t
+        if _t.time() - self._last_alert_pull < self.ALERT_REFRESH_INTERVAL:
+            return
+        if self._alert_task and not self._alert_task.done():
+            logger.debug("alert pull still running, skip")
+            return
+        self._last_alert_pull = _t.time()
+
+        async def _pull():
+            try:
+                await asyncio.wait_for(asyncio.to_thread(self._pull_alerts_sync), timeout=120)
+            except asyncio.TimeoutError:
+                logger.warning("alert pull timed out (120s)")
+            except Exception:
+                logger.warning("alert pull task error", exc_info=True)
+
+        self._alert_task = asyncio.ensure_future(_pull())
+
+    @staticmethod
+    def _pull_alerts_sync() -> None:
+        """Pull latest forecast / ST / CB call from Tushare into DB."""
+        import os
+        from datetime import datetime, timedelta
+
+        import psycopg2
+        from psycopg2.extras import execute_values
+        from app.research.data.tushare_service import TushareService
+
+        db_url = os.getenv("DATABASE_URL", "").replace(
+            "postgresql+asyncpg://", "postgresql://"
+        )
+        svc = TushareService()
+        today = datetime.now().strftime("%Y%m%d")
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+
+        # --- 1. Forecast (by ann_date: today + yesterday) ---
+        total_fc = 0
+        for ann_d in [today, yesterday]:
+            try:
+                df = svc.forecast(ann_date=ann_d)
+                if df is not None and not df.empty:
+                    df = df.drop_duplicates(subset=["ts_code", "ann_date", "end_date"], keep="last")
+                    with psycopg2.connect(db_url) as conn:
+                        with conn.cursor() as cur:
+                            cols = list(df.columns)
+                            vals = [tuple(r[c] if r[c] is not None and str(r[c]) != "nan" else None for c in cols) for _, r in df.iterrows()]
+                            sql = (
+                                f"INSERT INTO forecast ({','.join(cols)}) VALUES %s "
+                                f"ON CONFLICT (ts_code, ann_date, end_date) DO UPDATE SET "
+                                + ", ".join(f"{c}=EXCLUDED.{c}" for c in cols if c not in ("ts_code", "ann_date", "end_date"))
+                            )
+                            execute_values(cur, sql, vals)
+                        conn.commit()
+                    total_fc += len(df)
+            except Exception:
+                logger.warning("alert pull forecast(%s) failed", ann_d, exc_info=True)
+        if total_fc:
+            logger.info("alert pull: forecast +%d rows", total_fc)
+
+        # --- 2. ST list (latest date) ---
+        try:
+            df = svc.stock_st(trade_date=today)
+            if df is not None and not df.empty:
+                with psycopg2.connect(db_url) as conn:
+                    with conn.cursor() as cur:
+                        cols = list(df.columns)
+                        vals = [tuple(r[c] if r[c] is not None and str(r[c]) != "nan" else None for c in cols) for _, r in df.iterrows()]
+                        sql = (
+                            f"INSERT INTO stock_st ({','.join(cols)}) VALUES %s "
+                            f"ON CONFLICT (ts_code, trade_date) DO NOTHING"
+                        )
+                        execute_values(cur, sql, vals)
+                    conn.commit()
+                logger.info("alert pull: stock_st +%d rows for %s", len(df), today)
+        except Exception:
+            logger.warning("alert pull stock_st failed", exc_info=True)
+
+        # --- 3. CB call (full refresh is small, ~50 rows) ---
+        try:
+            df = svc.cb_call()
+            if df is not None and not df.empty:
+                with psycopg2.connect(db_url) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("TRUNCATE cb_call")
+                        cols = list(df.columns)
+                        vals = [tuple(r[c] if r[c] is not None and str(r[c]) != "nan" else None for c in cols) for _, r in df.iterrows()]
+                        execute_values(cur, f"INSERT INTO cb_call ({','.join(cols)}) VALUES %s", vals)
+                    conn.commit()
+                logger.info("alert pull: cb_call refreshed %d rows", len(df))
+        except Exception:
+            logger.warning("alert pull cb_call failed", exc_info=True)
+
     @property
     def is_running(self) -> bool:
         return self._running
@@ -472,6 +569,7 @@ class MarketDataScheduler:
 
                 if not self._today_is_trading:
                     self._maybe_pull_news()
+                    self._maybe_pull_alerts()
                     await asyncio.sleep(self.NEWS_REFRESH_INTERVAL)
                     continue
 
@@ -479,6 +577,7 @@ class MarketDataScheduler:
                 t = now.time()
 
                 self._maybe_pull_news()
+                self._maybe_pull_alerts()
                 self._maybe_backfill_mins()
 
                 is_trading = _is_trading_time(now)
@@ -540,7 +639,7 @@ class MarketDataScheduler:
 
     async def _fetch_full_market(self) -> tuple[dict, list[BarData]] | None:
         """Single rt_k call for entire market. Returns (snapshot_dict, watched_bars)."""
-        logger.info("_fetch_full_market called, watch=%d codes", len(self._watch_codes))
+        logger.debug("_fetch_full_market, watch=%d codes", len(self._watch_codes))
         watch_set = set(self._watch_codes)
 
         def _sync() -> tuple[dict, list[BarData]] | None:

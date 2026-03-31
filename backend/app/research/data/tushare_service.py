@@ -303,3 +303,32 @@ class TushareService:
             "trade_date,data_type,ts_code,ts_name,rank,pct_change,current_price",
         )
         return self.query("dc_hot", **kwargs)
+
+    # ── Convertible Bond ──────────────────────────────────────────
+
+    def cb_basic(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "ts_code,bond_short_name,stk_code,stk_short_name,maturity,"
+            "maturity_date,list_date,delist_date,exchange,"
+            "conv_start_date,conv_end_date,conv_price,first_conv_price,"
+            "issue_size,remain_size,call_clause,put_clause,reset_clause,"
+            "conv_clause,par,issue_price",
+        )
+        return self.query("cb_basic", **kwargs)
+
+    def cb_daily(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "ts_code,trade_date,pre_close,open,high,low,close,change,"
+            "pct_chg,vol,amount,bond_value,bond_over_rate,cb_value,cb_over_rate",
+        )
+        return self.query("cb_daily", **kwargs)
+
+    def cb_call(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "ts_code,call_type,is_call,ann_date,call_date,call_price,"
+            "call_price_tax,call_vol,call_amount,payment_date,call_reg_date",
+        )
+        return self.query("cb_call", **kwargs)
