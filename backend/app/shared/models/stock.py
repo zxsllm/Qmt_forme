@@ -898,3 +898,171 @@ class CbCall(Base):
     __table_args__ = (
         UniqueConstraint("ts_code", "ann_date", "call_type", name="uq_cb_call_code_ann_type"),
     )
+
+
+# ── Phase 4.9: 8 new data tables ──────────────────────────────
+
+
+class ShareFloat(Base):
+    """Restricted share unlock schedule."""
+    __tablename__ = "share_float"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    ann_date: Mapped[str | None] = mapped_column(String(8))
+    float_date: Mapped[str | None] = mapped_column(String(8), index=True)
+    float_share: Mapped[float | None] = mapped_column(Float)
+    float_ratio: Mapped[float | None] = mapped_column(Float)
+    holder_name: Mapped[str | None] = mapped_column(String(200))
+    share_type: Mapped[str | None] = mapped_column(String(64))
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "float_date", "holder_name", "share_type",
+                         name="uq_share_float"),
+    )
+
+
+class StkHolderTrade(Base):
+    """Shareholder increase/decrease transactions."""
+    __tablename__ = "stk_holdertrade"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    ann_date: Mapped[str | None] = mapped_column(String(8), index=True)
+    holder_name: Mapped[str | None] = mapped_column(String(200))
+    holder_type: Mapped[str | None] = mapped_column(String(4))
+    in_de: Mapped[str | None] = mapped_column(String(8))
+    change_vol: Mapped[float | None] = mapped_column(Float)
+    change_ratio: Mapped[float | None] = mapped_column(Float)
+    after_share: Mapped[float | None] = mapped_column(Float)
+    after_ratio: Mapped[float | None] = mapped_column(Float)
+    avg_price: Mapped[float | None] = mapped_column(Float)
+    total_share: Mapped[float | None] = mapped_column(Float)
+    begin_date: Mapped[str | None] = mapped_column(String(8))
+    close_date: Mapped[str | None] = mapped_column(String(8))
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "ann_date", "holder_name", "in_de", "change_vol",
+                         name="uq_stk_holdertrade"),
+    )
+
+
+class Margin(Base):
+    """Daily margin trading summary by exchange."""
+    __tablename__ = "margin"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[str] = mapped_column(String(8), index=True)
+    exchange_id: Mapped[str | None] = mapped_column(String(8))
+    rzye: Mapped[float | None] = mapped_column(Float)
+    rzmre: Mapped[float | None] = mapped_column(Float)
+    rzche: Mapped[float | None] = mapped_column(Float)
+    rqye: Mapped[float | None] = mapped_column(Float)
+    rqmcl: Mapped[float | None] = mapped_column(Float)
+    rzrqye: Mapped[float | None] = mapped_column(Float)
+    rqyl: Mapped[float | None] = mapped_column(Float)
+
+    __table_args__ = (
+        UniqueConstraint("trade_date", "exchange_id", name="uq_margin_date_exch"),
+    )
+
+
+class HkHold(Base):
+    """Northbound/Southbound stock connect holding details."""
+    __tablename__ = "hk_hold"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str | None] = mapped_column(String(16))
+    trade_date: Mapped[str] = mapped_column(String(8), index=True)
+    ts_code: Mapped[str | None] = mapped_column(String(16), index=True)
+    name: Mapped[str | None] = mapped_column(String(32))
+    vol: Mapped[float | None] = mapped_column(Float)
+    ratio: Mapped[float | None] = mapped_column(Float)
+    exchange: Mapped[str | None] = mapped_column(String(4))
+
+    __table_args__ = (
+        UniqueConstraint("trade_date", "ts_code", "exchange",
+                         name="uq_hk_hold_date_code_exch"),
+    )
+
+
+class TopInst(Base):
+    """Dragon-tiger list institutional trading details."""
+    __tablename__ = "top_inst"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[str] = mapped_column(String(8), index=True)
+    ts_code: Mapped[str | None] = mapped_column(String(16), index=True)
+    exalter: Mapped[str | None] = mapped_column(String(128))
+    side: Mapped[str | None] = mapped_column(String(8))
+    buy: Mapped[float | None] = mapped_column(Float)
+    buy_rate: Mapped[float | None] = mapped_column(Float)
+    sell: Mapped[float | None] = mapped_column(Float)
+    sell_rate: Mapped[float | None] = mapped_column(Float)
+    net_buy: Mapped[float | None] = mapped_column(Float)
+    reason: Mapped[str | None] = mapped_column(String(256))
+
+    __table_args__ = (
+        UniqueConstraint("trade_date", "ts_code", "exalter", "side",
+                         name="uq_top_inst"),
+    )
+
+
+class IndexDailyBasic(Base):
+    """Major index daily valuation indicators (PE/PB/turnover etc)."""
+    __tablename__ = "index_dailybasic"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    trade_date: Mapped[str] = mapped_column(String(8), index=True)
+    total_mv: Mapped[float | None] = mapped_column(Float)
+    float_mv: Mapped[float | None] = mapped_column(Float)
+    total_share: Mapped[float | None] = mapped_column(Float)
+    float_share: Mapped[float | None] = mapped_column(Float)
+    free_share: Mapped[float | None] = mapped_column(Float)
+    turnover_rate: Mapped[float | None] = mapped_column(Float)
+    turnover_rate_f: Mapped[float | None] = mapped_column(Float)
+    pe: Mapped[float | None] = mapped_column(Float)
+    pe_ttm: Mapped[float | None] = mapped_column(Float)
+    pb: Mapped[float | None] = mapped_column(Float)
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "trade_date", name="uq_idx_dailybasic"),
+    )
+
+
+class Top10FloatHolders(Base):
+    """Top 10 tradable shareholders per reporting period."""
+    __tablename__ = "top10_floatholders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    ann_date: Mapped[str | None] = mapped_column(String(8))
+    end_date: Mapped[str | None] = mapped_column(String(8), index=True)
+    holder_name: Mapped[str | None] = mapped_column(String(200))
+    hold_amount: Mapped[float | None] = mapped_column(Float)
+    hold_ratio: Mapped[float | None] = mapped_column(Float)
+    hold_float_ratio: Mapped[float | None] = mapped_column(Float)
+    hold_change: Mapped[float | None] = mapped_column(Float)
+    holder_type: Mapped[str | None] = mapped_column(String(8))
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "end_date", "holder_name",
+                         name="uq_top10_float"),
+    )
+
+
+class StkHolderNumber(Base):
+    """Shareholder count data."""
+    __tablename__ = "stk_holdernumber"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    ann_date: Mapped[str | None] = mapped_column(String(8))
+    end_date: Mapped[str | None] = mapped_column(String(8), index=True)
+    holder_num: Mapped[int | None] = mapped_column(Integer)
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "end_date", "ann_date",
+                         name="uq_stk_holdernumber"),
+    )

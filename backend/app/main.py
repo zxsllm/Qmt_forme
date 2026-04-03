@@ -103,17 +103,43 @@ async def health():
     return {"status": "ok", "phase": "4.6-lifecycle", "startup": result}
 
 
+@app.get("/api/v1/system/data-health")
+async def data_health():
+    from app.core.database import async_session
+    from app.shared.data_health import run_health_check
+    async with async_session() as session:
+        return await run_health_check(session)
+
+
 @app.get("/api/v1/stock/search")
-async def search_stocks(q: str = Query("", min_length=1, description="code, name or pinyin")):
-    """Search stocks by ts_code, name prefix, or pinyin initials (max 20)."""
+async def search_stocks(
+    q: str = Query("", min_length=1, description="code, name or pinyin"),
+    include_index: bool = Query(False, description="also search indices"),
+):
+    """Search stocks (and optionally indices) by ts_code, name prefix, or pinyin."""
     if q.isascii() and q.replace(" ", "").isalpha():
         from app.shared.data.pinyin_cache import search_by_pinyin
         results = await search_by_pinyin(q.upper(), limit=20)
         if results:
+            if include_index:
+                loader = DataLoader()
+                idx_df = await loader.search_index(q, limit=10)
+                idx_data = [{"ts_code": r["ts_code"], "name": r["name"],
+                             "industry": r.get("category", ""), "list_status": "INDEX",
+                             "type": "index"} for r in _df_to_records(idx_df)]
+                return {"count": len(results) + len(idx_data),
+                        "data": results + idx_data}
             return {"count": len(results), "data": results}
     loader = DataLoader()
     df = await loader.search_stocks(q, limit=20)
-    return {"count": len(df), "data": _df_to_records(df)}
+    data = _df_to_records(df)
+    if include_index:
+        idx_df = await loader.search_index(q, limit=10)
+        idx_data = [{"ts_code": r["ts_code"], "name": r["name"],
+                     "industry": r.get("category", ""), "list_status": "INDEX",
+                     "type": "index"} for r in _df_to_records(idx_df)]
+        data = data + idx_data
+    return {"count": len(data), "data": data}
 
 
 @app.get("/api/v1/stock/{ts_code}/daily")
@@ -122,8 +148,9 @@ async def get_stock_daily(
     start: str = Query("", description="YYYYMMDD"),
     end: str = Query("", description="YYYYMMDD"),
 ):
+    from app.shared.data.data_loader import is_index_code
     loader = DataLoader()
-    df = await loader.daily_with_basic(ts_code, start, end)
+    df = await loader.universal_daily(ts_code, start, end)
     records = _df_to_records(df)
 
     from app.execution.feed.scheduler import get_rt_snapshot
@@ -136,10 +163,13 @@ async def get_stock_daily(
             records.append({
                 "ts_code": ts_code,
                 "trade_date": today_str,
-                "open": rt["open"], "high": rt["high"],
-                "low": rt["low"], "close": rt["close"],
-                "vol": rt["vol"], "amount": rt["amount"],
-                "pre_close": rt["pre_close"],
+                "open": rt.get("open", rt["close"]),
+                "high": rt.get("high", rt["close"]),
+                "low": rt.get("low", rt["close"]),
+                "close": rt["close"],
+                "vol": rt.get("vol", 0),
+                "amount": rt.get("amount", 0),
+                "pre_close": rt.get("pre_close", 0),
                 "pct_chg": rt.get("pct_chg", 0),
             })
 
@@ -424,21 +454,18 @@ async def get_news_stats(
 
 @app.get("/api/v1/sentiment/limit-board")
 async def get_limit_board(
-    trade_date: str = Query("", description="YYYYMMDD, defaults to latest"),
+    trade_date: str = Query("", description="YYYYMMDD, defaults to today"),
     limit_type: str = Query("", description="U=涨停 D=跌停 Z=炸板, empty=all"),
 ):
+    from datetime import datetime as _dt
     _LT_MAP = {"U": "涨停池", "D": "跌停池", "Z": "炸板池"}
+    today = _dt.now().strftime("%Y%m%d")
+    if not trade_date:
+        trade_date = today
+
     from app.core.database import async_session
     from sqlalchemy import text
     async with async_session() as session:
-        if not trade_date:
-            r = await session.execute(text(
-                "SELECT trade_date FROM limit_list_ths ORDER BY trade_date DESC LIMIT 1"
-            ))
-            row = r.fetchone()
-            trade_date = row[0] if row else ""
-        if not trade_date:
-            return {"count": 0, "data": [], "trade_date": ""}
         wheres = ["trade_date = :td"]
         params: dict = {"td": trade_date}
         if limit_type:
@@ -458,6 +485,45 @@ async def get_limit_board(
             "limit_amount", "turnover_rate", "tag", "status",
             "open_num", "first_lu_time", "last_lu_time"]
     data = [dict(zip(cols, r)) for r in rows]
+
+    if not data and trade_date == today:
+        try:
+            from app.execution.feed.scheduler import get_rt_snapshot
+            snap, _ = get_rt_snapshot()
+            if snap:
+                for v in snap.values():
+                    pct = v.get("pct_chg", 0)
+                    code = v.get("ts_code", "")
+                    name = v.get("name", "")
+                    if not code or not pct:
+                        continue
+                    prefix = code.split(".")[0]
+                    is_gem_star = prefix.startswith("3") or prefix.startswith("68")
+                    is_bj = code.endswith(".BJ")
+                    is_st = "ST" in name.upper()
+                    thresh = 4.8 if is_st else (29.5 if is_bj else (19.5 if is_gem_star else 9.8))
+                    lt = None
+                    if pct >= thresh:
+                        lt = "涨停池"
+                    elif pct <= -thresh:
+                        lt = "跌停池"
+                    if lt is None:
+                        continue
+                    if limit_type:
+                        db_lt = _LT_MAP.get(limit_type, limit_type)
+                        if lt != db_lt:
+                            continue
+                    data.append({
+                        "ts_code": code, "name": name, "pct_chg": round(pct, 2),
+                        "trade_date": today, "limit_type": lt,
+                        "limit_amount": v.get("amount"), "turnover_rate": None,
+                        "tag": "", "status": "实时",
+                        "open_num": None, "first_lu_time": None, "last_lu_time": None,
+                    })
+                data.sort(key=lambda x: -(x.get("pct_chg") or 0))
+        except Exception:
+            pass
+
     for d in data:
         for k, v in d.items():
             if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
@@ -467,19 +533,14 @@ async def get_limit_board(
 
 @app.get("/api/v1/sentiment/limit-step")
 async def get_limit_step(
-    trade_date: str = Query("", description="YYYYMMDD, defaults to latest"),
+    trade_date: str = Query("", description="YYYYMMDD, defaults to today"),
 ):
+    from datetime import datetime as _dt
     from app.core.database import async_session
     from sqlalchemy import text
+    if not trade_date:
+        trade_date = _dt.now().strftime("%Y%m%d")
     async with async_session() as session:
-        if not trade_date:
-            r = await session.execute(text(
-                "SELECT trade_date FROM limit_step ORDER BY trade_date DESC LIMIT 1"
-            ))
-            row = r.fetchone()
-            trade_date = row[0] if row else ""
-        if not trade_date:
-            return {"count": 0, "data": [], "trade_date": ""}
         result = await session.execute(text("""
             SELECT ts_code, name, trade_date, nums
             FROM limit_step WHERE trade_date = :td
@@ -493,20 +554,15 @@ async def get_limit_step(
 
 @app.get("/api/v1/sentiment/dragon-tiger")
 async def get_dragon_tiger(
-    trade_date: str = Query("", description="YYYYMMDD, defaults to latest"),
+    trade_date: str = Query("", description="YYYYMMDD, defaults to today"),
     limit: int = Query(30, ge=1, le=100),
 ):
+    from datetime import datetime as _dt
     from app.core.database import async_session
     from sqlalchemy import text
+    if not trade_date:
+        trade_date = _dt.now().strftime("%Y%m%d")
     async with async_session() as session:
-        if not trade_date:
-            r = await session.execute(text(
-                "SELECT trade_date FROM top_list ORDER BY trade_date DESC LIMIT 1"
-            ))
-            row = r.fetchone()
-            trade_date = row[0] if row else ""
-        if not trade_date:
-            return {"count": 0, "data": [], "trade_date": ""}
         result = await session.execute(text("""
             SELECT ts_code, name, trade_date, close, pct_change,
                    turnover_rate, amount, l_sell, l_buy, l_amount,
@@ -529,20 +585,15 @@ async def get_dragon_tiger(
 
 @app.get("/api/v1/sentiment/hot-list")
 async def get_hot_list(
-    trade_date: str = Query("", description="YYYYMMDD, defaults to latest"),
+    trade_date: str = Query("", description="YYYYMMDD, defaults to today"),
     limit: int = Query(30, ge=1, le=100),
 ):
+    from datetime import datetime as _dt
     from app.core.database import async_session
     from sqlalchemy import text
+    if not trade_date:
+        trade_date = _dt.now().strftime("%Y%m%d")
     async with async_session() as session:
-        if not trade_date:
-            r = await session.execute(text(
-                "SELECT trade_date FROM dc_hot ORDER BY trade_date DESC LIMIT 1"
-            ))
-            row = r.fetchone()
-            trade_date = row[0] if row else ""
-        if not trade_date:
-            return {"count": 0, "data": [], "trade_date": ""}
         result = await session.execute(text("""
             SELECT ts_code, ts_name, data_type, trade_date, pct_change,
                    rank, current_price
@@ -585,7 +636,7 @@ async def get_stock_weekly(
     end: str = Query("", description="YYYYMMDD"),
 ):
     loader = DataLoader()
-    df = await loader.weekly(ts_code, start, end)
+    df = await loader.universal_weekly(ts_code, start, end)
     return {"count": len(df), "data": _df_to_records(df)}
 
 
@@ -596,7 +647,7 @@ async def get_stock_monthly(
     end: str = Query("", description="YYYYMMDD"),
 ):
     loader = DataLoader()
-    df = await loader.monthly(ts_code, start, end)
+    df = await loader.universal_monthly(ts_code, start, end)
     return {"count": len(df), "data": _df_to_records(df)}
 
 
@@ -609,36 +660,42 @@ async def get_stock_minutes(
 ):
     import pandas as pd
     from datetime import timedelta
+    from app.shared.data.data_loader import is_index_code
 
     now = datetime.now()
-    today_str = now.strftime("%Y-%m-%d")
-    in_trading_hours = 9 <= now.hour < 16
     user_gave_start = bool(start)
+    _is_idx = is_index_code(ts_code)
 
     if not start:
         start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
         start = start_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    loader = DataLoader()
-    df = await loader.minutes(ts_code, start, end)
-
+    # Fast path: in-memory rt_k data (works for both stocks and indices)
+    has_rt_data = False
+    df = pd.DataFrame()
     if not user_gave_start and days == 1:
         from app.execution.feed.scheduler import get_intraday_minutes
         rt_bars = get_intraday_minutes(ts_code)
-        if rt_bars:
+        if rt_bars and len(rt_bars) >= 10:
             rt_df = pd.DataFrame(rt_bars)
             rt_df["trade_time"] = pd.to_datetime(rt_df["trade_time"])
             df = rt_df.sort_values("trade_time")
+            has_rt_data = True
 
-    if df.empty and not user_gave_start and days == 1:
-        # Fallback 1: Tushare stk_mins (prioritize fresh data over stale DB)
+    # Slow path: DB (stocks only) + Tushare fallbacks
+    if not has_rt_data and not _is_idx:
+        loader = DataLoader()
+        df = await loader.minutes(ts_code, start, end)
+
+    if df.empty and not user_gave_start and days == 1 and not has_rt_data:
         def _fetch_latest_mins():
             from app.research.data.tushare_service import TushareService
             svc = TushareService()
+            api_fn = svc.idx_mins if _is_idx else svc.stk_mins
             for days_back in range(0, 8):
                 d = now - timedelta(days=days_back)
                 ds = d.strftime("%Y-%m-%d")
-                result = svc.stk_mins(
+                result = api_fn(
                     ts_code=ts_code, freq="1min",
                     start_date=f"{ds} 09:00:00",
                     end_date=f"{ds} 15:30:00",
@@ -652,80 +709,81 @@ async def get_stock_minutes(
                 stk_df["trade_time"] = pd.to_datetime(stk_df["trade_time"])
                 df = stk_df.sort_values("trade_time")
         except Exception:
-            logger.warning("stk_mins fallback failed for %s", ts_code, exc_info=True)
+            logger.warning("mins fallback failed for %s", ts_code, exc_info=True)
 
-    if df.empty and not user_gave_start and days == 1:
-        # Fallback 2: DB wider range (30 days) — pick the most recent day
+    if df.empty and not user_gave_start and days == 1 and not _is_idx:
+        loader = DataLoader()
         fallback_start = (now - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
         df = await loader.minutes(ts_code, fallback_start, "")
         if not df.empty:
             latest_date = str(df["trade_time"].iloc[-1])[:10]
             df = df[df["trade_time"].astype(str).str[:10] == latest_date]
 
+    # Auction data: stocks only (indices have no auction)
     start_date_str = start[:10].replace("-", "") if start else ""
+    if not has_rt_data and not _is_idx:
+        loader = DataLoader()
+        auction_df = await loader._query(
+            "SELECT trade_date, price, vol, amount FROM stk_auction "
+            "WHERE ts_code = :c AND trade_date >= :s ORDER BY trade_date",
+            {"c": ts_code, "s": start_date_str},
+        )
+        auc_o_df = pd.DataFrame()
+        def _fetch_auction_o():
+            from app.research.data.tushare_service import TushareService
+            svc = TushareService()
+            return svc.stk_auction_o(ts_code=ts_code, start_date=start_date_str)
+        try:
+            auc_o_df = await asyncio.to_thread(_fetch_auction_o)
+        except Exception:
+            logger.warning("stk_auction_o failed for %s", ts_code, exc_info=True)
 
-    def _fetch_auction_o():
-        from app.research.data.tushare_service import TushareService
-        svc = TushareService()
-        return svc.stk_auction_o(ts_code=ts_code, start_date=start_date_str)
+        auc_rows = []
+        if not auc_o_df.empty:
+            for _, arow in auc_o_df.iterrows():
+                td = str(arow["trade_date"])
+                prefix = f"{td[:4]}-{td[4:6]}-{td[6:8]}"
+                auc_close = float(arow.get("close", 0) or 0)
+                if auc_close <= 0:
+                    continue
+                auc_rows.append({
+                    "ts_code": ts_code, "trade_time": pd.Timestamp(f"{prefix} 09:25:00"),
+                    "open": float(arow.get("open", 0) or 0),
+                    "high": float(arow.get("high", 0) or 0),
+                    "low": float(arow.get("low", 0) or 0),
+                    "close": auc_close,
+                    "vol": float(arow.get("vol", 0) or 0),
+                    "amount": float(arow.get("amount", 0) or 0),
+                    "freq": "1min",
+                })
+        elif not auction_df.empty:
+            for _, arow in auction_df.iterrows():
+                td = str(arow["trade_date"])
+                prefix = f"{td[:4]}-{td[4:6]}-{td[6:8]}"
+                price = float(arow["price"]) if arow["price"] else 0
+                if price <= 0:
+                    continue
+                auc_rows.append({
+                    "ts_code": ts_code, "trade_time": pd.Timestamp(f"{prefix} 09:25:00"),
+                    "open": price, "high": price, "low": price, "close": price,
+                    "vol": float(arow["vol"]) if arow["vol"] else 0,
+                    "amount": float(arow["amount"]) if arow["amount"] else 0,
+                    "freq": "1min",
+                })
 
-    auction_df = await loader._query(
-        "SELECT trade_date, price, vol, amount FROM stk_auction "
-        "WHERE ts_code = :c AND trade_date >= :s ORDER BY trade_date",
-        {"c": ts_code, "s": start_date_str},
-    )
-
-    auc_o_df = pd.DataFrame()
-    try:
-        auc_o_df = await asyncio.to_thread(_fetch_auction_o)
-    except Exception:
-        logger.warning("stk_auction_o failed for %s", ts_code, exc_info=True)
-
-    auc_rows = []
-    if not auc_o_df.empty:
-        for _, arow in auc_o_df.iterrows():
-            td = str(arow["trade_date"])
-            prefix = f"{td[:4]}-{td[4:6]}-{td[6:8]}"
-            auc_close = float(arow.get("close", 0) or 0)
-            if auc_close <= 0:
-                continue
-            auc_rows.append({
-                "ts_code": ts_code, "trade_time": pd.Timestamp(f"{prefix} 09:25:00"),
-                "open": float(arow.get("open", 0) or 0),
-                "high": float(arow.get("high", 0) or 0),
-                "low": float(arow.get("low", 0) or 0),
-                "close": auc_close,
-                "vol": float(arow.get("vol", 0) or 0),
-                "amount": float(arow.get("amount", 0) or 0),
-                "freq": "1min",
-            })
-    elif not auction_df.empty:
-        for _, arow in auction_df.iterrows():
-            td = str(arow["trade_date"])
-            prefix = f"{td[:4]}-{td[4:6]}-{td[6:8]}"
-            price = float(arow["price"]) if arow["price"] else 0
-            if price <= 0:
-                continue
-            auc_rows.append({
-                "ts_code": ts_code, "trade_time": pd.Timestamp(f"{prefix} 09:25:00"),
-                "open": price, "high": price, "low": price, "close": price,
-                "vol": float(arow["vol"]) if arow["vol"] else 0,
-                "amount": float(arow["amount"]) if arow["amount"] else 0,
-                "freq": "1min",
-            })
-
-    if auc_rows:
-        auc_df = pd.DataFrame(auc_rows)
-        df = pd.concat([auc_df, df], ignore_index=True)
-        df = df.drop_duplicates(subset=["ts_code", "trade_time"], keep="last")
-        df = df.sort_values("trade_time")
+        if auc_rows:
+            auc_df = pd.DataFrame(auc_rows)
+            df = pd.concat([auc_df, df], ignore_index=True)
+            df = df.drop_duplicates(subset=["ts_code", "trade_time"], keep="last")
+            df = df.sort_values("trade_time")
 
     pre_close_val = None
     from app.execution.feed.scheduler import get_rt_snapshot
     snap, snap_ts = get_rt_snapshot()
     if ts_code in snap:
         pre_close_val = snap[ts_code].get("pre_close")
-    if not pre_close_val:
+    if not pre_close_val and not _is_idx:
+        loader = DataLoader()
         auc_row = await loader._query(
             "SELECT pre_close FROM stk_auction WHERE ts_code = :c "
             "ORDER BY trade_date DESC LIMIT 1",
@@ -733,6 +791,15 @@ async def get_stock_minutes(
         )
         if not auc_row.empty:
             pre_close_val = float(auc_row["pre_close"].iloc[0])
+    if not pre_close_val and _is_idx:
+        loader = DataLoader()
+        idx_row = await loader._query(
+            "SELECT pre_close FROM index_daily WHERE ts_code = :c "
+            "ORDER BY trade_date DESC LIMIT 1",
+            {"c": ts_code},
+        )
+        if not idx_row.empty:
+            pre_close_val = float(idx_row["pre_close"].iloc[0])
 
     return {"count": len(df), "data": _df_to_records(df), "pre_close": pre_close_val}
 
@@ -951,3 +1018,413 @@ async def get_risk_alerts():
     from app.shared.risk_alerts import generate_risk_alerts
     async with async_session() as session:
         return await generate_risk_alerts(session)
+
+
+# ── Phase 4.9: Index K-line (weekly/monthly) + search + 8 new data APIs ──
+
+
+@app.get("/api/v1/index/{ts_code}/weekly")
+async def get_index_weekly(
+    ts_code: str,
+    start: str = Query("", description="YYYYMMDD"),
+    end: str = Query("", description="YYYYMMDD"),
+):
+    loader = DataLoader()
+    df = await loader.index_weekly(ts_code, start, end)
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/index/{ts_code}/monthly")
+async def get_index_monthly(
+    ts_code: str,
+    start: str = Query("", description="YYYYMMDD"),
+    end: str = Query("", description="YYYYMMDD"),
+):
+    loader = DataLoader()
+    df = await loader.index_monthly(ts_code, start, end)
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/index/search")
+async def search_index(q: str = Query("", min_length=1)):
+    loader = DataLoader()
+    df = await loader.search_index(q, limit=20)
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/stock/{ts_code}/share-float")
+async def get_share_float(
+    ts_code: str,
+    start: str = Query("", description="YYYYMMDD float_date start"),
+    end: str = Query("", description="YYYYMMDD float_date end"),
+):
+    loader = DataLoader()
+    sql = "SELECT * FROM share_float WHERE ts_code = :c"
+    params: dict = {"c": ts_code}
+    if start:
+        sql += " AND float_date >= :s"
+        params["s"] = start
+    if end:
+        sql += " AND float_date <= :e"
+        params["e"] = end
+    sql += " ORDER BY float_date DESC LIMIT 100"
+    df = await loader._query(sql, params)
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/stock/{ts_code}/holdertrade")
+async def get_holdertrade(
+    ts_code: str,
+    start: str = Query("", description="YYYYMMDD ann_date start"),
+    end: str = Query("", description="YYYYMMDD ann_date end"),
+):
+    loader = DataLoader()
+    sql = "SELECT * FROM stk_holdertrade WHERE ts_code = :c"
+    params: dict = {"c": ts_code}
+    if start:
+        sql += " AND ann_date >= :s"
+        params["s"] = start
+    if end:
+        sql += " AND ann_date <= :e"
+        params["e"] = end
+    sql += " ORDER BY ann_date DESC LIMIT 100"
+    df = await loader._query(sql, params)
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/market/margin")
+async def get_margin(
+    start: str = Query("", description="YYYYMMDD"),
+    end: str = Query("", description="YYYYMMDD"),
+    days: int = Query(30, ge=1, le=365),
+):
+    loader = DataLoader()
+    sql = "SELECT * FROM margin WHERE 1=1"
+    params: dict = {}
+    if start:
+        sql += " AND trade_date >= :s"
+        params["s"] = start
+    if end:
+        sql += " AND trade_date <= :e"
+        params["e"] = end
+    if not start and not end:
+        sql += " AND trade_date >= :s"
+        from datetime import datetime, timedelta
+        params["s"] = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+    sql += " ORDER BY trade_date DESC, exchange_id LIMIT 1000"
+    df = await loader._query(sql, params)
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/market/top-inst")
+async def get_top_inst(
+    trade_date: str = Query("", description="YYYYMMDD"),
+    ts_code: str = Query("", description="individual stock filter"),
+):
+    loader = DataLoader()
+    sql = "SELECT * FROM top_inst WHERE 1=1"
+    params: dict = {}
+    if trade_date:
+        sql += " AND trade_date = :td"
+        params["td"] = trade_date
+    elif ts_code:
+        sql += " AND ts_code = :c"
+        params["c"] = ts_code
+    else:
+        sql += " AND trade_date = (SELECT MAX(trade_date) FROM top_inst)"
+    if ts_code and trade_date:
+        sql += " AND ts_code = :c"
+        params["c"] = ts_code
+    sql += " ORDER BY ABS(net_buy) DESC LIMIT 200"
+    df = await loader._query(sql, params)
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/index/{ts_code}/valuation")
+async def get_index_valuation(
+    ts_code: str,
+    start: str = Query("", description="YYYYMMDD"),
+    end: str = Query("", description="YYYYMMDD"),
+    days: int = Query(60, ge=1, le=365),
+):
+    loader = DataLoader()
+    sql = "SELECT * FROM index_dailybasic WHERE ts_code = :c"
+    params: dict = {"c": ts_code}
+    if start:
+        sql += " AND trade_date >= :s"
+        params["s"] = start
+    if end:
+        sql += " AND trade_date <= :e"
+        params["e"] = end
+    if not start and not end:
+        from datetime import datetime, timedelta
+        sql += " AND trade_date >= :s"
+        params["s"] = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+    sql += " ORDER BY trade_date LIMIT 500"
+    df = await loader._query(sql, params)
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/stock/{ts_code}/top10-holders")
+async def get_top10_holders(
+    ts_code: str,
+    periods: int = Query(4, ge=1, le=12, description="recent N reporting periods"),
+):
+    loader = DataLoader()
+    sql = (
+        "SELECT * FROM top10_floatholders WHERE ts_code = :c "
+        "AND end_date IN ("
+        "  SELECT DISTINCT end_date FROM top10_floatholders "
+        "  WHERE ts_code = :c ORDER BY end_date DESC LIMIT :n"
+        ") ORDER BY end_date DESC, hold_amount DESC"
+    )
+    df = await loader._query(sql, {"c": ts_code, "n": periods})
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/stock/{ts_code}/holder-number")
+async def get_holder_number(
+    ts_code: str,
+    start: str = Query("", description="YYYYMMDD"),
+    end: str = Query("", description="YYYYMMDD"),
+):
+    loader = DataLoader()
+    sql = "SELECT * FROM stk_holdernumber WHERE ts_code = :c"
+    params: dict = {"c": ts_code}
+    if start:
+        sql += " AND end_date >= :s"
+        params["s"] = start
+    if end:
+        sql += " AND end_date <= :e"
+        params["e"] = end
+    sql += " ORDER BY end_date DESC LIMIT 50"
+    df = await loader._query(sql, params)
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/market/share-float-upcoming")
+async def get_upcoming_share_float(days: int = Query(30, ge=1, le=90)):
+    """Upcoming restricted share unlocks in the next N days."""
+    from datetime import datetime, timedelta
+    loader = DataLoader()
+    today = datetime.now().strftime("%Y%m%d")
+    end = (datetime.now() + timedelta(days=days)).strftime("%Y%m%d")
+    sql = (
+        "SELECT sf.*, sb.name FROM share_float sf "
+        "LEFT JOIN stock_basic sb ON sf.ts_code = sb.ts_code "
+        "WHERE sf.float_date >= :s AND sf.float_date <= :e "
+        "ORDER BY sf.float_date, sf.float_share DESC LIMIT 500"
+    )
+    df = await loader._query(sql, {"s": today, "e": end})
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/market/holdertrade-recent")
+async def get_recent_holdertrade(
+    days: int = Query(7, ge=1, le=30),
+    trade_type: str = Query("", description="IN=increase, DE=decrease"),
+):
+    """Recent shareholder increase/decrease across all stocks."""
+    from datetime import datetime, timedelta
+    loader = DataLoader()
+    start = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+    sql = (
+        "SELECT ht.*, sb.name FROM stk_holdertrade ht "
+        "LEFT JOIN stock_basic sb ON ht.ts_code = sb.ts_code "
+        "WHERE ht.ann_date >= :s"
+    )
+    params: dict = {"s": start}
+    if trade_type:
+        sql += " AND ht.in_de = :tt"
+        params["tt"] = trade_type
+    sql += " ORDER BY ht.ann_date DESC, ABS(ht.change_vol) DESC LIMIT 200"
+    df = await loader._query(sql, params)
+    return {"count": len(df), "data": _df_to_records(df)}
+
+
+@app.get("/api/v1/market/st-predict")
+async def get_st_predict():
+    """ST prediction — only unpublished consecutive-loss candidates."""
+    from sqlalchemy import text
+    from app.core.database import async_session
+
+    async with async_session() as session:
+        r = await session.execute(text("""
+            WITH loss_2024 AS (
+                SELECT DISTINCT ON (ts_code) ts_code, n_income_attr_p, revenue
+                FROM income
+                WHERE end_date = '20241231' AND report_type = '1'
+                      AND n_income_attr_p < 0
+                ORDER BY ts_code, ann_date DESC
+            ),
+            forecast_2025 AS (
+                SELECT DISTINCT ON (ts_code) ts_code, type, net_profit_min,
+                       net_profit_max, ann_date
+                FROM forecast
+                WHERE end_date = '20251231' AND type = '续亏'
+                ORDER BY ts_code, ann_date DESC
+            ),
+            disc AS (
+                SELECT ts_code, actual_date, pre_date
+                FROM disclosure_date
+                WHERE end_date = '20251231'
+            ),
+            current_st AS (
+                SELECT DISTINCT ts_code
+                FROM stock_st
+                WHERE trade_date = (SELECT MAX(trade_date) FROM stock_st)
+            ),
+            trade_days AS (
+                SELECT cal_date
+                FROM trade_cal
+                WHERE is_open = 1 AND exchange = 'SSE'
+                      AND cal_date >= to_char(now(), 'YYYYMMDD')
+                ORDER BY cal_date LIMIT 40
+            )
+            SELECT
+                l.ts_code,
+                b.name,
+                l.n_income_attr_p  AS profit_2024,
+                l.revenue          AS revenue_2024,
+                f.net_profit_min,
+                f.net_profit_max,
+                f.ann_date         AS forecast_ann_date,
+                d.pre_date,
+                (SELECT MIN(cal_date) FROM trade_days
+                 WHERE cal_date > d.pre_date
+                ) AS predicted_st_date
+            FROM loss_2024 l
+            JOIN forecast_2025 f ON l.ts_code = f.ts_code
+            JOIN stock_basic b ON l.ts_code = b.ts_code
+            LEFT JOIN disc d ON l.ts_code = d.ts_code
+            WHERE l.ts_code NOT IN (SELECT ts_code FROM current_st)
+              AND (d.actual_date IS NULL OR d.actual_date = '')
+            ORDER BY d.pre_date ASC NULLS LAST
+        """))
+        rows = r.fetchall()
+        cols = r.keys()
+
+        items = []
+        for row in rows:
+            rec = dict(zip(cols, row))
+            for k, v in rec.items():
+                if isinstance(v, float) and (v != v):
+                    rec[k] = None
+            rec["disclosure_date"] = rec["pre_date"] or ""
+            items.append(rec)
+
+        return {"count": len(items), "data": items}
+
+
+# ── Monitor: Index-Sector Resonance ──────────────────────────────
+
+@app.get("/api/v1/monitor/index-sector-resonance")
+async def get_index_sector_resonance(
+    index_code: str = Query("000001.SH", description="Index ts_code"),
+    days: int = Query(20, ge=5, le=60, description="Lookback days"),
+    level: str = Query("L1", description="SW level: L1/L2/L3/all"),
+):
+    """Pearson correlation of each SW sector with a major index over recent N days."""
+    from sqlalchemy import text as sa_text
+    from app.core.database import async_session
+
+    async with async_session() as sess:
+        idx_rows = (await sess.execute(sa_text("""
+            SELECT trade_date, pct_chg FROM index_daily
+            WHERE ts_code = :code
+            ORDER BY trade_date DESC LIMIT :n
+        """), {"code": index_code, "n": days})).fetchall()
+
+        if len(idx_rows) < 5:
+            return {"index_code": index_code, "days": days, "sectors": []}
+
+        dates = [r[0] for r in idx_rows]
+        idx_map = {r[0]: float(r[1] or 0) for r in idx_rows}
+        min_date, max_date = min(dates), max(dates)
+
+        if level != "all":
+            l1_codes = (await sess.execute(sa_text(
+                "SELECT index_code FROM index_classify WHERE src='SW2021' AND level = :lv"
+            ), {"lv": level})).fetchall()
+            allowed = {r[0] for r in l1_codes}
+        else:
+            allowed = None
+
+        sw_rows = (await sess.execute(sa_text("""
+            SELECT ts_code, name, trade_date, pct_change, close, vol
+            FROM sw_daily
+            WHERE trade_date >= :d0 AND trade_date <= :d1
+            ORDER BY ts_code, trade_date
+        """), {"d0": min_date, "d1": max_date})).fetchall()
+
+    from collections import defaultdict
+    sector_data: dict[str, dict] = {}
+    sector_daily: dict[str, list[tuple[str, float]]] = defaultdict(list)
+
+    for r in sw_rows:
+        code, name, td, pct, close, vol = r
+        if allowed is not None and code not in allowed:
+            continue
+        if code not in sector_data:
+            sector_data[code] = {"name": name, "close": None, "vol": None}
+        sector_data[code]["close"] = float(close) if close else sector_data[code]["close"]
+        sector_data[code]["vol"] = float(vol) if vol else sector_data[code]["vol"]
+        sector_daily[code].append((td, float(pct or 0)))
+
+    import math
+
+    def pearson(xs: list[float], ys: list[float]) -> float:
+        n = len(xs)
+        if n < 3:
+            return 0.0
+        mx = sum(xs) / n
+        my = sum(ys) / n
+        sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+        sx = math.sqrt(sum((x - mx) ** 2 for x in xs))
+        sy = math.sqrt(sum((y - my) ** 2 for y in ys))
+        if sx == 0 or sy == 0:
+            return 0.0
+        return sxy / (sx * sy)
+
+    sectors = []
+    for code, pairs in sector_daily.items():
+        td_map = {td: pct for td, pct in pairs}
+        common_dates = [d for d in dates if d in td_map]
+        if len(common_dates) < 5:
+            continue
+
+        idx_vals = [idx_map[d] for d in common_dates]
+        sec_vals = [td_map[d] for d in common_dates]
+
+        corr = pearson(idx_vals, sec_vals)
+        cum_return = sum(sec_vals)
+        info = sector_data.get(code, {})
+        latest_pct = pairs[-1][1] if pairs else 0
+
+        sectors.append({
+            "ts_code": code,
+            "name": info.get("name", ""),
+            "correlation": round(corr, 4),
+            "cum_return": round(cum_return, 2),
+            "latest_pct": round(latest_pct, 2),
+            "close": info.get("close"),
+            "days_matched": len(common_dates),
+        })
+
+    sectors.sort(key=lambda s: abs(s["correlation"]), reverse=True)
+
+    return {
+        "index_code": index_code,
+        "days": days,
+        "total_dates": len(dates),
+        "sectors": sectors,
+    }
+
+
+# ── Monitor: Real-time snapshot ──────────────────────────────────
+
+@app.get("/api/v1/monitor/snapshot")
+async def get_monitor_snapshot():
+    """Real-time intraday monitoring: index anomalies + sector attribution."""
+    from app.execution.feed.monitor_engine import monitor_engine
+    return monitor_engine.get_snapshot()

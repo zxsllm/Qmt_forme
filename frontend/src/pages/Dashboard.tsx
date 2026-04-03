@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import { AutoComplete, Space, Radio } from 'antd';
+import { AutoComplete, Space, Radio, Statistic, Table, Tag } from 'antd';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../services/api';
 import { useMarketFeed } from '../services/useMarketFeed';
@@ -18,7 +18,7 @@ import TurnoverPanel from '../components/rankings/TurnoverPanel';
 import MoneyFlowPanel from '../components/rankings/MoneyFlowPanel';
 import GlobalIndexPanel from '../components/rankings/GlobalIndexPanel';
 
-const DEFAULT_CODE = '000001.SZ';
+const DEFAULT_CODE = '000001.SH';
 
 const PERIOD_OPTIONS = [
   { label: '分时', value: '1min' as KlinePeriod },
@@ -26,6 +26,89 @@ const PERIOD_OPTIONS = [
   { label: '周K', value: 'weekly' as KlinePeriod },
   { label: '月K', value: 'monthly' as KlinePeriod },
 ];
+
+const isIndexCode = (c: string) =>
+  /^(0000|399|880|9)/.test(c) && c.endsWith('.SH') ||
+  /^(399|980)/.test(c) && c.endsWith('.SZ') ||
+  c.endsWith('.BJ') && /^8990/.test(c);
+
+function DetailStrip({ tsCode, isIdx }: { tsCode: string; isIdx: boolean }) {
+  const { data: holderNum } = useQuery({
+    queryKey: ['holder-number', tsCode],
+    queryFn: () => api.getHolderNumber(tsCode),
+    enabled: !isIdx && !!tsCode,
+    staleTime: 600_000,
+  });
+  const { data: top10 } = useQuery({
+    queryKey: ['top10-holders', tsCode],
+    queryFn: () => api.getTop10Holders(tsCode),
+    enabled: !isIdx && !!tsCode,
+    staleTime: 600_000,
+  });
+
+  const listH = 114;
+
+  return (
+    <div style={{ borderTop: '1px solid rgba(148,186,215,0.10)' }}>
+      <StockNewsPanel tsCode={tsCode} height={150} extraTabs={isIdx ? undefined : [
+        {
+          key: 'holders',
+          label: '股东人数',
+          node: (
+            <div style={{ overflowY: 'auto', height: listH, padding: '4px 12px' }}>
+              <Table
+                dataSource={(holderNum?.data ?? []) as Record<string, unknown>[]}
+                rowKey={(_, i) => String(i)}
+                size="small"
+                pagination={false}
+                scroll={{ y: listH - 30 }}
+                columns={[
+                  { title: '日期', dataIndex: 'end_date', width: 80, render: (v: string) => v || '-' },
+                  { title: '股东数', dataIndex: 'holder_num', width: 80, align: 'right',
+                    render: (v: number) => v ? v.toLocaleString() : '-' },
+                  { title: '环比(%)', dataIndex: 'holder_num_change', width: 80, align: 'right',
+                    render: (v: number | null) => v != null
+                      ? <span style={{ color: v > 0 ? '#ff6f91' : v < 0 ? '#4ade80' : '#93a9bc' }}>{v > 0 ? '+' : ''}{v.toFixed(2)}</span>
+                      : '-' },
+                ]}
+              />
+            </div>
+          ),
+        },
+        {
+          key: 'top10',
+          label: '十大股东',
+          node: (
+            <div style={{ overflowY: 'auto', height: listH, padding: '4px 12px' }}>
+              <Table
+                dataSource={(top10?.data ?? []) as Record<string, unknown>[]}
+                rowKey={(_, i) => String(i)}
+                size="small"
+                pagination={false}
+                scroll={{ y: listH - 30 }}
+                columns={[
+                  { title: '报告期', dataIndex: 'end_date', width: 80 },
+                  { title: '股东名称', dataIndex: 'holder_name', ellipsis: true },
+                  { title: '持股(万)', dataIndex: 'hold_amount', width: 80, align: 'right',
+                    render: (v: number) => v ? (v / 1e4).toFixed(0) : '-' },
+                  { title: '占比(%)', dataIndex: 'hold_ratio', width: 70, align: 'right',
+                    render: (v: number) => v != null ? v.toFixed(2) : '-' },
+                  { title: '增减', dataIndex: 'hold_change', width: 75, align: 'right',
+                    render: (v: number | null) => {
+                      if (v == null) return <Tag color="default" style={{ margin: 0 }}>新进</Tag>;
+                      if (v > 0) return <span style={{ color: '#ff6f91' }}>+{(v / 1e4).toFixed(0)}万</span>;
+                      if (v < 0) return <span style={{ color: '#4ade80' }}>{(v / 1e4).toFixed(0)}万</span>;
+                      return <span style={{ color: '#93a9bc' }}>不变</span>;
+                    } },
+                ]}
+              />
+            </div>
+          ),
+        },
+      ]} />
+    </div>
+  );
+}
 
 export default function Dashboard() {
   const [code, setCode] = useState(DEFAULT_CODE);
@@ -36,11 +119,20 @@ export default function Dashboard() {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const { connected } = useMarketFeed();
+  const isIdx = isIndexCode(code);
 
   const handleStockSelect = useCallback((tsCode: string) => {
     setCode(tsCode);
     setInputVal(tsCode);
   }, []);
+
+  const { data: valuation } = useQuery({
+    queryKey: ['index-valuation', code],
+    queryFn: () => api.indexValuation(code, '', '', 1),
+    enabled: isIdx && !!code,
+    staleTime: 300_000,
+  });
+  const valRow = (valuation?.data?.length ?? 0) > 0 ? valuation!.data[valuation!.data.length - 1] : null;
 
   const onSearchInput = useCallback((text: string) => {
     setInputVal(text);
@@ -49,19 +141,26 @@ export default function Dashboard() {
 
     debounceRef.current = setTimeout(async () => {
       try {
-        const res = await api.searchStocks(text);
+        const res = await api.searchStocks(text, true);
         setSearchOptions(
-          res.data.map((s) => ({
-            value: s.ts_code,
-            label: (
-              <span>
-                <b style={{ color: '#6bc7ff' }}>{s.ts_code}</b>
-                <span style={{ marginLeft: 8, color: '#93a9bc', fontSize: 12 }}>
-                  {s.name}
+          res.data.map((s) => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const isIndex = (s as any).type === 'index' || s.list_status === 'INDEX';
+            return {
+              value: s.ts_code,
+              label: (
+                <span>
+                  <b style={{ color: isIndex ? '#faad14' : '#6bc7ff' }}>{s.ts_code}</b>
+                  <span style={{ marginLeft: 8, color: '#93a9bc', fontSize: 12 }}>
+                    {s.name}
+                  </span>
+                  {isIndex && (
+                    <span style={{ marginLeft: 6, color: '#faad14', fontSize: 11 }}>[指数]</span>
+                  )}
                 </span>
-              </span>
-            ),
-          })),
+              ),
+            };
+          }),
         );
       } catch {
         setSearchOptions([]);
@@ -71,11 +170,12 @@ export default function Dashboard() {
 
   const { data: stockInfo } = useQuery({
     queryKey: ['stock-search-info', code],
-    queryFn: () => api.searchStocks(code.split('.')[0]),
+    queryFn: () => api.searchStocks(code, true),
     enabled: !!code,
   });
 
-  const stockName = stockInfo?.data?.[0]?.name ?? '';
+  const stockName = stockInfo?.data?.find(s => s.ts_code === code)?.name
+    ?? stockInfo?.data?.[0]?.name ?? '';
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const fetchFn = (): Promise<any> => {
@@ -91,7 +191,7 @@ export default function Dashboard() {
     queryKey: ['kline-data', code, period],
     queryFn: fetchFn,
     enabled: !!code,
-    refetchInterval: period === '1min' ? 30_000 : undefined,
+    refetchInterval: period === '1min' ? 5_000 : undefined,
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -197,10 +297,31 @@ export default function Dashboard() {
                 autoFill
                 indicators={period === '1min' ? ['VOL'] : ['MA', 'VOL']}
                 preClose={preClose}
+                isIndex={isIdx}
               />
             </ErrorBoundary>
           </div>
-          <StockNewsPanel tsCode={code} height={150} />
+          {isIdx && valRow && (
+            <div style={{
+              display: 'flex', gap: 16, padding: '6px 14px',
+              background: 'rgba(107,199,255,0.04)',
+              borderTop: '1px solid rgba(148,186,215,0.10)',
+            }}>
+              {[
+                { title: 'PE', val: (valRow.pe as number)?.toFixed(1) },
+                { title: 'PE(TTM)', val: (valRow.pe_ttm as number)?.toFixed(1) },
+                { title: 'PB', val: (valRow.pb as number)?.toFixed(2) },
+                { title: '换手率', val: `${(valRow.turnover_rate as number)?.toFixed(2)}%` },
+                { title: '总市值', val: (() => { const v = valRow.total_mv as number; return v >= 1e8 ? `${(v / 1e8).toFixed(1)}万亿` : v >= 1e4 ? `${(v / 1e4).toFixed(0)}亿` : String(v ?? '-'); })() },
+              ].map(s => (
+                <Statistic key={s.title} title={s.title} value={s.val ?? '-'}
+                  valueStyle={{ fontSize: 13, color: '#e6f1fa', fontWeight: 500 }}
+                  style={{ minWidth: 80 }}
+                />
+              ))}
+            </div>
+          )}
+          <DetailStrip tsCode={code} isIdx={isIdx} />
         </div>
       </Panel>
 

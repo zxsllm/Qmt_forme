@@ -4,11 +4,11 @@
 
 ## 当前状态
 
-- **当前Phase**: Phase 4.8 四维能力建设 (消息面/基本面/情绪面/技术面)
+- **当前Phase**: Phase 4.9 数据增强 (8个新API + 指数K线搜索)
 - **当前子计划**: `.cursor/plans/四维能力建设子计划_31334356.plan.md`
 - **主计划**: `.cursor/plans/ai_trade_量化交易系统_725fc656.plan.md`
 - **路线**: 四维核心完成(剩A1-Step5质量迭代可选) → 模拟盘验证 → Phase 5 (QMT实盘) → Phase 6 (AI/ML)
-- **最后更新**: 2026-03-31
+- **最后更新**: 2026-04-01
 
 ### 四维能力建设详细进度
 
@@ -31,10 +31,10 @@
 
 ## 数据时效
 
-- **数据覆盖**: 20250922 ~ 20260331 (半年滚动)
-- **最后拉取**: 2026-03-31
-- **分钟分区**: 2025-09 ~ 2026-03 (超范围需先建分区)
-- **注意**: 离线快照，增量更新见 `scripts/daily_sync.py`
+- **数据覆盖**: 20250922 ~ 20260401 (半年滚动)
+- **最后拉取**: 2026-04-01
+- **分钟分区**: 2025-09 ~ 2026-04 (超范围需先建分区)
+- **注意**: 离线快照，scheduler in-process自动同步，详见 `.cursor/rules/data-pipeline.mdc`
 
 ## 已完成历程 (精简版)
 
@@ -56,6 +56,8 @@
 | P4.8-B补 | 概念板块879+34444映射 + fundamental.py + 6个API + FundamentalPage |
 | P4.8-CD | sentiment.py + premarket.py + tech_signal.py + 12个分析API |
 | 可转债+风控预警 | cb_basic/cb_daily/cb_call 3张表 + pull_cb.py + risk_alerts.py预警引擎 + SystemPage风控预警面板 |
+| 数据管线重构 | data_sync.py统一20个同步函数 + scheduler in-process收盘同步 + daily_sync仅CLI兜底 + startup智能判断 |
+| P4.9 数据增强 | 8新API(share_float/stk_holdertrade/margin/hk_hold/top_inst/index_dailybasic/top10_floatholders/stk_holdernumber) + 指数K线(周/月)+搜索 + FundamentalPage市场资金+解禁增减持Tab + 公司详情增强(北向/股东/解禁) |
 
 ## 项目文件地图
 
@@ -97,12 +99,12 @@ backend/app/
     fee.py / slippage.py / matcher.py -- 手续费/滑点/撮合(含A股规则)
     oms/                 -- 订单状态机 + 持仓账本 + 资金账本
     risk/                -- 下单前风控 + 盘中风控 + Kill Switch
-    feed/                -- MarketFeed + WSManager + scheduler(rt_k 1.2s全市场轮询+新闻9源5秒WS推送)
+    feed/                -- MarketFeed + WSManager + scheduler(统一调度中心) + data_sync(20个同步函数)
     observability/       -- 心跳 + 审计日志 + 每日摘要
   alembic/               -- 迁移 (仅管常规表)
 
 scripts/
-  daily_sync.py          -- 日终综合同步 (调用下方脚本+classify_news+pull_fina --daily)
+  daily_sync.py          -- CLI手动兜底 (调data_sync.run_post_market_sync + sync_minutes subprocess)
   init_data.py           -- stock_basic + trade_cal + stock_daily
   pull_batch1.py         -- daily_basic + index_*
   pull_minutes.py        -- 1min数据 (按月分区)
@@ -134,7 +136,7 @@ frontend/src/            -- React 19 + TypeScript + Vite + AntD5
     SystemPage.tsx       -- 系统监控 (风控+历史+审计+行情调度 Tabs)
     NewsPage.tsx         -- 消息中心 (分类新闻/公告+统计)
     SentimentPage.tsx    -- 情绪看板 (涨停榜/连板/龙虎榜/热榜)
-    FundamentalPage.tsx  -- 基本面 (占位, 待B-Step4)
+    FundamentalPage.tsx  -- 基本面 (行业/概念/市场资金/解禁增减持 + 公司详情增强)
   components/
     KlineChart.tsx       -- K线 (分时/日/周/月)
     SidebarNews.tsx      -- Sidebar新闻快讯
@@ -159,6 +161,8 @@ stock_basic(5811) / trade_cal(181) / stock_daily(632K) / daily_basic(632K) / sto
 
 **可转债**: cb_basic(1094) / cb_daily(48040) / cb_call(2000)
 
+**Phase 4.9 新增**: share_float / stk_holdertrade / margin / hk_hold / top_inst / index_dailybasic / top10_floatholders / stk_holdernumber
+
 **其他数据**: moneyflow_dc / stock_st / adj_factor / sw_daily / stk_auction / eco_cal / moneyflow_ind_ths / concept_list(879) / concept_detail(34444)
 
 **交易系统**: sim_orders / sim_trades / sim_positions / sim_account(1) / audit_log / strategy_meta / backtest_run / promotion_history
@@ -168,7 +172,7 @@ stock_basic(5811) / trade_cal(181) / stock_daily(632K) / daily_basic(632K) / sto
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/health` | 健康检查 |
-| GET | `/api/v1/stock/search?q=` | 股票搜索(代码/名称/拼音) |
+| GET | `/api/v1/stock/search?q=&include_index=` | 股票+指数搜索(代码/名称/拼音) |
 | GET | `/api/v1/stock/{ts_code}/daily` | 日线+基本面 |
 | GET | `/api/v1/stock/{ts_code}/weekly` | 周K线 |
 | GET | `/api/v1/stock/{ts_code}/monthly` | 月K线 |
@@ -193,6 +197,19 @@ stock_basic(5811) / trade_cal(181) / stock_daily(632K) / daily_basic(632K) / sto
 | GET | `/api/v1/sentiment/dragon-tiger` | 龙虎榜 |
 | GET | `/api/v1/sentiment/hot-list` | 市场热榜 |
 | GET | `/api/v1/index/{ts_code}/daily` | 指数日线 |
+| GET | `/api/v1/index/{ts_code}/weekly` | 指数周K线 |
+| GET | `/api/v1/index/{ts_code}/monthly` | 指数月K线 |
+| GET | `/api/v1/index/{ts_code}/valuation` | 指数估值(PE/PB/换手率) |
+| GET | `/api/v1/index/search?q=` | 指数搜索 |
+| GET | `/api/v1/stock/{ts_code}/share-float` | 个股解禁计划 |
+| GET | `/api/v1/stock/{ts_code}/holdertrade` | 个股增减持 |
+| GET | `/api/v1/stock/{ts_code}/hk-hold` | 个股北向持股 |
+| GET | `/api/v1/stock/{ts_code}/top10-holders` | 前十大流通股东 |
+| GET | `/api/v1/stock/{ts_code}/holder-number` | 股东人数 |
+| GET | `/api/v1/market/margin` | 融资融券汇总 |
+| GET | `/api/v1/market/top-inst` | 龙虎榜机构交易 |
+| GET | `/api/v1/market/share-float-upcoming` | 近期解禁日历 |
+| GET | `/api/v1/market/holdertrade-recent` | 近期增减持 |
 | GET | `/api/v1/classify/sw` | 申万行业分类 |
 | POST | `/api/v1/orders` | 提交订单 |
 | DELETE | `/api/v1/orders/{order_id}` | 撤单 |
@@ -226,7 +243,7 @@ stock_basic(5811) / trade_cal(181) / stock_daily(632K) / daily_basic(632K) / sto
 | `/system` | SystemPage | 风控+历史+审计+行情调度 (Tabs) |
 | `/news` | NewsPage | 分类新闻/公告+统计 |
 | `/sentiment` | SentimentPage | 涨停榜/连板/龙虎榜/热榜 |
-| `/fundamental` | FundamentalPage | 占位 (待B-Step4) |
+| `/fundamental` | FundamentalPage | 行业/概念/市场资金/解禁增减持 + 公司详情增强 |
 
 ## 关键决策
 
@@ -244,8 +261,10 @@ stock_basic(5811) / trade_cal(181) / stock_daily(632K) / daily_basic(632K) / sto
 | pull_fina --daily | forecast+disclosure日拉, fina_indicator/income按季自动检测 |
 | 路由合并5+3 | 交易系统3合1, 释放slot给消息/情绪/基本面 |
 | Tushare满权限 | 满积分+满接口, 所有API均可调用, 无需考虑积分限制 |
-| 可转债数据 | cb_basic/cb_daily/cb_call, pull_cb.py 注册daily_sync |
+| 可转债数据 | cb_basic/cb_daily/cb_call, data_sync统一管理 |
 | 风控预警引擎 | risk_alerts.py 三类预警(ST/业绩预告/可转债强赎), SystemPage面板 |
+| 数据管线统一 | data_sync.py 28个函数in-process，scheduler唯一调度，sync_minutes单独subprocess |
+| Phase 4.9 数据增强 | 8新API(解禁/增减持/融资融券/北向/龙虎榜机构/指数估值/前十股东/股东人数) + 指数K线搜索 |
 
 ## 隔离规则
 
@@ -260,8 +279,8 @@ stock_basic(5811) / trade_cal(181) / stock_daily(632K) / daily_basic(632K) / sto
 - klinecharts Canvas渲染, 颜色硬编码在 `COLORS` 常量
 - 个股新闻用 `content ILIKE '%股票名%'` 匹配 (Tushare不按个股分类)
 - stock_daily/daily_basic 有手动创建的 trade_date 索引 (不在Alembic内)
-- pull_concept.py 已创建并注册到 daily_sync, concept_list(879) + concept_detail(34444) 已入库
-- pull_cb.py 已创建并注册到 daily_sync, cb_basic(1094) / cb_daily(48040) / cb_call(2000) 已入库
+- pull_*.py 脚本保留用于手动/历史补数据，日常同步已迁移到 data_sync.py (scheduler in-process)
+- concept_list(879) + concept_detail(34444) + cb_basic(1094) / cb_daily(48040) / cb_call(2000) 已入库
 
 ## 代码审查
 

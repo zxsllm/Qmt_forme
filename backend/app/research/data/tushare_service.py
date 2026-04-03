@@ -110,6 +110,9 @@ class TushareService:
     def stk_mins(self, **kwargs) -> pd.DataFrame:
         return self.query("stk_mins", **kwargs)
 
+    def idx_mins(self, **kwargs) -> pd.DataFrame:
+        return self.query("idx_mins", **kwargs)
+
     def rt_k(self, **kwargs) -> pd.DataFrame:
         return self.query("rt_k", **kwargs)
 
@@ -332,3 +335,67 @@ class TushareService:
             "call_price_tax,call_vol,call_amount,payment_date,call_reg_date",
         )
         return self.query("cb_call", **kwargs)
+
+    # ── 8 new APIs (Phase 4.9) ────────────────────────────────────
+
+    def share_float(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "ts_code,ann_date,float_date,float_share,float_ratio,"
+            "holder_name,share_type",
+        )
+        return self.query("share_float", **kwargs)
+
+    def stk_holdertrade(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "ts_code,ann_date,holder_name,holder_type,in_de,change_vol,"
+            "change_ratio,after_share,after_ratio,avg_price,total_share,"
+            "begin_date,close_date",
+        )
+        return self.query("stk_holdertrade", **kwargs)
+
+    def margin(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "trade_date,exchange_id,rzye,rzmre,rzche,rqye,rqmcl,rzrqye,rqyl",
+        )
+        return self.query("margin", **kwargs)
+
+    def hk_hold(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "code,trade_date,ts_code,name,vol,ratio,exchange",
+        )
+        return self.query("hk_hold", **kwargs)
+
+    def top_inst(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "trade_date,ts_code,exalter,side,buy,buy_rate,sell,sell_rate,"
+            "net_buy,reason",
+        )
+        return self.query("top_inst", **kwargs)
+
+    def index_dailybasic(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "ts_code,trade_date,total_mv,float_mv,total_share,float_share,"
+            "free_share,turnover_rate,turnover_rate_f,pe,pe_ttm,pb",
+        )
+        return self.query("index_dailybasic", **kwargs)
+
+    def top10_floatholders(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "ts_code,ann_date,end_date,holder_name,hold_amount,"
+            "hold_ratio,hold_float_ratio,hold_change,holder_type",
+        )
+        return self.query("top10_floatholders", **kwargs)
+
+    def stk_holdernumber(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "ts_code,ann_date,end_date,holder_num",
+        )
+        return self.query("stk_holdernumber", **kwargs)

@@ -23,6 +23,7 @@ interface Props {
   autoFill?: boolean;
   indicators?: string[];
   preClose?: number;
+  isIndex?: boolean;
 }
 
 function toTimestamp(d: string): number {
@@ -139,6 +140,7 @@ export default function KlineChart({
   autoFill,
   indicators = ['MA', 'VOL'],
   preClose,
+  isIndex = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<Chart | null>(null);
@@ -207,7 +209,7 @@ export default function KlineChart({
     if (!chart) return;
     chartRef.current = chart;
 
-    if (isArea) {
+    if (isArea && !isIndex) {
       chart.createIndicator('AVG_PRICE', true, { id: 'candle_pane' });
     }
 

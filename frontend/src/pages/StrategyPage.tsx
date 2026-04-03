@@ -5,7 +5,7 @@ import {
 } from 'antd';
 import { PlayCircleOutlined, PauseCircleOutlined } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api, type BacktestRunResult, type BacktestStats, type TradeRecord } from '../services/api';
+import { api, type BacktestRunResult, type BacktestRunSummary, type BacktestStats, type TradeRecord } from '../services/api';
 import Panel from '../components/Panel';
 
 const AVAILABLE = [
@@ -173,16 +173,31 @@ const formatNum = (v: number | null | undefined) => {
 
 function BacktestTab() {
   const [result, setResult] = useState<BacktestRunResult | null>(null);
+  const [viewRunId, setViewRunId] = useState<string | null>(null);
+  const qc = useQueryClient();
 
   const { data: strategies } = useQuery({
     queryKey: ['strategies'],
     queryFn: api.listStrategies,
   });
 
+  const { data: history, isLoading: histLoading } = useQuery({
+    queryKey: ['backtest-history'],
+    queryFn: () => api.listBacktestRuns(20),
+    staleTime: 10_000,
+  });
+
+  const { data: detailResult } = useQuery({
+    queryKey: ['backtest-detail', viewRunId],
+    queryFn: () => api.getBacktestResult(viewRunId!),
+    enabled: !!viewRunId,
+  });
+
   const mutation = useMutation({
     mutationFn: api.runBacktest,
     onSuccess: (data) => {
       setResult(data);
+      qc.invalidateQueries({ queryKey: ['backtest-history'] });
       message.success(`回测完成：${data.stats.total_trades} 笔交易`);
     },
     onError: (err: Error) => message.error(`回测失败：${err.message}`),
@@ -201,50 +216,98 @@ function BacktestTab() {
     });
   };
 
+  const activeResult = viewRunId ? detailResult : result;
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <Form layout="inline" onFinish={onFinish} initialValues={{
-        strategy_name: 'ma_crossover',
-        start_date: '20260101',
-        end_date: '20260320',
-        initial_capital: 1000000,
-        benchmark: '000300.SH',
-        universe: '000001.SZ,600519.SH',
+    <div style={{ display: 'flex', gap: 14 }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <Form layout="inline" onFinish={onFinish} initialValues={{
+          strategy_name: 'ma_crossover',
+          start_date: '20260101',
+          end_date: '20260320',
+          initial_capital: 1000000,
+          benchmark: '000300.SH',
+          universe: '000001.SZ,600519.SH',
+        }}>
+          <Form.Item name="strategy_name" label="策略" rules={[{ required: true }]}>
+            <Select style={{ width: 160 }}>
+              {strategies?.map(s => (
+                <Select.Option key={s.name} value={s.name}>{s.description || s.name}</Select.Option>
+              ))}
+            </Select>
+          </Form.Item>
+          <Form.Item name="start_date" label="开始" rules={[{ required: true }]}>
+            <Input style={{ width: 100 }} placeholder="YYYYMMDD" />
+          </Form.Item>
+          <Form.Item name="end_date" label="结束" rules={[{ required: true }]}>
+            <Input style={{ width: 100 }} placeholder="YYYYMMDD" />
+          </Form.Item>
+          <Form.Item name="initial_capital" label="初始资金">
+            <InputNumber style={{ width: 120 }} min={10000} step={100000} />
+          </Form.Item>
+          <Form.Item name="universe" label="股票池">
+            <Input style={{ width: 240 }} placeholder="000001.SZ,600519.SH (空=全市场)" />
+          </Form.Item>
+          <Form.Item>
+            <Button type="primary" htmlType="submit" loading={mutation.isPending}>
+              运行回测
+            </Button>
+          </Form.Item>
+        </Form>
+
+        {mutation.isPending && (
+          <div className="flex flex-col items-center justify-center py-12" style={{ gap: 12 }}>
+            <Spin size="large" />
+            <div style={{ color: '#93a9bc', fontSize: 13 }}>回测运行中，请耐心等待...</div>
+          </div>
+        )}
+
+        {activeResult && <ResultPanel result={activeResult} />}
+      </div>
+
+      <div style={{
+        width: 280, flexShrink: 0, borderLeft: '1px solid rgba(148,186,215,0.10)',
+        paddingLeft: 14, display: 'flex', flexDirection: 'column', gap: 6,
       }}>
-        <Form.Item name="strategy_name" label="策略" rules={[{ required: true }]}>
-          <Select style={{ width: 160 }}>
-            {strategies?.map(s => (
-              <Select.Option key={s.name} value={s.name}>{s.description || s.name}</Select.Option>
-            ))}
-          </Select>
-        </Form.Item>
-        <Form.Item name="start_date" label="开始" rules={[{ required: true }]}>
-          <Input style={{ width: 100 }} placeholder="YYYYMMDD" />
-        </Form.Item>
-        <Form.Item name="end_date" label="结束" rules={[{ required: true }]}>
-          <Input style={{ width: 100 }} placeholder="YYYYMMDD" />
-        </Form.Item>
-        <Form.Item name="initial_capital" label="初始资金">
-          <InputNumber style={{ width: 120 }} min={10000} step={100000} />
-        </Form.Item>
-        <Form.Item name="universe" label="股票池">
-          <Input style={{ width: 240 }} placeholder="000001.SZ,600519.SH (空=全市场)" />
-        </Form.Item>
-        <Form.Item>
-          <Button type="primary" htmlType="submit" loading={mutation.isPending}>
-            运行回测
-          </Button>
-        </Form.Item>
-      </Form>
-
-      {mutation.isPending && (
-        <div className="flex flex-col items-center justify-center py-12" style={{ gap: 12 }}>
-          <Spin size="large" />
-          <div style={{ color: '#93a9bc', fontSize: 13 }}>回测运行中，请耐心等待...</div>
-        </div>
-      )}
-
-      {result && <ResultPanel result={result} />}
+        <div style={{ color: '#93a9bc', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>回测历史</div>
+        {histLoading && <Spin size="small" />}
+        {(history ?? []).map(run => (
+          <div
+            key={run.run_id}
+            onClick={() => { setViewRunId(run.run_id); setResult(null); }}
+            style={{
+              padding: '8px 10px', borderRadius: 10, cursor: 'pointer',
+              background: viewRunId === run.run_id ? 'rgba(107,199,255,0.12)' : 'rgba(255,255,255,0.02)',
+              border: `1px solid ${viewRunId === run.run_id ? 'rgba(107,199,255,0.3)' : 'rgba(148,186,215,0.08)'}`,
+              transition: 'all 150ms',
+            }}
+          >
+            <div className="flex items-center justify-between">
+              <span style={{ fontSize: 12, fontWeight: 600, color: '#e6f1fa' }}>{run.strategy_name}</span>
+              <Tag color={run.status === 'completed' ? 'green' : run.status === 'error' ? 'red' : 'blue'}
+                style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px' }}>
+                {run.status === 'completed' ? '完成' : run.status === 'error' ? '失败' : run.status}
+              </Tag>
+            </div>
+            <div style={{ fontSize: 10, color: '#93a9bc', marginTop: 2 }}>
+              {run.started_at?.replace('T', ' ').slice(0, 19)}
+            </div>
+            {run.stats && (
+              <div className="flex gap-3" style={{ marginTop: 3, fontSize: 10 }}>
+                <span style={{ color: (run.stats.total_return ?? 0) >= 0 ? '#ff6f91' : '#4ade80' }}>
+                  收益 {formatPct(run.stats.total_return)}
+                </span>
+                <span style={{ color: '#93a9bc' }}>
+                  夏普 {formatNum(run.stats.sharpe_ratio)}
+                </span>
+              </div>
+            )}
+          </div>
+        ))}
+        {!histLoading && (!history || history.length === 0) && (
+          <div style={{ color: '#4b5563', fontSize: 11, textAlign: 'center', padding: 20 }}>暂无历史记录</div>
+        )}
+      </div>
     </div>
   );
 }

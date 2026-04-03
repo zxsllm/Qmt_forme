@@ -116,6 +116,39 @@ export interface FeedStatus {
   codes: string[];
 }
 
+export interface DataDiagnosis {
+  reason: string;
+  detail: string;
+  action: string;
+  repairable: boolean;
+}
+
+export interface DataHealthCheck {
+  name: string;
+  label: string;
+  actual_date: string;
+  expected_date: string;
+  status: 'ok' | 'stale' | 'missing' | 'unknown';
+  severity: 'critical' | 'important' | 'minor';
+  note: string;
+  diagnosis: DataDiagnosis | null;
+  gap_days: number;
+}
+
+export interface DataHealthReport {
+  timestamp: string;
+  phase: string;
+  phase_label: string;
+  is_trade_date: boolean;
+  today: string;
+  expected_daily_date: string;
+  expected_sentiment_date: string;
+  overall: 'healthy' | 'warning' | 'degraded' | 'critical';
+  groups: Record<string, DataHealthCheck[]>;
+  group_labels: Record<string, string>;
+  repair: { triggered: boolean; tables: string[]; trade_date?: string; message?: string } | null;
+}
+
 // ---------------------------------------------------------------------------
 // Trading types (match backend Pydantic models)
 // ---------------------------------------------------------------------------
@@ -199,12 +232,82 @@ export const api = {
       `/api/v1/index/${code}/daily?start=${start}&end=${end}`,
     ),
 
+  indexWeekly: (code: string, start = '', end = '') =>
+    fetchJson<ApiList<IndexBar>>(
+      `/api/v1/index/${code}/weekly?start=${start}&end=${end}`,
+    ),
+
+  indexMonthly: (code: string, start = '', end = '') =>
+    fetchJson<ApiList<IndexBar>>(
+      `/api/v1/index/${code}/monthly?start=${start}&end=${end}`,
+    ),
+
+  indexValuation: (code: string, start = '', end = '', days = 60) =>
+    fetchJson<ApiList<Record<string, unknown>>>(
+      `/api/v1/index/${code}/valuation?start=${start}&end=${end}&days=${days}`,
+    ),
+
+  searchIndex: (q: string) =>
+    fetchJson<ApiList<Record<string, unknown>>>(`/api/v1/index/search?q=${encodeURIComponent(q)}`),
+
   swClassify: (level = '') =>
     fetchJson<ApiList<SwClassify>>(`/api/v1/classify/sw?level=${level}`),
 
-  // Stock search
-  searchStocks: (q: string) =>
-    fetchJson<ApiList<StockSearchResult>>(`/api/v1/stock/search?q=${encodeURIComponent(q)}`),
+  // Stock search (include_index=true to also search indices)
+  searchStocks: (q: string, includeIndex = false) =>
+    fetchJson<ApiList<StockSearchResult>>(
+      `/api/v1/stock/search?q=${encodeURIComponent(q)}&include_index=${includeIndex}`,
+    ),
+
+  // 8 new data APIs (Phase 4.9)
+  getShareFloat: (tsCode: string, start = '', end = '') =>
+    fetchJson<ApiList<Record<string, unknown>>>(
+      `/api/v1/stock/${tsCode}/share-float?start=${start}&end=${end}`,
+    ),
+
+  getHolderTrade: (tsCode: string, start = '', end = '') =>
+    fetchJson<ApiList<Record<string, unknown>>>(
+      `/api/v1/stock/${tsCode}/holdertrade?start=${start}&end=${end}`,
+    ),
+
+  getMargin: (start = '', end = '', days = 30) =>
+    fetchJson<ApiList<Record<string, unknown>>>(
+      `/api/v1/market/margin?start=${start}&end=${end}&days=${days}`,
+    ),
+
+  getStPredict: () =>
+    fetchJson<{ count: number; data: StPredictItem[] }>('/api/v1/market/st-predict'),
+
+  indexSectorResonance: (indexCode = '000001.SH', days = 20, level = 'L1') =>
+    fetchJson<SectorResonanceResponse>(`/api/v1/monitor/index-sector-resonance?index_code=${indexCode}&days=${days}&level=${level}`),
+
+  monitorSnapshot: () =>
+    fetchJson<MonitorSnapshot>('/api/v1/monitor/snapshot'),
+
+  getTopInst: (tradeDate = '', tsCode = '') =>
+    fetchJson<ApiList<Record<string, unknown>>>(
+      `/api/v1/market/top-inst?trade_date=${tradeDate}&ts_code=${tsCode}`,
+    ),
+
+  getTop10Holders: (tsCode: string, periods = 4) =>
+    fetchJson<ApiList<Record<string, unknown>>>(
+      `/api/v1/stock/${tsCode}/top10-holders?periods=${periods}`,
+    ),
+
+  getHolderNumber: (tsCode: string, start = '', end = '') =>
+    fetchJson<ApiList<Record<string, unknown>>>(
+      `/api/v1/stock/${tsCode}/holder-number?start=${start}&end=${end}`,
+    ),
+
+  getUpcomingShareFloat: (days = 30) =>
+    fetchJson<ApiList<Record<string, unknown>>>(
+      `/api/v1/market/share-float-upcoming?days=${days}`,
+    ),
+
+  getRecentHolderTrade: (days = 7, tradeType = '') =>
+    fetchJson<ApiList<Record<string, unknown>>>(
+      `/api/v1/market/holdertrade-recent?days=${days}&trade_type=${tradeType}`,
+    ),
 
   // Trading (Phase 3)
   submitOrder: (body: SubmitOrderBody) =>
@@ -405,6 +508,9 @@ export const api = {
 
   stopFeed: () =>
     postJson<{ status: string }>('/api/v1/feed/stop', {}),
+
+  dataHealth: () =>
+    fetchJson<DataHealthReport>('/api/v1/system/data-health'),
 };
 
 // ── P2-Plus types ────────────────────────────────────────
@@ -844,6 +950,70 @@ export interface EventCalendarData {
     p_change_max: number | null;
     summary: string | null;
   }[];
+}
+
+export interface StPredictItem {
+  ts_code: string;
+  name: string;
+  profit_2024: number | null;
+  revenue_2024: number | null;
+  net_profit_min: number | null;
+  net_profit_max: number | null;
+  forecast_ann_date: string | null;
+  pre_date: string | null;
+  predicted_st_date: string | null;
+  disclosure_date: string;
+}
+
+export interface SectorResonanceItem {
+  ts_code: string;
+  name: string;
+  correlation: number;
+  cum_return: number;
+  latest_pct: number;
+  close: number | null;
+  days_matched: number;
+}
+
+export interface SectorResonanceResponse {
+  index_code: string;
+  days: number;
+  total_dates: number;
+  sectors: SectorResonanceItem[];
+}
+
+export interface MonitorIndexRow {
+  code: string;
+  name: string;
+  price: number;
+  windows: Record<string, number | null>;
+}
+
+export interface MonitorSectorRow {
+  name: string;
+  pct_chg: number;
+  windows: Record<string, number | null>;
+}
+
+export interface MonitorAnomalyEvent {
+  ts: number;
+  time: string;
+  index_code: string;
+  index_name: string;
+  window: string;
+  delta_pct: number;
+  price_now: number;
+  price_then: number;
+  top_sectors: { name: string; delta: number; pct_now: number }[];
+}
+
+export interface MonitorSnapshot {
+  ts: number;
+  history_len: number;
+  indices: MonitorIndexRow[];
+  sectors: MonitorSectorRow[];
+  anomalies: MonitorAnomalyEvent[];
+  anomaly_count: number;
 }
 
 export interface RiskAlert {

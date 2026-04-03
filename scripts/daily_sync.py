@@ -1,13 +1,16 @@
 """
-Daily sync — run after market close to refresh all data.
+Daily sync — CLI fallback for manual runs.
 
-Includes incremental minute data sync (~5-10 min for 1 day).
+In normal operation, the scheduler handles all data syncs in-process at 15:30.
+This script is kept for:
+  1. Manual full sync: python scripts/daily_sync.py
+  2. Minutes-only sync: python scripts/daily_sync.py --minutes-only
+  3. Startup recovery when scheduler hasn't run yet
 
-Usage:
-    python scripts/daily_sync.py              # sync everything
-    python scripts/daily_sync.py --dry-run    # preview only
+The heavy sync_minutes_incremental is always run as subprocess (30-60 min).
 """
 
+import argparse
 import subprocess
 import sys
 import time
@@ -16,8 +19,10 @@ from pathlib import Path
 SCRIPTS_DIR = Path(__file__).resolve().parent
 PYTHON = sys.executable
 
+sys.path.insert(0, str(SCRIPTS_DIR.parent / "backend"))
 
-def run(script: str, args: list[str] | None = None):
+
+def run_script(script: str, args: list[str] | None = None):
     cmd = [PYTHON, str(SCRIPTS_DIR / script)] + (args or [])
     print(f"\n{'='*60}")
     print(f"  Running: {' '.join(cmd)}")
@@ -30,48 +35,39 @@ def run(script: str, args: list[str] | None = None):
     return result.returncode == 0
 
 
+def run_in_process_sync():
+    """Run all non-minute syncs via data_sync module (same as scheduler does)."""
+    from app.execution.feed.data_sync import run_post_market_sync
+    from datetime import datetime
+
+    today = datetime.now().strftime("%Y%m%d")
+    results = run_post_market_sync(today)
+    return all(results.values())
+
+
 def main():
-    dry_run = "--dry-run" in sys.argv
-    extra = ["--dry-run"] if dry_run else []
+    parser = argparse.ArgumentParser(description="Daily data sync")
+    parser.add_argument("--minutes-only", action="store_true", help="Only run minute data sync")
+    parser.add_argument("--no-minutes", action="store_true", help="Skip minute data sync")
+    args = parser.parse_args()
 
     results = {}
 
-    # ── Phase 1: lightweight daily data (fast, <5 min total) ──
-    results["sync_incremental"] = run("sync_incremental.py", extra)
-    results["pull_stk_limit"] = run("pull_stk_limit.py")
-    results["pull_st_list"] = run("pull_st_list.py")
-    results["pull_fina"] = run("pull_fina.py", ["--daily"])
-    results["pull_limit_board"] = run("pull_limit_board.py")
-    results["pull_cb"] = run("pull_cb.py")
-    results["classify_news"] = run("classify_news.py")
+    if not args.minutes_only:
+        print("\n=== Phase 1: In-process data sync (all non-minute data) ===\n")
+        t0 = time.time()
+        results["in_process_sync"] = run_in_process_sync()
+        print(f"\n  In-process sync: {'OK' if results['in_process_sync'] else 'PARTIAL FAIL'} ({time.time()-t0:.1f}s)")
 
-    # ── Phase 2: other daily data (moderate) ──
-    results["pull_moneyflow"] = run("pull_moneyflow.py")
-    results["pull_news"] = run("pull_news.py")
-    results["pull_anns"] = run("pull_anns.py")
-    results["pull_adj_factor"] = run("pull_adj_factor.py")
-    results["pull_sw_daily"] = run("pull_sw_daily.py")
-    results["pull_stk_auction"] = run("pull_stk_auction.py")
-    results["pull_eco_cal"] = run("pull_eco_cal.py")
-    results["pull_moneyflow_ind"] = run("pull_moneyflow_ind.py")
-    results["pull_index_global"] = run("pull_index_global.py")
-    results["pull_concept"] = run("pull_concept.py")
-
-    # ── Phase 3: minute data (slow, 30-60 min for ~5500 stocks) ──
-    results["sync_minutes"] = run("sync_minutes_incremental.py")
+    if not args.no_minutes:
+        print("\n=== Phase 2: Minute data sync (subprocess, 30-60 min) ===\n")
+        results["sync_minutes"] = run_script("sync_minutes_incremental.py")
 
     print(f"\n{'='*60}")
     print("  Daily Sync Summary")
     print(f"{'='*60}")
     for name, ok in results.items():
         print(f"  {'[OK]' if ok else '[FAIL]'} {name}")
-    print()
-
-    all_ok = all(results.values())
-    if all_ok:
-        print("  All syncs completed successfully (including minute data).")
-    else:
-        print("  Some syncs failed. Check output above.")
     print()
 
 

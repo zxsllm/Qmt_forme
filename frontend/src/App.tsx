@@ -3,13 +3,13 @@ import { ConfigProvider, theme } from 'antd';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import MainLayout from './layouts/MainLayout';
 import Dashboard from './pages/Dashboard';
-import KlinePage from './pages/KlinePage';
 import TradingPage from './pages/TradingPage';
 import StrategyPage from './pages/StrategyPage';
 import SystemPage from './pages/SystemPage';
 import NewsPage from './pages/NewsPage';
 import SentimentPage from './pages/SentimentPage';
 import FundamentalPage from './pages/FundamentalPage';
+import MonitorPage from './pages/MonitorPage';
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, retry: 1 } },
@@ -34,13 +34,13 @@ export default function App() {
           <Routes>
             <Route element={<MainLayout />}>
               <Route index element={<Dashboard />} />
-              <Route path="/kline" element={<KlinePage />} />
               <Route path="/trading" element={<TradingPage />} />
               <Route path="/strategy" element={<StrategyPage />} />
               <Route path="/system" element={<SystemPage />} />
               <Route path="/news" element={<NewsPage />} />
               <Route path="/sentiment" element={<SentimentPage />} />
               <Route path="/fundamental" element={<FundamentalPage />} />
+              <Route path="/monitor" element={<MonitorPage />} />
             </Route>
           </Routes>
         </BrowserRouter>

@@ -389,6 +389,11 @@ function TechAnalysisTab({ tradeDate }: { tradeDate: string }) {
     queryFn: () => api.techRiskCheck(searchCode, tradeDate),
     enabled: !!searchCode,
   });
+  const { data: contData } = useQuery({
+    queryKey: ['continuation', searchCode],
+    queryFn: () => api.continuationAnalysis(searchCode),
+    enabled: !!searchCode,
+  });
 
   const handleSearch = () => {
     if (code.trim()) setSearchCode(code.trim().toUpperCase());
@@ -482,6 +487,52 @@ function TechAnalysisTab({ tradeDate }: { tradeDate: string }) {
             </Card>
           </Col>
         </Row>
+      )}
+
+      {searchCode && contData && contData.current_streak > 0 && (
+        <Card size="small" title="连板延续分析" style={CARD_STYLE}>
+          <Row gutter={12}>
+            <Col span={4}>
+              <Statistic title="当前连板" value={contData.current_streak} suffix="板"
+                valueStyle={{ color: '#ff6f91', fontSize: 22, fontWeight: 700 }} />
+            </Col>
+            <Col span={4}>
+              <Statistic title="历史最高" value={contData.max_streak} suffix="板"
+                valueStyle={{ fontSize: 18 }} />
+            </Col>
+            <Col span={4}>
+              <Statistic title="断板率" value={`${(contData.broken_rate * 100).toFixed(1)}%`}
+                valueStyle={{ color: contData.broken_rate > 0.5 ? '#ef4444' : '#4ade80', fontSize: 18 }} />
+            </Col>
+            <Col span={4}>
+              <Statistic title="涨停日" value={contData.total_limit_up_days} suffix="天"
+                valueStyle={{ fontSize: 18 }} />
+            </Col>
+            <Col span={4}>
+              <Statistic title="断板日" value={contData.total_broken_days} suffix="天"
+                valueStyle={{ fontSize: 18 }} />
+            </Col>
+          </Row>
+          {contData.recent_history?.length > 0 && (
+            <Table
+              style={{ marginTop: 10 }}
+              dataSource={contData.recent_history.slice(0, 10)}
+              rowKey={(r, i) => `${r.trade_date}-${i}`}
+              size="small"
+              pagination={false}
+              columns={[
+                { title: '日期', dataIndex: 'trade_date', width: 85 },
+                { title: '状态', dataIndex: 'limit_type', width: 60,
+                  render: (v: string) => <Tag color={v === 'U' ? 'red' : v === 'D' ? 'green' : 'default'}>{v === 'U' ? '涨停' : v === 'D' ? '跌停' : v}</Tag> },
+                { title: '涨幅', dataIndex: 'pct_chg', width: 70, align: 'right',
+                  render: (v: number | null) => v != null ? <span style={{ color: v >= 0 ? '#ff6f91' : '#4ade80' }}>{v.toFixed(2)}%</span> : '-' },
+                { title: '炸板次数', dataIndex: 'open_num', width: 80, align: 'right',
+                  render: (v: number | null) => v ?? '-' },
+                { title: '首封时间', dataIndex: 'first_lu_time', width: 80, ellipsis: true },
+              ]}
+            />
+          )}
+        </Card>
       )}
 
       {searchCode && riskData && (
@@ -611,12 +662,45 @@ function LimitStepTab({ tradeDate }: { tradeDate: string }) {
 
 function DragonTigerTab({ tradeDate }: { tradeDate: string }) {
   const { data, isLoading } = useQuery({ queryKey: ['dragon-tiger', tradeDate], queryFn: () => api.dragonTiger(tradeDate), refetchInterval: 60_000 });
+  const { data: topInstData, isLoading: instLoading } = useQuery({
+    queryKey: ['top-inst', tradeDate],
+    queryFn: () => api.getTopInst(tradeDate),
+    staleTime: 300_000,
+  });
   return (
-    <div>
-      <div style={{ color: '#93a9bc', fontSize: 12, marginBottom: 8 }}>{data?.trade_date ? `数据日期: ${data.trade_date}` : ''}</div>
-      <Table columns={dragonColumns} dataSource={data?.data ?? []} rowKey={(r) => `${r.ts_code}-dragon`}
-        size="small" loading={isLoading} pagination={{ pageSize: 20, size: 'small' }}
-        locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无龙虎榜数据" /> }} />
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div>
+        <div style={{ color: '#93a9bc', fontSize: 12, marginBottom: 8 }}>{data?.trade_date ? `数据日期: ${data.trade_date}` : ''}</div>
+        <Table columns={dragonColumns} dataSource={data?.data ?? []} rowKey={(r) => `${r.ts_code}-dragon`}
+          size="small" loading={isLoading} pagination={{ pageSize: 20, size: 'small' }}
+          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无龙虎榜数据" /> }} />
+      </div>
+      <div>
+        <div style={{ color: '#93a9bc', fontSize: 13, fontWeight: 600, marginBottom: 8 }}>机构交易明细</div>
+        <Table
+          dataSource={((topInstData?.data ?? []) as Record<string, unknown>[])}
+          rowKey={(_, i) => String(i)}
+          size="small"
+          loading={instLoading}
+          pagination={{ pageSize: 15, size: 'small' }}
+          scroll={{ x: 700 }}
+          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无机构交易数据" /> }}
+          columns={[
+            { title: '日期', dataIndex: 'trade_date', width: 85 },
+            { title: '代码', dataIndex: 'ts_code', width: 90 },
+            { title: '营业部', dataIndex: 'exalter', width: 140, ellipsis: true },
+            { title: '方向', dataIndex: 'side', width: 50,
+              render: (v: string) => <Tag color={v === '买入' || v === '0' ? 'red' : 'green'}>{v === '0' ? '买入' : v === '1' ? '卖出' : v}</Tag> },
+            { title: '买入(万)', dataIndex: 'buy', width: 90, align: 'right',
+              render: (v: number) => v ? (v / 1e4).toFixed(0) : '-' },
+            { title: '卖出(万)', dataIndex: 'sell', width: 90, align: 'right',
+              render: (v: number) => v ? (v / 1e4).toFixed(0) : '-' },
+            { title: '净买入(万)', dataIndex: 'net_buy', width: 100, align: 'right',
+              render: (v: number) => v ? <span style={{ color: v >= 0 ? '#ef4444' : '#22c55e' }}>{(v / 1e4).toFixed(0)}</span> : '-' },
+            { title: '原因', dataIndex: 'reason', ellipsis: true },
+          ]}
+        />
+      </div>
     </div>
   );
 }
@@ -636,27 +720,21 @@ function HotListTab({ tradeDate }: { tradeDate: string }) {
 // ─── Main Page ─────────────────────────────────────────────────
 
 export default function SentimentPage() {
-  const [date, setDate] = useState<Dayjs>(dayjs());
-  const tradeDate = fmtDate(date);
+  const [dateOverride, setDateOverride] = useState<Dayjs | null>(null);
 
-  const { data: latestData } = useQuery({
-    queryKey: ['latest-trade-date'],
-    queryFn: () => api.limitBoard({}),
-    staleTime: 300_000,
-  });
-  const latestTradeDate = latestData?.trade_date || '';
+  const date = dateOverride ?? dayjs();
+  const setDate = (d: Dayjs) => setDateOverride(d);
+  const tradeDate = fmtDate(date);
 
   return (
     <div className="flex flex-col h-full overflow-auto" style={{ padding: 18, gap: 12 }}>
       <div className="flex items-center" style={{ gap: 12 }}>
         <span style={{ color: '#93a9bc', fontSize: 13 }}>选择日期:</span>
         <DatePicker value={date} onChange={(d) => d && setDate(d)} allowClear={false} size="small" style={{ width: 140 }} />
-        {latestTradeDate && (
-          <Tag color="blue" style={{ cursor: 'pointer', marginLeft: 4 }}
-            onClick={() => setDate(dayjs(latestTradeDate, 'YYYYMMDD'))}>
-            最新交易日: {latestTradeDate}
-          </Tag>
-        )}
+        <Tag color="blue" style={{ cursor: 'pointer', marginLeft: 4 }}
+          onClick={() => setDate(dayjs())}>
+          今天
+        </Tag>
       </div>
       <Panel className="flex-1" noPadding>
         <Tabs defaultActiveKey="temperature" style={{ height: '100%', padding: '0 10px' }}

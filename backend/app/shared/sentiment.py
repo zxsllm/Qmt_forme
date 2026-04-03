@@ -19,20 +19,45 @@ def _clean(data: list[dict]) -> list[dict]:
     return data
 
 
+def _rt_limit_counts(snap: dict) -> tuple[int, int]:
+    """Count limit-up / limit-down from real-time snapshot using pct_chg threshold."""
+    up = down = 0
+    for v in snap.values():
+        pct = v.get("pct_chg", 0)
+        code = v.get("ts_code", "")
+        if not code or not pct:
+            continue
+        prefix = code.split(".")[0]
+        is_gem_star = prefix.startswith("3") or prefix.startswith("68")
+        is_bj = code.endswith(".BJ")
+        is_st = "ST" in v.get("name", "").upper()
+        if is_st:
+            thresh = 4.8
+        elif is_bj:
+            thresh = 29.5
+        elif is_gem_star:
+            thresh = 19.5
+        else:
+            thresh = 9.8
+        if pct >= thresh:
+            up += 1
+        elif pct <= -thresh:
+            down += 1
+    return up, down
+
+
 async def market_temperature(session: AsyncSession, trade_date: str = "") -> dict:
     """Compute market sentiment temperature for a given trading day.
 
     Returns counts and rates: limit-up, limit-down, broken-board, seal rate,
     max consecutive boards, hot-money activity.
+    Falls back to real-time rt_k snapshot when DB has no data for today.
     """
+    from datetime import datetime
+
+    today = datetime.now().strftime("%Y%m%d")
     if not trade_date:
-        r = await session.execute(text(
-            "SELECT trade_date FROM limit_list_ths ORDER BY trade_date DESC LIMIT 1"
-        ))
-        row = r.fetchone()
-        trade_date = row[0] if row else ""
-    if not trade_date:
-        return {"trade_date": "", "data": None}
+        trade_date = today
 
     board_r = await session.execute(text("""
         SELECT limit_type, COUNT(*) FROM limit_list_ths
@@ -45,6 +70,17 @@ async def market_temperature(session: AsyncSession, trade_date: str = "") -> dic
     up_count = counts.get("涨停池", 0)
     down_count = counts.get("跌停池", 0)
     broken_count = counts.get("炸板池", 0)
+
+    use_rt = (up_count + down_count + broken_count) == 0 and trade_date == today
+    if use_rt:
+        try:
+            from app.execution.feed.scheduler import get_rt_snapshot
+            snap, _ = get_rt_snapshot()
+            if snap:
+                up_count, down_count = _rt_limit_counts(snap)
+        except Exception:
+            pass
+
     seal_rate = (up_count / (up_count + broken_count) * 100) if (up_count + broken_count) > 0 else 0
 
     step_r = await session.execute(text("""
@@ -95,20 +131,18 @@ async def market_temperature(session: AsyncSession, trade_date: str = "") -> dic
             "ladder": ladder,
             "hot_money": hot_money,
             "temperature": level,
+            "realtime": use_rt,
         },
     }
 
 
 async def board_leader(session: AsyncSession, trade_date: str = "", concept: str = "") -> dict:
-    """Identify board leaders (龙1/龙2) for a given day, optionally filtered by concept/tag."""
+    """Identify board leaders for a given day, with real-time fallback for today."""
+    from datetime import datetime
+
+    today = datetime.now().strftime("%Y%m%d")
     if not trade_date:
-        r = await session.execute(text(
-            "SELECT trade_date FROM limit_list_ths ORDER BY trade_date DESC LIMIT 1"
-        ))
-        row = r.fetchone()
-        trade_date = row[0] if row else ""
-    if not trade_date:
-        return {"trade_date": "", "data": []}
+        trade_date = today
 
     wheres = ["trade_date = :td", "limit_type = '涨停池'"]
     params: dict = {"td": trade_date}
@@ -128,6 +162,42 @@ async def board_leader(session: AsyncSession, trade_date: str = "", concept: str
     cols = ["ts_code", "name", "pct_chg", "first_lu_time", "last_lu_time",
             "open_num", "limit_amount", "turnover_rate", "tag", "status"]
     data = [dict(zip(cols, row)) for row in r.fetchall()]
+
+    if not data and trade_date == today:
+        try:
+            from app.execution.feed.scheduler import get_rt_snapshot
+            snap, _ = get_rt_snapshot()
+            if snap:
+                rt_leaders = []
+                for v in snap.values():
+                    pct = v.get("pct_chg", 0)
+                    code = v.get("ts_code", "")
+                    name = v.get("name", "")
+                    if not code or not pct:
+                        continue
+                    prefix = code.split(".")[0]
+                    is_gem_star = prefix.startswith("3") or prefix.startswith("68")
+                    is_bj = code.endswith(".BJ")
+                    is_st = "ST" in name.upper()
+                    if is_st:
+                        thresh = 4.8
+                    elif is_bj:
+                        thresh = 29.5
+                    elif is_gem_star:
+                        thresh = 19.5
+                    else:
+                        thresh = 9.8
+                    if pct >= thresh:
+                        rt_leaders.append({
+                            "ts_code": code, "name": name, "pct_chg": round(pct, 2),
+                            "first_lu_time": None, "last_lu_time": None,
+                            "open_num": None, "limit_amount": v.get("amount", None),
+                            "turnover_rate": None, "tag": "", "status": "实时",
+                        })
+                rt_leaders.sort(key=lambda x: -(x.get("pct_chg") or 0))
+                data = rt_leaders
+        except Exception:
+            pass
 
     for i, d in enumerate(data):
         d["rank"] = i + 1
@@ -197,14 +267,9 @@ async def continuation_analysis(session: AsyncSession, ts_code: str) -> dict:
 
 async def hot_money_signal(session: AsyncSession, trade_date: str = "") -> dict:
     """Get hot-money activity signals for a given day."""
+    from datetime import datetime
     if not trade_date:
-        r = await session.execute(text(
-            "SELECT trade_date FROM hm_detail ORDER BY trade_date DESC LIMIT 1"
-        ))
-        row = r.fetchone()
-        trade_date = row[0] if row else ""
-    if not trade_date:
-        return {"trade_date": "", "data": []}
+        trade_date = datetime.now().strftime("%Y%m%d")
 
     r = await session.execute(text("""
         SELECT hm_name,

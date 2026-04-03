@@ -6,96 +6,111 @@ alwaysApply: false
 
 # 数据流水线注册表
 
+## 架构概览
+
+所有数据拉取统一由 `scheduler` (in-process) 管理，唯一例外是 `sync_minutes`（subprocess）。
+代码入口: `backend/app/execution/feed/data_sync.py` + `scheduler.py`
+
 ## 实时数据（scheduler 高频轮询）
 
-| 数据 | Tushare API | DB表 | 频率 | 触发位置 | 前端消费者 |
-|------|------------|------|------|---------|-----------|
-| 全市场快照 | `rt_k` | 内存 `_rt_snapshot` | 1.2s（盘中） | scheduler._fetch_full_market | Dashboard排行榜(30s) / WS推送行情 |
-| 新闻快讯 | 9源(news) | stock_news → news_classified | 5s | scheduler._pull_news_sync | SidebarNews(10s) / NewsPage(30s) |
-| 分钟K线(持仓) | `stk_mins` | stock_min_kline | 60s（盘中） | scheduler._maybe_pull_mins | Dashboard分时(30s) / KlinePage |
-| 风控预警源 | forecast/stock_st/cb_call | forecast+stock_st+cb_call | 10min | scheduler._pull_alerts_sync | SystemPage风控(打开刷新) / SentimentPage盘前(2min) |
+| 数据 | Tushare API | 存储 | 频率 | 前端消费者 |
+|------|------------|------|------|-----------|
+| 全市场快照 | `rt_k` | 内存 `_rt_snapshot` | 1.2s（盘中） | Dashboard排行榜(30s) / WS推送；盘后自动fallback到DB(stock_daily) |
+| 新闻快讯 | 9源(news) | stock_news→即时分类→news_classified | 5s（全天） | SidebarNews(10s) / NewsPage新闻(30s)/公告(60s)；WS推送需Redis |
+| 分钟K线(持仓) | `rt_k`聚合(盘中) / `stk_mins`(盘后回填) | 内存→stock_min_kline | 5s聚合 | Dashboard分时(5s) |
+| 风控预警源 | forecast/stock_st/cb_call | 同名表 | 10min（全天） | SystemPage风控(打开刷新) / SentimentPage盘前(2min) |
+| 主力资金流向 | `moneyflow_dc` | DB | 日频（盘后sync） | Dashboard资金流向(30s polling但盘中只有前一天数据，Tushare日频限制) |
 
-## 日频数据（daily_sync 收盘后）
+## 收盘后同步（scheduler 15:30 in-process）
 
-### Phase 1: 轻量日频（<5分钟）
-| 数据 | 脚本 | DB表 | 说明 |
-|------|------|------|------|
-| 日线+基本面 | sync_incremental.py | stock_daily + daily_basic | 增量，按最新日期补 |
-| 涨跌停价 | pull_stk_limit.py | stock_limit | 按trade_date |
-| ST列表 | pull_st_list.py | stock_st | 按trade_date |
-| 业绩预告+披露 | pull_fina.py --daily | forecast + disclosure_date | ann_date增量 |
-| 打板数据(7API) | pull_limit_board.py | limit_list_ths/limit_stats/limit_step/top_list/hm_detail/limit_cpt_list/dc_hot | 统一脚本 |
-| 可转债 | pull_cb.py | cb_basic/cb_daily/cb_call | basic全量/daily增量/call全量 |
-| 新闻分类 | classify_news.py | news_classified + anns_classified | 增量分类未处理记录 |
+由 `data_sync.run_post_market_sync()` 统一执行，单个 DB 连接 + TushareService，顺序运行：
 
-### Phase 2: 其他日频（中等耗时）
-| 数据 | 脚本 | DB表 |
+| # | 函数 | DB表 | 写入策略 |
+|---|------|------|---------|
+| 1 | sync_stock_basic | stock_basic | TRUNCATE+INSERT(全量) |
+| 2 | sync_trade_cal | trade_cal | DELETE尾部+INSERT |
+| 3 | sync_daily_bars | stock_daily+daily_basic+index_daily | DELETE日+INSERT(增量) |
+| 4 | sync_stk_limit | stock_limit+suspend_d | 日存在检查+INSERT |
+| 5 | sync_st_list | stock_st | ON CONFLICT DO NOTHING |
+| 6 | sync_forecast | forecast | ON CONFLICT DO UPDATE(拉tomorrow/today/yesterday三天) |
+| 7 | sync_disclosure | disclosure_date | ON CONFLICT DO UPDATE |
+| 8 | sync_limit_board | 7个打板表 | ON CONFLICT DO NOTHING |
+| 9 | sync_cb | cb_basic/cb_daily/cb_call | basic:upsert / call:TRUNCATE / daily:增量 |
+| 10 | sync_moneyflow | moneyflow_dc | 日存在检查+COPY |
+| 11 | sync_news_batch | stock_news | INSERT(去重) |
+| 12 | sync_anns | stock_anns | 日存在检查+INSERT |
+| 13 | sync_classify_news | news_classified+anns_classified | ON CONFLICT DO NOTHING |
+| 14 | sync_adj_factor | adj_factor | DELETE日+INSERT |
+| 15 | sync_sw_daily | sw_daily | DELETE日+INSERT |
+| 16 | sync_stk_auction | stk_auction | DELETE日+INSERT |
+| 17 | sync_eco_cal | eco_cal | DELETE窗口+INSERT |
+| 18 | sync_moneyflow_ind | moneyflow_ind_ths | DELETE日+INSERT |
+| 19 | sync_index_global | index_global | DELETE范围+INSERT(12个指数) |
+| 20 | sync_concepts | concept_list+concept_detail | ON CONFLICT DO UPDATE |
+
+## 分钟线（subprocess 隔离）
+
+| 数据 | 触发 | 说明 |
 |------|------|------|
-| 个股资金流 | pull_moneyflow.py | moneyflow_dc |
-| 新闻(批量) | pull_news.py | stock_news |
-| 公告(批量) | pull_anns.py | stock_anns |
-| 复权因子 | pull_adj_factor.py | adj_factor |
-| 申万行业日线 | pull_sw_daily.py | sw_daily |
-| 集合竞价 | pull_stk_auction.py | stk_auction |
-| 财经日历 | pull_eco_cal.py | eco_cal |
-| 行业资金流 | pull_moneyflow_ind.py | moneyflow_ind_ths |
-| 全球指数 | pull_index_global.py | index_global |
-| 概念板块 | pull_concept.py | concept_list + concept_detail |
+| sync_minutes_incremental.py | scheduler 15:30后subprocess / 手动CLI | 30-60min，~5500股逐个拉 |
 
-### Phase 3: 重型数据（30-60分钟）
-| 数据 | 脚本 | DB表 | 说明 |
-|------|------|------|------|
-| 全市场分钟线 | sync_minutes_incremental.py | stock_min_kline(分区) | ~5500股逐个拉，最慢 |
+## 手动/低频
 
-## 低频/手动数据（init 或按需）
+| 数据 | 脚本 | 说明 |
+|------|------|------|
+| 分钟分区DDL | create_min_partitions.py | 每月手动建新分区 |
+| 财务指标全量 | pull_fina.py(无--daily) | 按季手动 |
+| daily_sync.py | CLI全量同步 | 调data_sync+sync_minutes，用于手动补数据 |
 
-| 数据 | 脚本 | DB表 | 频率 |
-|------|------|------|------|
-| 股票列表 | init_data.py | stock_basic | 项目初始化 / 偶尔刷新 |
-| 交易日历 | init_data.py | trade_cal | 每年初补 |
-| 指数列表 | init_data.py | index_basic | 项目初始化 |
-| 指数日线 | pull_batch1.py | index_daily | daily_sync 未注册，手动 |
-| 财务指标/利润表 | pull_fina.py(全量) | fina_indicator + income | 按季手动 |
-| 分钟分区管理 | create_min_partitions.py | DDL | 每月手动建新分区 |
+## 前端刷新策略
 
-## 前端数据刷新策略
-
-| 页面/组件 | 数据源 | 刷新方式 | 间隔 |
-|-----------|--------|---------|------|
-| Dashboard K线 | DB(stock_daily/min_kline) | polling(分时30s) | 日线不轮询 |
-| Dashboard 排行榜(6个) | DB(内存snapshot) | polling | 30s |
+| 页面/组件 | 数据源 | 刷新 | 间隔 |
+|-----------|--------|------|------|
+| Dashboard排行榜(涨跌幅/换手/板块/全球指数) | 盘中:内存snapshot / 盘后:DB | polling | 30s |
+| Dashboard分时图 | 盘中:内存rt_k聚合 / 盘后:DB | polling | 5s |
+| Dashboard主力资金 | DB(moneyflow_dc，日频) | polling | 30s |
 | SidebarNews | DB(stock_news) | polling | 10s |
-| TradingPage 持仓/订单 | DB(sim_*) | polling | 3-5s |
-| StrategyPage | DB(strategy_meta等) | polling | 3s |
-| SystemPage 风控预警 | DB(forecast/stock_st/cb_call) | 打开刷新+focus刷新 | 无轮询 |
-| SystemPage 行情/审计 | DB | polling | 5s |
-| NewsPage 新闻 | DB(news_classified) | polling | 30s |
-| NewsPage 公告 | DB(anns_classified) | polling | 60s |
-| SentimentPage 涨停榜等 | DB(limit_list_ths等) | polling | 60s |
-| SentimentPage 盘前计划 | DB(多表聚合) | polling | 2min |
-| SentimentPage 温度/龙头 | DB(聚合计算) | 打开刷新 | stale 2-5min |
+| TradingPage(账户/持仓) | DB(sim_*) | polling | 5s |
+| TradingPage(订单/交易计划) | DB(sim_orders) | polling | 3s |
+| StrategyPage(策略状态) | DB | polling | 3s |
+| SystemPage风控预警 | DB(forecast/stock_st/cb_call) | 打开+focus刷新 | 无轮询(stale 60s) |
+| SystemPage(feed状态/订单历史) | DB | polling | 5s |
+| SystemPage(审计日志) | DB(audit_log) | polling | 3s |
+| NewsPage新闻 | DB(news_classified) | polling | 30s |
+| NewsPage公告 | DB(anns_classified) | polling | 60s |
+| SentimentPage涨停/连板/龙虎/热榜 | DB(limit_list_ths等) | polling | 60s |
+| SentimentPage市场温度 | DB(limit_list_ths+limit_step) | staleTime被动 | 120s |
+| SentimentPage盘前 | DB(多表聚合) | polling | 2min |
 | FundamentalPage | DB(fina_indicator等) | 打开刷新 | stale 5min |
+| 个股新闻面板 | DB(stock_news/anns) | polling | 120s |
 
 ## 触发链路
 
 ```
-scheduler (常驻asyncio)
-├─ 盘中 1.2s → rt_k → 内存snapshot → WS推送 + 排行榜
-├─ 全天 5s   → news → DB → Redis pub/sub → WS → 前端
-├─ 全天 10min→ forecast/ST/CB → DB（前端下次刷新可见）
-├─ 盘中 60s  → stk_mins(持仓股) → DB
-├─ 15:01     → settlement（结算）
-└─ 15:30     → daily_sync.py（Phase1→2→3 串行）
+scheduler（常驻 asyncio，唯一调度中心）
+├─ 盘中 1.2s  → rt_k → 内存 snapshot → WS推送 + 排行榜
+├─ 全天 5s    → news → DB → 即时分类 → news_classified；另走 Redis pub → WS(需Memurai)
+├─ 全天 10min → forecast(tomorrow/today/yesterday)/ST(today)/CB(全量) → DB
+├─ 盘中 5s聚合 → rt_k→内存分钟Bar(持仓股) → 收盘后stk_mins回填DB
+├─ 15:01      → settlement（结算）
+├─ 15:30      → data_sync.run_post_market_sync()（in-process，全部20个同步）
+└─ 15:30      → data_sync.run_minutes_subprocess()（独立进程）
 
-startup (后端启动时)
-└─ expected_td vs daily_latest → 仅数据真正落后时触发 daily_sync
-    └─ 16点前 expected_td=上一交易日（避免盘前误触发）
+startup（后端启动时）
+└─ expected_td vs daily_latest → 落后时触发 run_post_market_sync（in-process）
+    └─ 16点前 expected_td = 上一交易日（避免盘前误触发）
+
+daily_sync.py（CLI 手动兜底）
+├─ --no-minutes: 只跑 in-process 同步
+├─ --minutes-only: 只跑分钟线
+└─ 默认: 全部
 ```
 
-## 数据不更新排查清单
+## 排查清单
 
-1. **前端没数据** → 确认 API 返回 → 确认 DB 有数据 → 确认 pull 脚本跑过
-2. **DB 没数据** → 确认 daily_sync 日志 `logs/daily_sync_YYYYMMDD.log`
-3. **Tushare 没数据** → 确认 ann_date（可能T+1才入库）/ 确认接口权限
-4. **盘前数据旧** → scheduler 的 10min alert pull 会补；daily_sync 仅收盘后跑
-5. **分钟线缺失** → 确认分区存在(create_min_partitions) + sync_minutes 跑完
+1. **前端没数据** → API返回? → DB有数据? → pull跑过?
+2. **DB没数据** → 看后端日志中 `sync:` 前缀的行
+3. **Tushare没数据** → forecast已拉tomorrow/today/yesterday; ST按trade_date; CB全量 / 确认接口权限
+4. **盘前计划数据旧** → 确认 limit_list_ths 最新日期(收盘sync后自动切当天); 10min alert pull会补forecast/ST/CB
+5. **分钟线缺失** → 确认分区(create_min_partitions) + sync_minutes完成
+6. **WS推送不工作** → 检查 Memurai 服务是否运行(`Get-Service memurai`)；HTTP polling兜底正常

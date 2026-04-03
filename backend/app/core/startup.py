@@ -131,8 +131,18 @@ async def startup_checks() -> dict:
         needs_sync = True
 
     if needs_sync:
-        _trigger_background_sync()
+        import asyncio
+        from app.execution.feed.data_sync import run_post_market_sync
+
+        async def _bg_sync():
+            try:
+                await asyncio.to_thread(run_post_market_sync, expected_td)
+            except Exception:
+                logger.exception("startup background sync failed")
+
+        asyncio.ensure_future(_bg_sync())
         summary["sync_triggered"] = True
+        logger.info("startup: triggered in-process sync for %s", expected_td)
 
     # ---- OMS state recovery ----
     from app.execution.engine import trading_engine
@@ -261,22 +271,7 @@ def _date_gap(a: str, b: str) -> int:
 
 
 def _trigger_background_sync() -> None:
-    """Fire-and-forget: run daily_sync.py in a detached subprocess."""
-    script = SCRIPTS_DIR / "daily_sync.py"
-    if not script.exists():
-        logger.error("sync script not found: %s", script)
-        return
-    try:
-        log_dir = SCRIPTS_DIR.parent / "logs"
-        log_dir.mkdir(exist_ok=True)
-        log_file = log_dir / f"daily_sync_{date.today().strftime('%Y%m%d')}.log"
-        fh = open(log_file, "a", encoding="utf-8")
-        proc = subprocess.Popen(
-            [sys.executable, str(script)],
-            cwd=str(SCRIPTS_DIR.parent),
-            stdout=fh,
-            stderr=subprocess.STDOUT,
-        )
-        logger.info("background sync started (PID=%d), log=%s", proc.pid, log_file)
-    except Exception:
-        logger.exception("failed to start background sync")
+    """Legacy entry point — kept for backward compatibility but delegates to data_sync."""
+    from app.execution.feed.data_sync import run_post_market_sync
+    today = date.today().strftime("%Y%m%d")
+    run_post_market_sync(today)

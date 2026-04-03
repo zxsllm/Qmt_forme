@@ -13,6 +13,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import async_session
 
+_INDEX_PREFIXES_SH = ("0000", "399", "880", "9")
+_INDEX_PREFIXES_SZ = ("399", "980")
+_INDEX_PREFIXES_BJ = ("8990",)
+
+
+def is_index_code(ts_code: str) -> bool:
+    """Heuristic: detect if a ts_code is an index rather than a stock."""
+    code = ts_code.split(".")[0]
+    suffix = ts_code.split(".")[-1] if "." in ts_code else ""
+    if suffix == "SH":
+        return code.startswith(_INDEX_PREFIXES_SH)
+    if suffix == "SZ":
+        return code.startswith(_INDEX_PREFIXES_SZ)
+    if suffix == "BJ":
+        return code.startswith(_INDEX_PREFIXES_BJ)
+    return False
+
 
 class DataLoader:
     """Async data access facade backed by PostgreSQL."""
@@ -133,6 +150,28 @@ class DataLoader:
             params["e"] = end_date
         sql += " ORDER BY d.trade_date"
         return await self._query(sql, params)
+
+    async def universal_daily(
+        self, ts_code: str, start_date: str = "", end_date: str = "",
+    ) -> pd.DataFrame:
+        """Auto-detect stock vs index, return OHLCV daily data from correct table."""
+        if is_index_code(ts_code):
+            return await self.index_daily(ts_code, start_date, end_date)
+        return await self.daily_with_basic(ts_code, start_date, end_date)
+
+    async def universal_weekly(
+        self, ts_code: str, start_date: str = "", end_date: str = "",
+    ) -> pd.DataFrame:
+        if is_index_code(ts_code):
+            return await self.index_weekly(ts_code, start_date, end_date)
+        return await self.weekly(ts_code, start_date, end_date)
+
+    async def universal_monthly(
+        self, ts_code: str, start_date: str = "", end_date: str = "",
+    ) -> pd.DataFrame:
+        if is_index_code(ts_code):
+            return await self.index_monthly(ts_code, start_date, end_date)
+        return await self.monthly(ts_code, start_date, end_date)
 
     # ── Minute bars ─────────────────────────────────────────────────
 
@@ -593,4 +632,80 @@ class DataLoader:
             "FROM moneyflow_ind_ths WHERE trade_date = :td "
             "ORDER BY net_amount DESC LIMIT :lim",
             {"td": trade_date, "lim": limit},
+        )
+
+    # ── Index weekly / monthly (aggregated from index_daily) ──
+
+    async def index_weekly(
+        self, ts_code: str, start_date: str = "", end_date: str = ""
+    ) -> pd.DataFrame:
+        sql = """
+            SELECT ts_code,
+                   MIN(trade_date) as trade_date,
+                   (array_agg(open ORDER BY trade_date))[1] as open,
+                   MAX(high) as high,
+                   MIN(low) as low,
+                   (array_agg(close ORDER BY trade_date DESC))[1] as close,
+                   SUM(vol) as vol,
+                   SUM(amount) as amount
+            FROM index_daily
+            WHERE ts_code = :c
+        """
+        params: dict = {"c": ts_code}
+        if start_date:
+            sql += " AND trade_date >= :s"
+            params["s"] = start_date
+        if end_date:
+            sql += " AND trade_date <= :e"
+            params["e"] = end_date
+        sql += """
+            GROUP BY ts_code,
+                     date_trunc('week', to_date(trade_date, 'YYYYMMDD'))
+            ORDER BY trade_date
+        """
+        return await self._query(sql, params)
+
+    async def index_monthly(
+        self, ts_code: str, start_date: str = "", end_date: str = ""
+    ) -> pd.DataFrame:
+        sql = """
+            SELECT ts_code,
+                   MIN(trade_date) as trade_date,
+                   (array_agg(open ORDER BY trade_date))[1] as open,
+                   MAX(high) as high,
+                   MIN(low) as low,
+                   (array_agg(close ORDER BY trade_date DESC))[1] as close,
+                   SUM(vol) as vol,
+                   SUM(amount) as amount
+            FROM index_daily
+            WHERE ts_code = :c
+        """
+        params: dict = {"c": ts_code}
+        if start_date:
+            sql += " AND trade_date >= :s"
+            params["s"] = start_date
+        if end_date:
+            sql += " AND trade_date <= :e"
+            params["e"] = end_date
+        sql += """
+            GROUP BY ts_code,
+                     date_trunc('month', to_date(trade_date, 'YYYYMMDD'))
+            ORDER BY trade_date
+        """
+        return await self._query(sql, params)
+
+    # ── Index search ──────────────────────────────────────────
+
+    async def search_index(self, q: str, limit: int = 20) -> pd.DataFrame:
+        prefix = f"{q}%"
+        contains = f"%{q}%"
+        return await self._query(
+            "SELECT ts_code, name, market, publisher, category, list_date "
+            "FROM index_basic "
+            "WHERE (ts_code ILIKE :prefix OR name ILIKE :contains) "
+            "ORDER BY "
+            "  CASE WHEN ts_code ILIKE :prefix OR name ILIKE :prefix THEN 0 ELSE 1 END, "
+            "  ts_code "
+            "LIMIT :lim",
+            {"prefix": prefix, "contains": contains, "lim": limit},
         )

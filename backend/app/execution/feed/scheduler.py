@@ -61,16 +61,25 @@ _intraday_date: str = ""  # e.g. "2026-03-26"
 _intraday_prev_vol: dict[str, float] = {}  # ts_code -> last-seen cumulative vol
 
 
+INTRADAY_GRANULARITY_SEC = 5  # one data point per 5 seconds (~2880 points/day)
+
+
+_intraday_prev_amt: dict[str, float] = {}  # cumulative amount tracker
+
+
 def _aggregate_minute_bars(snap: dict) -> None:
-    """Called every rt_k tick. Aggregate snapshots into per-minute OHLCV bars."""
-    global _intraday_mins, _intraday_date, _intraday_prev_vol
+    """Called every rt_k tick (~1.2s). Aggregate into 5-second bars for smooth intraday chart."""
+    global _intraday_mins, _intraday_date, _intraday_prev_vol, _intraday_prev_amt
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
-    minute_key = now.strftime("%H:%M")
+    sec = now.second
+    slot = (sec // INTRADAY_GRANULARITY_SEC) * INTRADAY_GRANULARITY_SEC
+    time_key = f"{now.strftime('%H:%M')}:{slot:02d}"
 
     if today != _intraday_date:
         _intraday_mins = {}
         _intraday_prev_vol = {}
+        _intraday_prev_amt = {}
         _intraday_date = today
 
     for code, row in snap.items():
@@ -78,42 +87,49 @@ def _aggregate_minute_bars(snap: dict) -> None:
         if price <= 0:
             continue
         cum_vol = row.get("vol", 0)
-        cum_amount = row.get("amount", 0)
+        cum_amt = row.get("amount", 0)
 
         if code not in _intraday_mins:
             _intraday_mins[code] = {}
         bars = _intraday_mins[code]
 
-        prev_vol = _intraday_prev_vol.get(code, 0)
-        delta_vol = max(0, cum_vol - prev_vol) if prev_vol > 0 else 0
+        first_seen = code not in _intraday_prev_vol
+        if first_seen:
+            delta_vol = cum_vol
+            delta_amt = cum_amt
+        else:
+            delta_vol = max(0, cum_vol - _intraday_prev_vol[code])
+            delta_amt = max(0, cum_amt - _intraday_prev_amt[code])
 
-        if minute_key not in bars:
-            bars[minute_key] = {
+        if time_key not in bars:
+            bars[time_key] = {
                 "open": price, "high": price, "low": price, "close": price,
-                "vol": delta_vol, "amount": 0,
+                "vol": delta_vol, "amount": delta_amt,
             }
         else:
-            b = bars[minute_key]
+            b = bars[time_key]
             b["high"] = max(b["high"], price)
             b["low"] = min(b["low"], price)
             b["close"] = price
             b["vol"] += delta_vol
+            b["amount"] += delta_amt
 
         _intraday_prev_vol[code] = cum_vol
+        _intraday_prev_amt[code] = cum_amt
 
 
 def get_intraday_minutes(ts_code: str) -> list[dict]:
-    """Return today's minute bars for a single stock, sorted by time."""
+    """Return today's intraday bars (5-sec granularity) for a single stock."""
     bars = _intraday_mins.get(ts_code, {})
     if not bars:
         return []
     result = []
     prefix = _intraday_date
-    for mk in sorted(bars.keys()):
-        b = bars[mk]
+    for tk in sorted(bars.keys()):
+        b = bars[tk]
         result.append({
             "ts_code": ts_code,
-            "trade_time": f"{prefix} {mk}:00",
+            "trade_time": f"{prefix} {tk}",
             "open": b["open"], "high": b["high"],
             "low": b["low"], "close": b["close"],
             "vol": b["vol"], "amount": b["amount"],
@@ -408,76 +424,35 @@ class MarketDataScheduler:
     @staticmethod
     def _pull_alerts_sync() -> None:
         """Pull latest forecast / ST / CB call from Tushare into DB."""
-        import os
-        from datetime import datetime, timedelta
-
         import psycopg2
-        from psycopg2.extras import execute_values
+        from app.execution.feed.data_sync import (
+            _db_url, sync_forecast, sync_st_list, sync_cb,
+        )
         from app.research.data.tushare_service import TushareService
 
-        db_url = os.getenv("DATABASE_URL", "").replace(
-            "postgresql+asyncpg://", "postgresql://"
-        )
+        db_url = _db_url()
         svc = TushareService()
         today = datetime.now().strftime("%Y%m%d")
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
 
-        # --- 1. Forecast (by ann_date: today + yesterday) ---
-        total_fc = 0
-        for ann_d in [today, yesterday]:
+        with psycopg2.connect(db_url) as conn:
+            conn.autocommit = False
+            sync_forecast(conn, svc)
+            sync_st_list(conn, svc, today)
+            # CB call only (lightweight, skip cb_basic/cb_daily here)
             try:
-                df = svc.forecast(ann_date=ann_d)
+                df = svc.cb_call()
                 if df is not None and not df.empty:
-                    df = df.drop_duplicates(subset=["ts_code", "ann_date", "end_date"], keep="last")
-                    with psycopg2.connect(db_url) as conn:
-                        with conn.cursor() as cur:
-                            cols = list(df.columns)
-                            vals = [tuple(r[c] if r[c] is not None and str(r[c]) != "nan" else None for c in cols) for _, r in df.iterrows()]
-                            sql = (
-                                f"INSERT INTO forecast ({','.join(cols)}) VALUES %s "
-                                f"ON CONFLICT (ts_code, ann_date, end_date) DO UPDATE SET "
-                                + ", ".join(f"{c}=EXCLUDED.{c}" for c in cols if c not in ("ts_code", "ann_date", "end_date"))
-                            )
-                            execute_values(cur, sql, vals)
-                        conn.commit()
-                    total_fc += len(df)
-            except Exception:
-                logger.warning("alert pull forecast(%s) failed", ann_d, exc_info=True)
-        if total_fc:
-            logger.info("alert pull: forecast +%d rows", total_fc)
-
-        # --- 2. ST list (latest date) ---
-        try:
-            df = svc.stock_st(trade_date=today)
-            if df is not None and not df.empty:
-                with psycopg2.connect(db_url) as conn:
-                    with conn.cursor() as cur:
-                        cols = list(df.columns)
-                        vals = [tuple(r[c] if r[c] is not None and str(r[c]) != "nan" else None for c in cols) for _, r in df.iterrows()]
-                        sql = (
-                            f"INSERT INTO stock_st ({','.join(cols)}) VALUES %s "
-                            f"ON CONFLICT (ts_code, trade_date) DO NOTHING"
-                        )
-                        execute_values(cur, sql, vals)
-                    conn.commit()
-                logger.info("alert pull: stock_st +%d rows for %s", len(df), today)
-        except Exception:
-            logger.warning("alert pull stock_st failed", exc_info=True)
-
-        # --- 3. CB call (full refresh is small, ~50 rows) ---
-        try:
-            df = svc.cb_call()
-            if df is not None and not df.empty:
-                with psycopg2.connect(db_url) as conn:
+                    from app.execution.feed.data_sync import _df_to_values
+                    from psycopg2.extras import execute_values
+                    cols, vals = _df_to_values(df)
                     with conn.cursor() as cur:
                         cur.execute("TRUNCATE cb_call")
-                        cols = list(df.columns)
-                        vals = [tuple(r[c] if r[c] is not None and str(r[c]) != "nan" else None for c in cols) for _, r in df.iterrows()]
                         execute_values(cur, f"INSERT INTO cb_call ({','.join(cols)}) VALUES %s", vals)
                     conn.commit()
-                logger.info("alert pull: cb_call refreshed %d rows", len(df))
-        except Exception:
-            logger.warning("alert pull cb_call failed", exc_info=True)
+                    logger.info("alert pull: cb_call refreshed %d rows", len(df))
+            except Exception:
+                conn.rollback()
+                logger.warning("alert pull cb_call failed", exc_info=True)
 
     @property
     def is_running(self) -> bool:
@@ -601,6 +576,9 @@ class MarketDataScheduler:
                         _rebuild_rankings_cache(snapshot)
                         _aggregate_minute_bars(snapshot)
 
+                        from app.execution.feed.monitor_engine import monitor_engine
+                        monitor_engine.on_tick(snapshot, _cached_sector_rankings)
+
                         if watched_bars:
                             self._update_limits_from_bars(watched_bars)
                             await market_feed.publish_batch(watched_bars)
@@ -709,6 +687,9 @@ class MarketDataScheduler:
                         ipct = round((icl - ipc) / ipc * 100, 2) if ipc else 0
                         snapshot[ic] = {
                             "ts_code": ic, "name": str(irow.get("name", "")),
+                            "open": float(irow.get("open", 0)),
+                            "high": float(irow.get("high", 0)),
+                            "low": float(irow.get("low", 0)),
                             "close": icl, "pct_chg": ipct,
                             "vol": float(irow.get("vol", 0)),
                             "amount": float(irow.get("amount", 0)),
@@ -760,11 +741,21 @@ class MarketDataScheduler:
             summary.total_pnl, summary.total_fee, acct.total_asset,
         )
 
-    @staticmethod
-    def _run_daily_sync() -> None:
-        from app.core.startup import _trigger_background_sync
-        logger.info("triggering post-market data sync...")
-        _trigger_background_sync()
+    def _run_daily_sync(self) -> None:
+        """Post-market: run all data syncs in-process + minutes as subprocess."""
+        from app.execution.feed.data_sync import run_post_market_sync, run_minutes_subprocess
+
+        trade_date = datetime.now().strftime("%Y%m%d")
+        logger.info("post-market sync: starting in-process for %s", trade_date)
+
+        async def _sync():
+            try:
+                await asyncio.to_thread(run_post_market_sync, trade_date)
+                await asyncio.to_thread(run_minutes_subprocess)
+            except Exception:
+                logger.exception("post-market sync failed")
+
+        asyncio.ensure_future(_sync())
 
     NEWS_RETENTION_DAYS = 30
 

@@ -33,22 +33,34 @@ async def _get_prev_trade_date(session: AsyncSession, ref_date: str) -> str:
 
 
 async def generate_premarket_plan(session: AsyncSession, today: str) -> dict:
-    """Generate a pre-market plan for `today` (YYYYMMDD).
+    """Generate a pre-market plan.
 
-    Uses yesterday's after-hours data + today's pre-open news.
+    data_date = limit_list_ths 中 ≤ today 的最新交易日（收盘后同步完就是当天）
+    plan_for  = data_date 的下一个交易日
+    效果：收盘同步完成后自动切到当天数据，无需等到 0 点。
     """
-    yesterday = await _get_prev_trade_date(session, today)
-    if not yesterday or yesterday == today:
-        r = await session.execute(text(
-            "SELECT cal_date FROM trade_cal WHERE is_open='1' AND cal_date < :d "
-            "ORDER BY cal_date DESC LIMIT 1"
-        ), {"d": today})
-        row = r.fetchone()
-        yesterday = row[0] if row else ""
+    r = await session.execute(text(
+        "SELECT trade_date FROM limit_list_ths WHERE trade_date <= :d "
+        "ORDER BY trade_date DESC LIMIT 1"
+    ), {"d": today})
+    row = r.fetchone()
+    data_date = row[0] if row else ""
+
+    plan_for = today
+    if data_date:
+        r2 = await session.execute(text(
+            "SELECT cal_date FROM trade_cal WHERE is_open='1' AND cal_date > :d "
+            "ORDER BY cal_date ASC LIMIT 1"
+        ), {"d": data_date})
+        row2 = r2.fetchone()
+        if row2:
+            plan_for = row2[0]
+
+    yesterday = data_date
 
     result: dict = {
-        "today": today,
-        "yesterday": yesterday,
+        "today": plan_for,
+        "yesterday": data_date,
         "market_summary": {},
         "watchlist": [],
         "risk_alerts": [],
@@ -67,9 +79,9 @@ async def generate_premarket_plan(session: AsyncSession, today: str) -> dict:
     for row in board_r.fetchall():
         counts[row[0]] = row[1]
 
-    up_count = counts.get("U", 0)
-    down_count = counts.get("D", 0)
-    broken_count = counts.get("Z", 0)
+    up_count = counts.get("涨停池", 0)
+    down_count = counts.get("跌停池", 0)
+    broken_count = counts.get("炸板池", 0)
     seal_rate = round(up_count / (up_count + broken_count) * 100, 1) if (up_count + broken_count) > 0 else 0
 
     max_board_r = await session.execute(text(

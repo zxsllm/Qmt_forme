@@ -1,14 +1,23 @@
 import { useState, type CSSProperties } from 'react';
-import { Tabs, Empty, Modal } from 'antd';
+import { Empty, Modal } from 'antd';
 import { useQuery } from '@tanstack/react-query';
 import { api, type IrmQaItem } from '../services/api';
+
+export interface ExtraTab {
+  key: string;
+  label: string;
+  node: React.ReactNode;
+}
 
 interface Props {
   tsCode: string;
   height?: number;
+  extraTabs?: ExtraTab[];
 }
 
-export default function StockNewsPanel({ tsCode, height = 160 }: Props) {
+export default function StockNewsPanel({ tsCode, height = 160, extraTabs }: Props) {
+  const [activeKey, setActiveKey] = useState<string | number>('news');
+
   const { data: newsData } = useQuery({
     queryKey: ['stock-news', tsCode],
     queryFn: () => api.stockNews(tsCode),
@@ -40,7 +49,7 @@ export default function StockNewsPanel({ tsCode, height = 160 }: Props) {
 
   const listStyle: CSSProperties = {
     overflowY: 'auto',
-    height: height - 40,
+    height: height - 36,
     padding: '4px 12px',
   };
 
@@ -61,104 +70,128 @@ export default function StockNewsPanel({ tsCode, height = 160 }: Props) {
     fontSize: 11,
   };
 
+  const builtinTabs: { key: string; label: string; node: React.ReactNode }[] = [
+    {
+      key: 'news',
+      label: '个股新闻',
+      node: (
+        <div style={listStyle}>
+          {newsItems.length === 0 ? (
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无新闻" />
+          ) : (
+            newsItems.map((n) => (
+              <div
+                key={n.id}
+                style={{ ...rowStyle, cursor: 'pointer' }}
+                onClick={() => setSelectedNews(n)}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.color = '#e6f1fa'; }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.color = '#93a9bc'; }}
+              >
+                <span style={dateStyle}>{n.datetime?.slice(0, 10)}</span>
+                {n.content?.slice(0, 60)}
+              </div>
+            ))
+          )}
+        </div>
+      ),
+    },
+    {
+      key: 'anns',
+      label: '公司公告',
+      node: (
+        <div style={listStyle}>
+          {annsItems.length === 0 ? (
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无公告" />
+          ) : (
+            annsItems.map((a) => (
+              <div key={a.id} style={rowStyle} title={a.title}>
+                <span style={dateStyle}>{a.ann_date}</span>
+                {a.url ? (
+                  <a href={a.url} target="_blank" rel="noreferrer" style={{ color: '#6bc7ff' }}>
+                    {a.title?.slice(0, 50)}
+                  </a>
+                ) : (
+                  a.title?.slice(0, 50)
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      ),
+    },
+    {
+      key: 'irm',
+      label: '互动问答',
+      node: (
+        <div style={listStyle}>
+          {irmItems.length === 0 ? (
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无问答" />
+          ) : (
+            irmItems.map((item, idx) => (
+              <div
+                key={`${item.ts_code}-${item.pub_time}-${idx}`}
+                style={{ ...rowStyle, cursor: 'pointer', whiteSpace: 'nowrap' }}
+                title={`Q: ${item.q}\nA: ${item.a}`}
+                onClick={() => setSelectedQa(item)}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.color = '#e6f1fa'; }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.color = '#93a9bc'; }}
+              >
+                <span style={dateStyle}>{item.pub_time?.slice(0, 10) || item.trade_date}</span>
+                Q: {item.q?.slice(0, 50)}
+              </div>
+            ))
+          )}
+        </div>
+      ),
+    },
+  ];
+
+  const allTabs = [...builtinTabs, ...(extraTabs ?? [])];
+  const activeTab = allTabs.find(t => t.key === activeKey) ?? allTabs[0];
+
   return (
-    <div style={{ height, borderTop: '1px solid rgba(148,186,215,0.12)', padding: '0 14px' }}>
-      <Tabs
-        size="small"
-        defaultActiveKey="news"
-        style={{ height: '100%' }}
-        tabBarStyle={{ marginBottom: 4 }}
-        items={[
-          {
-            key: 'news',
-            label: '个股新闻',
-            children: (
-              <div style={listStyle}>
-                {newsItems.length === 0 ? (
-                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无新闻" />
-                ) : (
-                  newsItems.map((n) => (
-                    <div
-                      key={n.id}
-                      style={{ ...rowStyle, cursor: 'pointer' }}
-                      onClick={() => setSelectedNews(n)}
-                      onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.color = '#e6f1fa'; }}
-                      onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.color = '#93a9bc'; }}
-                    >
-                      <span style={dateStyle}>
-                        {n.datetime?.slice(0, 10)}
-                      </span>
-                      {n.content?.slice(0, 60)}
-                    </div>
-                  ))
-                )}
-              </div>
-            ),
-          },
-          {
-            key: 'anns',
-            label: '公司公告',
-            children: (
-              <div style={listStyle}>
-                {annsItems.length === 0 ? (
-                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无公告" />
-                ) : (
-                  annsItems.map((a) => (
-                    <div key={a.id} style={rowStyle} title={a.title}>
-                      <span style={dateStyle}>
-                        {a.ann_date}
-                      </span>
-                      {a.url ? (
-                        <a
-                          href={a.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          style={{ color: '#6bc7ff' }}
-                        >
-                          {a.title?.slice(0, 50)}
-                        </a>
-                      ) : (
-                        a.title?.slice(0, 50)
-                      )}
-                    </div>
-                  ))
-                )}
-              </div>
-            ),
-          },
-          {
-            key: 'irm',
-            label: '互动问答',
-            children: (
-              <div style={listStyle}>
-                {irmItems.length === 0 ? (
-                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无问答" />
-                ) : (
-                  irmItems.map((item, idx) => (
-                    <div
-                      key={`${item.ts_code}-${item.pub_time}-${idx}`}
-                      style={{
-                        ...rowStyle,
-                        cursor: 'pointer',
-                        whiteSpace: 'nowrap',
-                      }}
-                      title={`Q: ${item.q}\nA: ${item.a}`}
-                      onClick={() => setSelectedQa(item)}
-                      onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.color = '#e6f1fa'; }}
-                      onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.color = '#93a9bc'; }}
-                    >
-                      <span style={dateStyle}>
-                        {item.pub_time?.slice(0, 10) || item.trade_date}
-                      </span>
-                      Q: {item.q?.slice(0, 50)}
-                    </div>
-                  ))
-                )}
-              </div>
-            ),
-          },
-        ]}
-      />
+    <div style={{ height, padding: '0 14px' }}>
+      <div style={{ display: 'flex', gap: 4, padding: '5px 0 3px' }}>
+        {allTabs.map((t) => {
+          const active = t.key === activeKey;
+          return (
+            <button
+              key={t.key}
+              onClick={() => setActiveKey(t.key)}
+              style={{
+                border: `1px solid ${active ? 'rgba(121,200,246,0.50)' : 'rgba(255,255,255,0.08)'}`,
+                background: active
+                  ? 'rgba(32,74,103,0.48)'
+                  : 'rgba(255,255,255,0.03)',
+                borderRadius: 999,
+                padding: '3px 12px',
+                fontSize: 11,
+                fontWeight: active ? 600 : 400,
+                color: active ? '#7ce1f2' : '#93a9bc',
+                cursor: 'pointer',
+                transition: 'all 120ms ease',
+                backdropFilter: active ? 'blur(6px)' : 'none',
+                lineHeight: '18px',
+              }}
+              onMouseEnter={(e) => {
+                if (!active) {
+                  e.currentTarget.style.borderColor = 'rgba(150,217,255,0.24)';
+                  e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
+                }
+              }}
+              onMouseLeave={(e) => {
+                if (!active) {
+                  e.currentTarget.style.borderColor = 'rgba(255,255,255,0.08)';
+                  e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
+                }
+              }}
+            >
+              {t.label}
+            </button>
+          );
+        })}
+      </div>
+      {activeTab?.node}
 
       <Modal
         open={!!selectedNews}
@@ -219,9 +252,7 @@ export default function StockNewsPanel({ tsCode, height = 160 }: Props) {
         {selectedQa && (
           <div style={{ color: '#e6f1fa', fontSize: 13, lineHeight: 1.8 }}>
             <div style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 11, color: '#6bc7ff', fontWeight: 600, marginBottom: 4 }}>
-                提问
-              </div>
+              <div style={{ fontSize: 11, color: '#6bc7ff', fontWeight: 600, marginBottom: 4 }}>提问</div>
               <div style={{ whiteSpace: 'pre-wrap' }}>{selectedQa.q}</div>
             </div>
             <div style={{
@@ -230,9 +261,7 @@ export default function StockNewsPanel({ tsCode, height = 160 }: Props) {
               borderRadius: 14,
               border: '1px solid rgba(148,186,215,0.10)',
             }}>
-              <div style={{ fontSize: 11, color: '#b48cff', fontWeight: 600, marginBottom: 4 }}>
-                回复
-              </div>
+              <div style={{ fontSize: 11, color: '#b48cff', fontWeight: 600, marginBottom: 4 }}>回复</div>
               <div style={{ whiteSpace: 'pre-wrap' }}>{selectedQa.a}</div>
             </div>
             <div style={{ marginTop: 10, fontSize: 11, color: '#556677', display: 'flex', gap: 16 }}>
