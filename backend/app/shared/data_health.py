@@ -226,7 +226,7 @@ def _get_expected(
     if f == "daily_t1":
         if is_trade_day:
             return prev_td if phase in ("evening", "post_sync") else (recent_tds[2] if len(recent_tds) > 2 else prev_td)
-        return prev_td
+        return latest_td
 
     if f == "sentiment":
         if is_trade_day and phase in ("evening", "post_sync"):
@@ -487,10 +487,13 @@ async def run_health_check(session: AsyncSession, auto_repair: bool = True) -> d
 
     repair_status = None
     if repairable and auto_repair and not sync_tracker.repair_running:
-        if is_trade_day and phase in ("evening", "post_sync"):
-            repair_td = today
+        if is_trade_day:
+            if phase in ("evening", "post_sync"):
+                repair_td = today
+            else:
+                repair_td = prev_td if prev_td else latest_td
         else:
-            repair_td = prev_td if prev_td else latest_td
+            repair_td = latest_td
         _trigger_repair_async(repairable, repair_td)
         repair_status = {"triggered": True, "tables": repairable, "trade_date": repair_td}
     elif sync_tracker.repair_running:
