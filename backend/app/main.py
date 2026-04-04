@@ -1244,18 +1244,22 @@ async def get_recent_holdertrade(
 
 @app.get("/api/v1/market/st-predict")
 async def get_st_predict():
-    """ST prediction — only unpublished consecutive-loss candidates."""
+    """ST prediction — multi-rule: consecutive loss, negative net assets, revenue+profit fail."""
     from sqlalchemy import text
     from app.core.database import async_session
 
     async with async_session() as session:
         r = await session.execute(text("""
-            WITH loss_2024 AS (
-                SELECT DISTINCT ON (ts_code) ts_code, n_income_attr_p, revenue
+            WITH income_2024 AS (
+                SELECT DISTINCT ON (ts_code) ts_code, n_income_attr_p, revenue, total_profit
                 FROM income
                 WHERE end_date = '20241231' AND report_type = '1'
-                      AND n_income_attr_p < 0
                 ORDER BY ts_code, ann_date DESC
+            ),
+            fina_latest AS (
+                SELECT DISTINCT ON (ts_code) ts_code, bps, profit_dedt, end_date AS fina_end_date
+                FROM fina_indicator
+                ORDER BY ts_code, end_date DESC, ann_date DESC
             ),
             forecast_2025 AS (
                 SELECT DISTINCT ON (ts_code) ts_code, type, net_profit_min,
@@ -1263,6 +1267,28 @@ async def get_st_predict():
                 FROM forecast
                 WHERE end_date = '20251231' AND type = '续亏'
                 ORDER BY ts_code, ann_date DESC
+            ),
+            -- 2025预告扭亏/预增/续盈的 → 排除
+            forecast_good AS (
+                SELECT DISTINCT ts_code FROM forecast
+                WHERE end_date = '20251231' AND type IN ('扭亏', '预增', '续盈', '略增')
+            ),
+            -- 2025年报已实际披露超过7天的 → 排除（7天内仍保留展示）
+            already_published AS (
+                SELECT DISTINCT i.ts_code
+                FROM income i
+                JOIN disclosure_date dd ON i.ts_code = dd.ts_code AND dd.end_date = '20251231'
+                WHERE i.end_date = '20251231' AND i.report_type = '1'
+                  AND dd.actual_date IS NOT NULL AND dd.actual_date <> ''
+                  AND dd.actual_date < to_char(now() - interval '7 days', 'YYYYMMDD')
+            ),
+            -- 风险提示公告次数
+            risk_ann_count AS (
+                SELECT ts_code, count(*) AS warn_count
+                FROM stock_anns
+                WHERE title LIKE '%可能被实施%风险警示%'
+                   OR title LIKE '%可能被实施%退市风险%'
+                GROUP BY ts_code
             ),
             disc AS (
                 SELECT ts_code, actual_date, pre_date
@@ -1280,37 +1306,117 @@ async def get_st_predict():
                 WHERE is_open = 1 AND exchange = 'SSE'
                       AND cal_date >= to_char(now(), 'YYYYMMDD')
                 ORDER BY cal_date LIMIT 40
+            ),
+            -- 所有潜在风险股: 2024亏损 OR 净资产为负
+            candidates AS (
+                SELECT i.ts_code, i.n_income_attr_p, i.revenue, i.total_profit,
+                       fi.bps, fi.profit_dedt,
+                       f.type AS fc_type, f.net_profit_min, f.net_profit_max,
+                       f.ann_date AS forecast_ann_date
+                FROM income_2024 i
+                LEFT JOIN fina_latest fi ON i.ts_code = fi.ts_code
+                LEFT JOIN forecast_2025 f ON i.ts_code = f.ts_code
+                WHERE i.n_income_attr_p < 0
+                   OR (fi.bps IS NOT NULL AND fi.bps < 0)
+
+                UNION
+
+                SELECT i.ts_code, i.n_income_attr_p, i.revenue, i.total_profit,
+                       fi.bps, fi.profit_dedt,
+                       f.type AS fc_type, f.net_profit_min, f.net_profit_max,
+                       f.ann_date AS forecast_ann_date
+                FROM fina_latest fi
+                LEFT JOIN income_2024 i ON fi.ts_code = i.ts_code
+                LEFT JOIN forecast_2025 f ON fi.ts_code = f.ts_code
+                WHERE fi.bps < 0
+                  AND fi.ts_code NOT IN (SELECT ts_code FROM income_2024 WHERE n_income_attr_p < 0)
             )
             SELECT
-                l.ts_code,
+                c.ts_code,
                 b.name,
-                l.n_income_attr_p  AS profit_2024,
-                l.revenue          AS revenue_2024,
-                f.net_profit_min,
-                f.net_profit_max,
-                f.ann_date         AS forecast_ann_date,
+                b.market,
+                c.n_income_attr_p  AS profit_2024,
+                c.revenue          AS revenue_2024,
+                c.total_profit     AS total_profit_2024,
+                c.bps,
+                c.profit_dedt      AS deducted_profit_2024,
+                c.net_profit_min,
+                c.net_profit_max,
+                c.forecast_ann_date,
                 d.pre_date,
                 (SELECT MIN(cal_date) FROM trade_days
                  WHERE cal_date > d.pre_date
-                ) AS predicted_st_date
-            FROM loss_2024 l
-            JOIN forecast_2025 f ON l.ts_code = f.ts_code
-            JOIN stock_basic b ON l.ts_code = b.ts_code
-            LEFT JOIN disc d ON l.ts_code = d.ts_code
-            WHERE l.ts_code NOT IN (SELECT ts_code FROM current_st)
-              AND (d.actual_date IS NULL OR d.actual_date = '')
+                ) AS predicted_st_date,
+                COALESCE(ra.warn_count, 0) AS warn_count
+            FROM candidates c
+            JOIN stock_basic b ON c.ts_code = b.ts_code
+            LEFT JOIN disc d ON c.ts_code = d.ts_code
+            LEFT JOIN risk_ann_count ra ON c.ts_code = ra.ts_code
+            WHERE c.ts_code NOT IN (SELECT ts_code FROM current_st)
+              AND c.ts_code NOT IN (SELECT ts_code FROM forecast_good)
+              AND c.ts_code NOT IN (SELECT ts_code FROM already_published)
+              AND b.name NOT LIKE '%-U' AND b.name NOT LIKE '%-U_'
             ORDER BY d.pre_date ASC NULLS LAST
         """))
         rows = r.fetchall()
         cols = r.keys()
 
         items = []
+        seen = set()
         for row in rows:
             rec = dict(zip(cols, row))
+            if rec["ts_code"] in seen:
+                continue
+            seen.add(rec["ts_code"])
             for k, v in rec.items():
                 if isinstance(v, float) and (v != v):
                     rec[k] = None
             rec["disclosure_date"] = rec["pre_date"] or ""
+
+            # 生成预测理由 — 判断触发哪条ST规则
+            p24 = rec.get("profit_2024")
+            rev24 = rec.get("revenue_2024")
+            tp24 = rec.get("total_profit_2024")
+            bps = rec.get("bps")
+            deducted = rec.get("deducted_profit_2024")
+            mn = rec.get("net_profit_min")
+            market = rec.get("market", "")
+            is_cyb = rec["ts_code"].startswith("3")  # 创业板
+
+            rules = []
+
+            # 规则1: 净资产为负
+            if bps is not None and bps < 0:
+                rules.append(f"每股净资产{bps:.2f}元为负，触发净资产退市风险")
+
+            # 规则2: 连续亏损 (2024亏+2025预告续亏)
+            if p24 is not None and p24 < 0 and mn is not None and mn < 0:
+                rules.append("连续两年净利润为负，触发*ST退市风险警示")
+
+            # 规则3: 营收利润不达标 (2024新规完整标准)
+            # 三者孰低: 利润总额、净利润、扣非净利润，均为负 + 营收不达标
+            profit_vals = [v for v in [tp24, p24, deducted] if v is not None]
+            worst_profit = min(profit_vals) if profit_vals else None
+            if worst_profit is not None and worst_profit < 0 and rev24 is not None:
+                threshold = 1e8 if is_cyb else 3e8  # 创业板1亿，主板3亿
+                label = "1亿(创业板)" if is_cyb else "3亿(主板)"
+                if rev24 < threshold:
+                    rules.append(f"利润总额/净利润/扣非孰低为负且营收{rev24/1e8:.2f}亿不足{label}，触发财务类退市")
+                elif rev24 < 5e8:
+                    rules.append(f"利润为负且营收{rev24/1e8:.2f}亿，接近财务类退市红线")
+
+            # 规则4: 营收不足5000万 + 亏损 → 直接退市高风险
+            if worst_profit is not None and worst_profit < 0 and rev24 is not None and rev24 < 5e7:
+                rules.append(f"营收仅{rev24/1e4:.0f}万且亏损，面临直接退市风险")
+
+            if not rules:
+                rules.append("财务指标异常，存在被实施ST风险")
+            rec["reason"] = "；".join(rules)
+
+            # 清理不需要返回前端的中间字段
+            for k in ("market", "total_profit_2024", "deducted_profit_2024"):
+                rec.pop(k, None)
+
             items.append(rec)
 
         return {"count": len(items), "data": items}

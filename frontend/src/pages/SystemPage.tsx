@@ -28,7 +28,7 @@ function RiskAlertPanel() {
     return <Alert type="success" message="暂无风险预警" showIcon style={{ marginBottom: 12 }} />;
   }
 
-  const stAlerts = alerts.filter((a) => a.type === 'ST预警');
+  const stAlerts = alerts.filter((a) => a.type === '公告ST');
   const fcAlerts = alerts.filter((a) => a.type === '业绩预告');
   const cbAlerts = alerts.filter((a) => a.type === '可转债强赎');
 
@@ -81,7 +81,7 @@ function RiskAlertPanel() {
         <div style={columnStyle}>
           <div style={{ ...headerBase, background: 'linear-gradient(90deg, rgba(255,77,79,0.15), transparent)', color: '#ff6b6b' }}>
             <Badge count={summary.st} overflowCount={99} style={{ backgroundColor: '#ff4d4f' }} />
-            <span>ST预警</span>
+            <span>公告ST</span>
           </div>
           <div style={listWrap}><List dataSource={stAlerts} renderItem={renderAlertItem} locale={{ emptyText: '暂无' }} size="small" /></div>
         </div>
@@ -204,6 +204,17 @@ function StPredictTab() {
         if (d <= 7) return <Tag color="volcano" style={{ margin: 0 }}>{d}天</Tag>;
         return <span style={{ color: '#93a9bc' }}>{d}天</span>;
       },
+    },
+    {
+      title: '风险公告', dataIndex: 'warn_count', width: 75, align: 'center' as const,
+      sorter: (a: StPredictItem, b: StPredictItem) => (a.warn_count ?? 0) - (b.warn_count ?? 0),
+      render: (v: number) => v > 0
+        ? <Tag color={v >= 3 ? 'red' : 'orange'} style={{ margin: 0 }}>{v}次</Tag>
+        : <span style={{ color: '#556677' }}>-</span>,
+    },
+    {
+      title: '预测理由', dataIndex: 'reason', width: 320, ellipsis: { showTitle: true },
+      render: (v: string) => <span style={{ color: '#93a9bc', fontSize: 12 }}>{v || '-'}</span>,
     },
   ];
 

@@ -957,12 +957,15 @@ export interface StPredictItem {
   name: string;
   profit_2024: number | null;
   revenue_2024: number | null;
+  bps: number | null;
   net_profit_min: number | null;
   net_profit_max: number | null;
   forecast_ann_date: string | null;
   pre_date: string | null;
   predicted_st_date: string | null;
   disclosure_date: string;
+  warn_count: number;
+  reason: string;
 }
 
 export interface SectorResonanceItem {

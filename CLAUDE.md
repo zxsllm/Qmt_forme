@@ -1,32 +1,9 @@
-# AI Trade - Codex Harness
-
-> 本文件是 Codex 侧入口。
-> Claude 侧治理继续使用 `CLAUDE.md` + `.claude/`，本 harness 仅为 Codex 建立平行镜像，不替代、不改写 Claude 配置。
+# AI Trade - A股量化交易系统
 
 ## 当前状态
 
 Phase 4.9 已完成 → 下一步: Phase 5 (QMT实盘) → Phase 6 (AI/ML)
 数据覆盖: 20250922 ~ 20260401 | 核心指数: 000001.SH 399001.SZ 399006.SZ 000300.SH 000905.SH 000688.SH 899050.BJ
-
-## 协作偏好
-
-- 与用户沟通默认使用中文，避免不必要的术语堆叠
-- review / 审查类结果必须用中文输出，并保留严重级别和文件定位
-- 优先依赖 `AGENTS.md`、`.agents/skills/`、`frontend/AGENTS.md`、`.cursor/` 的自动上下文，不设计要求用户手动触发的命令式工作流
-- 入口文档保持精简，详细知识尽量下沉到 `.agents/skills/` 或共享 `.cursor/`
-- 修改后端代码后，如需重启服务完成验证，直接处理 `uvicorn` 重启和 `/health` 检查，无需为“是否重启”单独打断用户
-
-## Codex 工作流
-
-- 新会话先读本文件，确认 Phase、边界和共享约束
-- 涉及回测/策略可信性时，必须使用 repo skill `.agents/skills/backtest-guard/`
-- 涉及 Tushare、`pull_*.py`、`sync_*.py`、`data_sync.py` 时，必须使用 repo skill `.agents/skills/tushare-api-guard/`
-- 新增 REST API、前端取数链路时，必须使用 repo skill `.agents/skills/add-endpoint/`
-- 新增 Tushare 数据源、DB 表、同步任务时，必须使用 repo skill `.agents/skills/add-data-source/`
-- 数据缺失、前端空白、同步异常排查时，必须使用 repo skill `.agents/skills/troubleshoot-data/`
-- 修改前端 UI 时，补充读取 `frontend/AGENTS.md`
-- 涉及数据管线、调度、增量同步时，继续复用 `.cursor/rules/data-pipeline.mdc`
-- 涉及 Tushare 具体接口字段时，继续复用 `.cursor/skills/skill-tushare-data/references/`
 
 ## 执行纪律
 
@@ -70,18 +47,8 @@ Tushare Pro (满权限) | venv `.venv/` | Windows 环境
 - 数据同步统一由 `scheduler` 管理 (`backend/app/execution/feed/scheduler.py` + `data_sync.py`)
 - 实时数据 fallback 链: rt_snapshot (内存) → DB → Tushare API
 
-## Harness 结构
-
-- 根入口: `AGENTS.md`
-- 前端局部入口: `frontend/AGENTS.md`
-- Codex 自动发现技能: `.agents/skills/`
-- 未来如需本地插件市场: `.agents/plugins/marketplace.json`
-
 ## 参考文档
 
-- Claude 侧原始入口: `CLAUDE.md`
-- Claude 侧规则/技能: `.claude/`
-- 用户级长期偏好: `C:\Users\MSI\.codex\AGENTS.md`
 - Tushare API 参考: `.cursor/skills/skill-tushare-data/references/`
 - 数据管线注册表: `.cursor/rules/data-pipeline.mdc`
-- 前端 UI 规范: `frontend/AGENTS.md`
+- 前端 UI 规范: `frontend/CLAUDE.md`

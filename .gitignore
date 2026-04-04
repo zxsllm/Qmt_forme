@@ -31,6 +31,12 @@ reports/
 .cursor/skills/
 .cursor/plans/Untitled
 
+# Claude Code (local settings should not be committed)
+.claude/settings.local.json
+dump.rdb
+_st.json
+=
+
 # Logs
 *.log
 logs/

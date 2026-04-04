@@ -86,8 +86,10 @@ CHECKS: list[CheckDef] = [
 
     # ── /system 市场监控 ──
     CheckDef("margin",       "融资融券", "system", "trade_date", "daily_t1",  "important", "margin"),
-    CheckDef("stock_st",     "ST名单",   "system", "trade_date", "event",     "minor",     "st_list"),
+    CheckDef("stock_st",     "公告ST",   "system", "trade_date", "event",     "important", "st_list"),
     CheckDef("forecast",     "业绩预告", "system", "ann_date",   "daily",     "minor",     "forecast"),
+    CheckDef("cb_basic",     "可转债基础", "system", "",          "static",    "minor",     "cb"),
+    CheckDef("cb_call",      "可转债强赎", "system", "ann_date",  "event",     "important", "cb"),
 
     # ── /news 消息中心 ──
     CheckDef("stock_news",      "新闻快讯", "news", "datetime", "realtime", "important", "news_batch"),
@@ -96,13 +98,13 @@ CHECKS: list[CheckDef] = [
     CheckDef("anns_classified", "公告分类", "news", "anns_id",  "static",   "minor",     "classify_news"),
 
     # ── /sentiment 情绪看板 ──
-    CheckDef("limit_list_ths", "涨跌停数据", "sentiment", "trade_date", "sentiment", "important", "limit_board"),
+    CheckDef("limit_list_ths", "涨跌停榜",   "sentiment", "trade_date", "sentiment", "important", "limit_board"),
     CheckDef("limit_step",     "连板天梯",   "sentiment", "trade_date", "sentiment", "important", "limit_board"),
     CheckDef("limit_stats",    "涨跌停统计", "sentiment", "trade_date", "sentiment", "minor",     "limit_board"),
     CheckDef("top_list",       "龙虎榜",     "sentiment", "trade_date", "sentiment", "important", "limit_board"),
     CheckDef("hm_detail",      "游资动向",   "sentiment", "trade_date", "sentiment", "important", "limit_board"),
     CheckDef("dc_hot",         "市场热榜",   "sentiment", "trade_date", "sentiment", "important", "limit_board"),
-    CheckDef("top_inst",       "龙虎榜机构", "sentiment", "trade_date", "sentiment", "minor",     "top_inst"),
+    CheckDef("top_inst",       "机构交易明细", "sentiment", "trade_date", "sentiment", "minor",     "top_inst"),
     CheckDef("limit_cpt_list", "涨停题材",   "sentiment", "trade_date", "sentiment", "minor",     "limit_board"),
 
     # ── /fundamental 基本面 ──
@@ -113,7 +115,7 @@ CHECKS: list[CheckDef] = [
     CheckDef("share_float",       "限售解禁",   "fundamental", "float_date", "event",     "minor", "share_float"),
     CheckDef("stk_holdertrade",   "增减持",     "fundamental", "ann_date",   "daily",     "minor", "stk_holdertrade"),
     CheckDef("stk_holdernumber",  "股东人数",   "fundamental", "end_date",   "quarterly", "minor", "stk_holdernumber"),
-    CheckDef("top10_floatholders","前十大股东", "fundamental", "end_date",   "quarterly", "minor", "top10_floatholders"),
+    CheckDef("top10_floatholders","十大股东",   "fundamental", "end_date",   "quarterly", "minor", "top10_floatholders"),
     CheckDef("concept_list",      "概念板块",   "fundamental", "",           "static",    "minor", "concepts"),
     CheckDef("concept_detail",    "概念成分",   "fundamental", "",           "static",    "minor", "concepts"),
 ]
@@ -189,6 +191,10 @@ def _diagnose(table: str, actual: str, expected: str, phase: str, is_trade_day: 
             return {"reason": etype, "detail": f"同步失败: {err}", "action": "可自动重试", "repairable": True}
         return {"reason": "sync_error", "detail": f"同步失败: {err}", "action": "可尝试重新同步", "repairable": True}
 
+    # Tushare 延迟发布：同步跑了但返回 0 行，后续可能补上 → 允许自动重试
+    if effective and effective.status == SyncStatus.SUCCESS and effective.rows_synced == 0:
+        return {"reason": "tushare_empty", "detail": "同步已执行但Tushare未返回数据（可能尚未发布）", "action": "自动重试拉取", "repairable": True}
+
     if not is_trade_day:
         return {"reason": "non_trade_day", "detail": "非交易日无新数据", "action": "无需操作", "repairable": False}
 
@@ -200,9 +206,6 @@ def _diagnose(table: str, actual: str, expected: str, phase: str, is_trade_day: 
 
     if not effective or effective.last_attempt == 0:
         return {"reason": "not_synced", "detail": "本次启动后未触发同步", "action": "自动重新同步", "repairable": True}
-
-    if effective.status == SyncStatus.SUCCESS and effective.rows_synced == 0:
-        return {"reason": "tushare_empty", "detail": "同步已执行但Tushare未返回数据（可能尚未发布）", "action": "等待Tushare更新后重试", "repairable": False}
 
     if effective.status == SyncStatus.SUCCESS:
         return {"reason": "tushare_partial", "detail": f"同步成功({effective.rows_synced}行)但该表数据仍不完整", "action": "可重试", "repairable": True}
