@@ -427,7 +427,6 @@ class MarketDataScheduler:
         import psycopg2
         from app.execution.feed.data_sync import (
             _db_url, sync_forecast, sync_st_list, sync_cb,
-            sync_disclosure, sync_anns, sync_stk_holdertrade,
         )
         from app.research.data.tushare_service import TushareService
 
@@ -439,15 +438,6 @@ class MarketDataScheduler:
             conn.autocommit = False
             sync_forecast(conn, svc)
             sync_st_list(conn, svc, today)
-            sync_disclosure(conn, svc)
-            try:
-                sync_anns(conn, svc, today)
-            except Exception:
-                logger.debug("alert pull: sync_anns skipped (may be non-trade-date)")
-            try:
-                sync_stk_holdertrade(conn, svc, today)
-            except Exception:
-                logger.debug("alert pull: sync_holdertrade skipped")
             # CB call only (lightweight, skip cb_basic/cb_daily here)
             try:
                 df = svc.cb_call()

@@ -7,7 +7,7 @@ import RiskPanel from '../components/RiskPanel';
 
 const FORECAST_COLORS: Record<string, string> = {
   预增: 'red', 略增: 'volcano', 扭亏: 'blue', 续盈: 'cyan',
-  预减: 'orange', 略减: 'gold', 首亏: 'magenta', 续亏: 'purple',
+  预减: 'green', 略减: '#389e0d', 首亏: '#135200', 续亏: '#092b00',
 };
 
 function RiskAlertPanel() {
@@ -28,7 +28,7 @@ function RiskAlertPanel() {
     return <Alert type="success" message="暂无风险预警" showIcon style={{ marginBottom: 12 }} />;
   }
 
-  const stAlerts = alerts.filter((a) => a.type === '公告ST');
+  const stAlerts = alerts.filter((a) => a.type === 'ST预警');
   const fcAlerts = alerts.filter((a) => a.type === '业绩预告');
   const cbAlerts = alerts.filter((a) => a.type === '可转债强赎');
 
@@ -81,7 +81,7 @@ function RiskAlertPanel() {
         <div style={columnStyle}>
           <div style={{ ...headerBase, background: 'linear-gradient(90deg, rgba(255,77,79,0.15), transparent)', color: '#ff6b6b' }}>
             <Badge count={summary.st} overflowCount={99} style={{ backgroundColor: '#ff4d4f' }} />
-            <span>公告ST</span>
+            <span>ST预警</span>
           </div>
           <div style={listWrap}><List dataSource={stAlerts} renderItem={renderAlertItem} locale={{ emptyText: '暂无' }} size="small" /></div>
         </div>
@@ -172,12 +172,12 @@ function StPredictTab() {
     { title: '代码', dataIndex: 'ts_code', width: 95, render: (v: string) => <span style={{ color: '#e6f1fa', fontWeight: 500 }}>{v}</span> },
     { title: '名称', dataIndex: 'name', width: 85, ellipsis: true, render: (v: string) => <span style={{ color: '#93a9bc' }}>{v}</span> },
     {
-      title: '2024利润', dataIndex: 'profit_2024', width: 100, align: 'right' as const,
-      sorter: (a: StPredictItem, b: StPredictItem) => (a.profit_2024 ?? 0) - (b.profit_2024 ?? 0),
+      title: '利润(万)', dataIndex: 'profit', width: 100, align: 'right' as const,
+      sorter: (a: StPredictItem, b: StPredictItem) => (a.profit ?? 0) - (b.profit ?? 0),
       render: (v: number | null) => <span style={{ color: '#ff6f91' }}>{fmtWan(v)}</span>,
     },
     {
-      title: '2025预告利润', key: 'fc_profit', width: 130, align: 'right' as const,
+      title: '预告利润', key: 'fc_profit', width: 130, align: 'right' as const,
       sorter: (a: StPredictItem, b: StPredictItem) => (a.net_profit_min ?? 0) - (b.net_profit_min ?? 0),
       render: (_: unknown, r: StPredictItem) => {
         if (!r.net_profit_min && !r.net_profit_max) return '-';
@@ -224,7 +224,7 @@ function StPredictTab() {
         <Tag color="volcano" style={{ fontSize: 13, padding: '2px 12px', borderRadius: 999 }}>
           {data?.count ?? 0} 只待ST
         </Tag>
-        <span style={{ color: '#556677', fontSize: 12 }}>2024确认亏损 + 2025预告续亏 · 年报未披露</span>
+        <span style={{ color: '#556677', fontSize: 12 }}>基于{data?.report_year ?? ''}年报/预告 · 规则: 利润孰低为负+营收不达标 / 净资产为负 (沪深9.3.2/创业板10.3.1/科创板12.4.2)</span>
         <div style={{ flex: 1 }} />
         <Input.Search size="small" placeholder="搜索代码/名称" allowClear
           style={{ width: 180 }}

@@ -276,7 +276,7 @@ export const api = {
     ),
 
   getStPredict: () =>
-    fetchJson<{ count: number; data: StPredictItem[] }>('/api/v1/market/st-predict'),
+    fetchJson<{ count: number; data: StPredictItem[]; report_year?: number }>('/api/v1/market/st-predict'),
 
   indexSectorResonance: (indexCode = '000001.SH', days = 20, level = 'L1') =>
     fetchJson<SectorResonanceResponse>(`/api/v1/monitor/index-sector-resonance?index_code=${indexCode}&days=${days}&level=${level}`),
@@ -441,6 +441,11 @@ export const api = {
   dragonTiger: (trade_date = '', limit = 30) =>
     fetchJson<{ count: number; data: DragonTigerItem[]; trade_date: string }>(
       `/api/v1/sentiment/dragon-tiger?trade_date=${trade_date}&limit=${limit}`,
+    ),
+
+  dragonTigerSeats: (ts_code: string, trade_date: string) =>
+    fetchJson<{ buy_seats: SeatItem[]; sell_seats: SeatItem[] }>(
+      `/api/v1/sentiment/dragon-tiger-seats?ts_code=${ts_code}&trade_date=${trade_date}`,
     ),
 
   hotList: (trade_date = '', limit = 30) =>
@@ -744,6 +749,15 @@ export interface DragonTigerItem {
   reason: string | null;
 }
 
+export interface SeatItem {
+  exalter: string;
+  buy: number | null;
+  sell: number | null;
+  net_buy: number | null;
+  seat_type: string;
+  hm_name: string | null;
+}
+
 export interface HotListItem {
   ts_code: string;
   ts_name: string;
@@ -955,8 +969,8 @@ export interface EventCalendarData {
 export interface StPredictItem {
   ts_code: string;
   name: string;
-  profit_2024: number | null;
-  revenue_2024: number | null;
+  profit: number | null;
+  revenue: number | null;
   bps: number | null;
   net_profit_min: number | null;
   net_profit_max: number | null;

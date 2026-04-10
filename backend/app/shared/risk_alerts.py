@@ -21,40 +21,57 @@ def _clean(rows: list[dict]) -> list[dict]:
 
 
 async def _st_alerts(session: AsyncSession) -> list[dict]:
-    """A. ST warnings: stocks newly added to ST list within last 30 days."""
+    """A. ST warnings: newly ST-listed stocks + forecast-based consecutive-loss risk."""
     alerts: list[dict] = []
 
-    cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
-    r = await session.execute(text("""
-        WITH dated AS (
-            SELECT DISTINCT trade_date FROM stock_st
-            WHERE trade_date >= :cutoff
-            ORDER BY trade_date
-        ),
-        pairs AS (
-            SELECT trade_date,
-                   LAG(trade_date) OVER (ORDER BY trade_date) AS prev_date
-            FROM dated
-        )
-        SELECT p.trade_date, s.ts_code, s.name, s.type_name
-        FROM pairs p
-        JOIN stock_st s ON s.trade_date = p.trade_date
-        WHERE p.prev_date IS NOT NULL
-          AND s.ts_code NOT IN (
-              SELECT ts_code FROM stock_st WHERE trade_date = p.prev_date
-          )
-        ORDER BY p.trade_date DESC
-    """), {"cutoff": cutoff})
+    r = await session.execute(text(
+        "SELECT DISTINCT trade_date FROM stock_st ORDER BY trade_date DESC LIMIT 2"
+    ))
+    dates = [row[0] for row in r.fetchall()]
 
-    for row in r.fetchall():
-        td = row[0]
+    if len(dates) >= 2:
+        latest, prev = dates[0], dates[1]
+        diff_r = await session.execute(text("""
+            SELECT s.ts_code, s.name, s.type_name
+            FROM stock_st s
+            WHERE s.trade_date = :latest
+              AND s.ts_code NOT IN (
+                  SELECT ts_code FROM stock_st WHERE trade_date = :prev
+              )
+        """), {"latest": latest, "prev": prev})
+        for row in diff_r.fetchall():
+            alerts.append({
+                "type": "ST预警",
+                "level": "high",
+                "ts_code": row[0],
+                "name": row[1],
+                "detail": f"新增风险警示: {row[2] or 'ST'}（{latest}）",
+                "time": f"{latest[:4]}-{latest[4:6]}-{latest[6:]}",
+            })
+
+    cutoff = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
+    loss_r = await session.execute(text("""
+        SELECT f.ts_code, b.name, f.type, f.ann_date, f.end_date,
+               f.p_change_min, f.p_change_max
+        FROM forecast f
+        JOIN stock_basic b ON f.ts_code = b.ts_code
+        WHERE f.type IN ('首亏', '续亏')
+          AND f.ann_date >= :cutoff
+        ORDER BY f.ann_date DESC
+        LIMIT 50
+    """), {"cutoff": cutoff})
+    for row in loss_r.fetchall():
+        pct = ""
+        if row[5] is not None and row[6] is not None:
+            pct = f" (变动 {row[5]:.0f}%~{row[6]:.0f}%)"
+        ann = row[3] or ""
         alerts.append({
-            "type": "公告ST",
-            "level": "high",
-            "ts_code": row[1],
-            "name": row[2],
-            "detail": f"新增风险警示: {row[3] or 'ST'}（{td}）",
-            "time": f"{td[:4]}-{td[4:6]}-{td[6:]}",
+            "type": "ST预警",
+            "level": "medium",
+            "ts_code": row[0],
+            "name": row[1],
+            "detail": f"{row[2]} — 报告期{row[4]}, 公告日{ann}{pct}",
+            "time": f"{ann[:4]}-{ann[4:6]}-{ann[6:]}" if len(ann) == 8 else ann,
         })
 
     return alerts
@@ -91,7 +108,7 @@ async def _forecast_alerts(session: AsyncSession) -> list[dict]:
 
         profit_str = ""
         if np_min is not None and np_max is not None:
-            profit_str = f"净利润 {np_min / 10000:.0f}~{np_max / 10000:.0f} 亿"
+            profit_str = f"净利润 {np_min / 10000:.2f}~{np_max / 10000:.2f} 亿"
 
         detail_parts = [f"{ftype} — 报告期{end_date}"]
         if pct_range:

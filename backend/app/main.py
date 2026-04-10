@@ -555,7 +555,7 @@ async def get_limit_step(
 @app.get("/api/v1/sentiment/dragon-tiger")
 async def get_dragon_tiger(
     trade_date: str = Query("", description="YYYYMMDD, defaults to today"),
-    limit: int = Query(30, ge=1, le=100),
+    limit: int = Query(30, ge=1, le=200),
 ):
     from datetime import datetime as _dt
     from app.core.database import async_session
@@ -581,6 +581,67 @@ async def get_dragon_tiger(
             if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
                 d[k] = None
     return {"count": len(data), "data": data, "trade_date": trade_date}
+
+
+@app.get("/api/v1/sentiment/dragon-tiger-seats")
+async def get_dragon_tiger_seats(
+    ts_code: str = Query(..., description="Stock code"),
+    trade_date: str = Query(..., description="YYYYMMDD"),
+):
+    """Seat detail (buy/sell breakdown) for a single stock on dragon-tiger list."""
+    from app.core.database import async_session
+    from sqlalchemy import text
+
+    async with async_session() as session:
+        result = await session.execute(text("""
+            SELECT exalter, side, buy, sell, net_buy
+            FROM top_inst
+            WHERE ts_code = :code AND trade_date = :td
+            ORDER BY side, ABS(net_buy) DESC
+        """), {"code": ts_code, "td": trade_date})
+        rows = result.fetchall()
+
+        # 游资匹配: hm_detail 按 (trade_date, ts_code) 查出所有游资交易记录
+        hm_r = await session.execute(text("""
+            SELECT hm_name, buy_amount, sell_amount
+            FROM hm_detail
+            WHERE ts_code = :code AND trade_date = :td
+        """), {"code": ts_code, "td": trade_date})
+        hm_rows = hm_r.fetchall()
+
+    # 构建游资金额索引，按买入金额匹配（容差 0.5%）
+    hm_map: list[tuple[str, float, float]] = [
+        (name, buy_amt or 0, sell_amt or 0) for name, buy_amt, sell_amt in hm_rows
+    ]
+    used_hm: set[str] = set()
+
+    def match_hm(buy: float, sell: float) -> str | None:
+        """尝试通过金额匹配游资名称"""
+        for hm_name, hm_buy, hm_sell in hm_map:
+            if hm_name in used_hm:
+                continue
+            if hm_buy > 0 and buy > 0 and abs(hm_buy - buy) / max(hm_buy, 1) < 0.005:
+                used_hm.add(hm_name)
+                return hm_name
+            if hm_sell > 0 and sell > 0 and abs(hm_sell - sell) / max(hm_sell, 1) < 0.005:
+                used_hm.add(hm_name)
+                return hm_name
+        return None
+
+    buy_seats, sell_seats = [], []
+    for row in rows:
+        exalter, side, buy, sell, net_buy = row
+        hm_name = match_hm(buy or 0, sell or 0)
+        seat_type = "机构" if ("机构" in (exalter or "") or "专用" in (exalter or "")) else \
+                    "游资" if hm_name else "券商"
+        rec = {"exalter": exalter, "buy": buy, "sell": sell, "net_buy": net_buy,
+               "seat_type": seat_type, "hm_name": hm_name}
+        if side == "0":
+            buy_seats.append(rec)
+        else:
+            sell_seats.append(rec)
+
+    return {"buy_seats": buy_seats, "sell_seats": sell_seats}
 
 
 @app.get("/api/v1/sentiment/hot-list")
@@ -1244,120 +1305,165 @@ async def get_recent_holdertrade(
 
 @app.get("/api/v1/market/st-predict")
 async def get_st_predict():
-    """ST prediction — multi-rule: consecutive loss, negative net assets, revenue+profit fail."""
+    """ST prediction based on annual report / forecast data (dynamic year).
+
+    Rules per exchange listing rules (2025 revision):
+      沪深主板 9.3.2/9.3.1: 利润孰低<0 AND 营收<3亿, OR 净资产<0
+      创业板 10.3.1 / 科创板 12.4.2: 同上, 但营收门槛 1亿
+    Two groups:
+      A) 年报已发 → 用实际数据判断
+      B) 年报未发 → 用续亏/首亏预告 + 上年营收推算
+    """
     from sqlalchemy import text
     from app.core.database import async_session
 
+    # 动态计算报告期年份: 当前年份-1 = 年报对应年度
+    report_year = datetime.now().year - 1
+    prev_year = report_year - 1
+    report_end = f"{report_year}1231"
+    prev_end = f"{prev_year}1231"
+    cal_start = f"{report_year + 1}0101"
+
     async with async_session() as session:
         r = await session.execute(text("""
-            WITH income_2024 AS (
+            WITH
+            -- ═══ 基础数据 ═══
+            -- A: 年报已发 (实际数据)
+            published AS (
                 SELECT DISTINCT ON (ts_code) ts_code, n_income_attr_p, revenue, total_profit
                 FROM income
-                WHERE end_date = '20241231' AND report_type = '1'
+                WHERE end_date = :report_end AND report_type = '1'
                 ORDER BY ts_code, ann_date DESC
             ),
-            fina_latest AS (
-                SELECT DISTINCT ON (ts_code) ts_code, bps, profit_dedt, end_date AS fina_end_date
-                FROM fina_indicator
-                ORDER BY ts_code, end_date DESC, ann_date DESC
-            ),
-            forecast_2025 AS (
+            -- B: 业绩预告 (续亏/首亏 → 预测净利润为负)
+            forecast_bad AS (
                 SELECT DISTINCT ON (ts_code) ts_code, type, net_profit_min,
                        net_profit_max, ann_date
                 FROM forecast
-                WHERE end_date = '20251231' AND type = '续亏'
+                WHERE end_date = :report_end AND type IN ('续亏', '首亏')
                 ORDER BY ts_code, ann_date DESC
             ),
-            -- 2025预告扭亏/预增/续盈的 → 排除
+            -- 好预告 → 排除
             forecast_good AS (
                 SELECT DISTINCT ts_code FROM forecast
-                WHERE end_date = '20251231' AND type IN ('扭亏', '预增', '续盈', '略增')
+                WHERE end_date = :report_end AND type IN ('扭亏', '预增', '续盈', '略增')
             ),
-            -- 2025年报已实际披露超过7天的 → 排除（7天内仍保留展示）
-            already_published AS (
-                SELECT DISTINCT i.ts_code
-                FROM income i
-                JOIN disclosure_date dd ON i.ts_code = dd.ts_code AND dd.end_date = '20251231'
-                WHERE i.end_date = '20251231' AND i.report_type = '1'
-                  AND dd.actual_date IS NOT NULL AND dd.actual_date <> ''
-                  AND dd.actual_date < to_char(now() - interval '7 days', 'YYYYMMDD')
+            -- 上年营收 (对未发年报的推算参考)
+            income_prev AS (
+                SELECT DISTINCT ON (ts_code) ts_code, revenue
+                FROM income
+                WHERE end_date = :prev_end AND report_type = '1'
+                ORDER BY ts_code, ann_date DESC
+            ),
+            -- 最新财务指标 (取bps, 扣非)
+            fina_latest AS (
+                SELECT DISTINCT ON (ts_code) ts_code, bps, profit_dedt
+                FROM fina_indicator
+                ORDER BY ts_code, end_date DESC, ann_date DESC
+            ),
+            -- 年报对应的fina (取扣非)
+            fina_report AS (
+                SELECT DISTINCT ON (ts_code) ts_code, bps, profit_dedt
+                FROM fina_indicator
+                WHERE end_date = :report_end
+                ORDER BY ts_code, ann_date DESC
             ),
             -- 风险提示公告次数
             risk_ann_count AS (
                 SELECT ts_code, count(*) AS warn_count
                 FROM stock_anns
-                WHERE title LIKE '%可能被实施%风险警示%'
-                   OR title LIKE '%可能被实施%退市风险%'
+                WHERE title LIKE '%%可能被实施%%风险警示%%'
+                   OR title LIKE '%%可能被实施%%退市风险%%'
                 GROUP BY ts_code
             ),
             disc AS (
                 SELECT ts_code, actual_date, pre_date
-                FROM disclosure_date
-                WHERE end_date = '20251231'
+                FROM disclosure_date WHERE end_date = :report_end
             ),
             current_st AS (
-                SELECT DISTINCT ts_code
-                FROM stock_st
+                SELECT DISTINCT ts_code FROM stock_st
                 WHERE trade_date = (SELECT MAX(trade_date) FROM stock_st)
             ),
             trade_days AS (
-                SELECT cal_date
-                FROM trade_cal
+                SELECT cal_date FROM trade_cal
                 WHERE is_open = 1 AND exchange = 'SSE'
-                      AND cal_date >= to_char(now(), 'YYYYMMDD')
-                ORDER BY cal_date LIMIT 40
+                      AND cal_date >= :cal_start
+                ORDER BY cal_date
             ),
-            -- 所有潜在风险股: 2024亏损 OR 净资产为负
+
+            -- ═══ Group A: 年报已发，触发ST条件 ═══
+            group_a AS (
+                SELECT p.ts_code,
+                       p.n_income_attr_p AS profit, p.revenue, p.total_profit,
+                       COALESCE(fr.bps, fl.bps) AS bps,
+                       COALESCE(fr.profit_dedt, fl.profit_dedt) AS profit_dedt,
+                       fb.type AS fc_type, fb.net_profit_min, fb.net_profit_max,
+                       fb.ann_date AS forecast_ann_date,
+                       'published' AS src
+                FROM published p
+                LEFT JOIN fina_report fr ON p.ts_code = fr.ts_code
+                LEFT JOIN fina_latest fl ON p.ts_code = fl.ts_code
+                LEFT JOIN forecast_bad fb ON p.ts_code = fb.ts_code
+                WHERE
+                  (  -- 规则1: 利润孰低<0 AND 营收<门槛
+                    LEAST(
+                        COALESCE(p.total_profit, p.n_income_attr_p),
+                        p.n_income_attr_p,
+                        COALESCE(fr.profit_dedt, fl.profit_dedt, p.n_income_attr_p)
+                    ) < 0
+                    AND p.revenue < CASE
+                        WHEN p.ts_code LIKE '3%%' OR p.ts_code LIKE '688%%' OR p.ts_code LIKE '%%.BJ' THEN 1e8
+                        ELSE 3e8 END
+                  )
+                  OR -- 规则2: 净资产<0
+                  (COALESCE(fr.bps, fl.bps) IS NOT NULL AND COALESCE(fr.bps, fl.bps) < 0)
+            ),
+
+            -- ═══ Group B: 年报未发，预告续亏/首亏 + 上年营收推算 ═══
+            group_b AS (
+                SELECT fb.ts_code,
+                       NULL::float8 AS profit, ip.revenue, NULL::float8 AS total_profit,
+                       fl.bps, fl.profit_dedt,
+                       fb.type AS fc_type, fb.net_profit_min, fb.net_profit_max,
+                       fb.ann_date AS forecast_ann_date,
+                       'forecast' AS src
+                FROM forecast_bad fb
+                LEFT JOIN income_prev ip ON fb.ts_code = ip.ts_code
+                LEFT JOIN fina_latest fl ON fb.ts_code = fl.ts_code
+                WHERE NOT EXISTS (SELECT 1 FROM published WHERE ts_code = fb.ts_code)
+                  AND (
+                    -- 续亏/首亏 + 上年营收低于门槛 → 推测不达标
+                    ip.revenue < CASE
+                        WHEN fb.ts_code LIKE '3%%' OR fb.ts_code LIKE '688%%' OR fb.ts_code LIKE '%%.BJ' THEN 1e8
+                        ELSE 3e8 END
+                    -- 或净资产为负
+                    OR (fl.bps IS NOT NULL AND fl.bps < 0)
+                  )
+            ),
+
             candidates AS (
-                SELECT i.ts_code, i.n_income_attr_p, i.revenue, i.total_profit,
-                       fi.bps, fi.profit_dedt,
-                       f.type AS fc_type, f.net_profit_min, f.net_profit_max,
-                       f.ann_date AS forecast_ann_date
-                FROM income_2024 i
-                LEFT JOIN fina_latest fi ON i.ts_code = fi.ts_code
-                LEFT JOIN forecast_2025 f ON i.ts_code = f.ts_code
-                WHERE i.n_income_attr_p < 0
-                   OR (fi.bps IS NOT NULL AND fi.bps < 0)
-
-                UNION
-
-                SELECT i.ts_code, i.n_income_attr_p, i.revenue, i.total_profit,
-                       fi.bps, fi.profit_dedt,
-                       f.type AS fc_type, f.net_profit_min, f.net_profit_max,
-                       f.ann_date AS forecast_ann_date
-                FROM fina_latest fi
-                LEFT JOIN income_2024 i ON fi.ts_code = i.ts_code
-                LEFT JOIN forecast_2025 f ON fi.ts_code = f.ts_code
-                WHERE fi.bps < 0
-                  AND fi.ts_code NOT IN (SELECT ts_code FROM income_2024 WHERE n_income_attr_p < 0)
+                SELECT * FROM group_a
+                UNION ALL
+                SELECT * FROM group_b
             )
             SELECT
-                c.ts_code,
-                b.name,
-                b.market,
-                c.n_income_attr_p  AS profit_2024,
-                c.revenue          AS revenue_2024,
-                c.total_profit     AS total_profit_2024,
-                c.bps,
-                c.profit_dedt      AS deducted_profit_2024,
-                c.net_profit_min,
-                c.net_profit_max,
-                c.forecast_ann_date,
-                d.pre_date,
+                c.ts_code, b.name, b.market,
+                c.profit, c.revenue, c.total_profit, c.bps, c.profit_dedt,
+                c.fc_type, c.net_profit_min, c.net_profit_max,
+                c.forecast_ann_date, c.src,
+                d.pre_date, d.actual_date,
                 (SELECT MIN(cal_date) FROM trade_days
-                 WHERE cal_date > d.pre_date
-                ) AS predicted_st_date,
+                 WHERE cal_date > d.pre_date) AS predicted_st_date,
                 COALESCE(ra.warn_count, 0) AS warn_count
             FROM candidates c
             JOIN stock_basic b ON c.ts_code = b.ts_code
             LEFT JOIN disc d ON c.ts_code = d.ts_code
             LEFT JOIN risk_ann_count ra ON c.ts_code = ra.ts_code
-            WHERE c.ts_code NOT IN (SELECT ts_code FROM current_st)
-              AND c.ts_code NOT IN (SELECT ts_code FROM forecast_good)
-              AND c.ts_code NOT IN (SELECT ts_code FROM already_published)
-              AND b.name NOT LIKE '%-U' AND b.name NOT LIKE '%-U_'
+            WHERE NOT EXISTS (SELECT 1 FROM current_st WHERE ts_code = c.ts_code)
+              AND NOT EXISTS (SELECT 1 FROM forecast_good WHERE ts_code = c.ts_code)
+              AND b.name NOT LIKE '%%-U' AND b.name NOT LIKE '%%-U_'
             ORDER BY d.pre_date ASC NULLS LAST
-        """))
+        """), {"report_end": report_end, "prev_end": prev_end, "cal_start": cal_start})
         rows = r.fetchall()
         cols = r.keys()
 
@@ -1373,53 +1479,58 @@ async def get_st_predict():
                     rec[k] = None
             rec["disclosure_date"] = rec["pre_date"] or ""
 
-            # 生成预测理由 — 判断触发哪条ST规则
-            p24 = rec.get("profit_2024")
-            rev24 = rec.get("revenue_2024")
-            tp24 = rec.get("total_profit_2024")
+            # ── 生成预测理由 ──
+            profit = rec.get("profit")
+            rev = rec.get("revenue")
+            tp = rec.get("total_profit")
             bps = rec.get("bps")
-            deducted = rec.get("deducted_profit_2024")
+            deducted = rec.get("profit_dedt")
             mn = rec.get("net_profit_min")
-            market = rec.get("market", "")
-            is_cyb = rec["ts_code"].startswith("3")  # 创业板
+            mx = rec.get("net_profit_max")
+            src = rec.get("src")
+            code = rec["ts_code"]
+            is_small = code.startswith("3") or code.startswith("688") or code.endswith(".BJ")
+            threshold = 1e8 if is_small else 3e8
+            label = "1亿" if is_small else "3亿"
 
             rules = []
 
-            # 规则1: 净资产为负
-            if bps is not None and bps < 0:
-                rules.append(f"每股净资产{bps:.2f}元为负，触发净资产退市风险")
-
-            # 规则2: 连续亏损 (2024亏+2025预告续亏)
-            if p24 is not None and p24 < 0 and mn is not None and mn < 0:
-                rules.append("连续两年净利润为负，触发*ST退市风险警示")
-
-            # 规则3: 营收利润不达标 (2024新规完整标准)
-            # 三者孰低: 利润总额、净利润、扣非净利润，均为负 + 营收不达标
-            profit_vals = [v for v in [tp24, p24, deducted] if v is not None]
-            worst_profit = min(profit_vals) if profit_vals else None
-            if worst_profit is not None and worst_profit < 0 and rev24 is not None:
-                threshold = 1e8 if is_cyb else 3e8  # 创业板1亿，主板3亿
-                label = "1亿(创业板)" if is_cyb else "3亿(主板)"
-                if rev24 < threshold:
-                    rules.append(f"利润总额/净利润/扣非孰低为负且营收{rev24/1e8:.2f}亿不足{label}，触发财务类退市")
-                elif rev24 < 5e8:
-                    rules.append(f"利润为负且营收{rev24/1e8:.2f}亿，接近财务类退市红线")
-
-            # 规则4: 营收不足5000万 + 亏损 → 直接退市高风险
-            if worst_profit is not None and worst_profit < 0 and rev24 is not None and rev24 < 5e7:
-                rules.append(f"营收仅{rev24/1e4:.0f}万且亏损，面临直接退市风险")
+            if src == "published":
+                # 已发年报 → 用实际数据
+                profit_vals = [v for v in [tp, profit, deducted] if v is not None]
+                worst = min(profit_vals) if profit_vals else None
+                if worst is not None and worst < 0 and rev is not None and rev < threshold:
+                    rules.append(f"{report_year}年报: 利润孰低为负且营收{rev/1e8:.2f}亿<{label}(9.3.2①)")
+                if bps is not None and bps < 0:
+                    rules.append(f"{report_year}年报: 净资产{bps:.2f}元<0(9.3.2②)")
+            else:
+                # 未发年报 → 预告+推算
+                fc_type = rec.get("fc_type") or "续亏"
+                if rev is not None and rev < threshold:
+                    rules.append(f"预告{fc_type}+{prev_year}营收{rev/1e8:.2f}亿<{label}，预测触发*ST(9.3.2①)")
+                if bps is not None and bps < 0:
+                    rules.append(f"最新净资产{bps:.2f}元<0，预测触发*ST(9.3.2②)")
+                if mn is not None:
+                    # net_profit_min/max 单位: 万元
+                    rules.append(f"预告净利润{mn:.0f}~{(mx or mn):.0f}万")
 
             if not rules:
-                rules.append("财务指标异常，存在被实施ST风险")
+                rules.append("财务指标异常")
             rec["reason"] = "；".join(rules)
 
-            # 清理不需要返回前端的中间字段
-            for k in ("market", "total_profit_2024", "deducted_profit_2024"):
+            # net_profit_min/max: 万元 → 元 (统一单位给前端 fmtWan)
+            if rec.get("net_profit_min") is not None:
+                rec["net_profit_min"] = rec["net_profit_min"] * 1e4
+            if rec.get("net_profit_max") is not None:
+                rec["net_profit_max"] = rec["net_profit_max"] * 1e4
+
+            for k in ("market", "total_profit", "profit_dedt",
+                       "src", "actual_date", "fc_type"):
                 rec.pop(k, None)
 
             items.append(rec)
 
-        return {"count": len(items), "data": items}
+        return {"count": len(items), "data": items, "report_year": report_year}
 
 
 # ── Monitor: Index-Sector Resonance ──────────────────────────────
