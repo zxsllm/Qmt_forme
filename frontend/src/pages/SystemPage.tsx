@@ -7,7 +7,7 @@ import RiskPanel from '../components/RiskPanel';
 
 const FORECAST_COLORS: Record<string, string> = {
   预增: 'red', 略增: 'volcano', 扭亏: 'blue', 续盈: 'cyan',
-  预减: 'green', 略减: '#389e0d', 首亏: '#135200', 续亏: '#092b00',
+  预减: 'green', 略减: 'green', 首亏: 'geekblue', 续亏: 'purple',
 };
 
 function RiskAlertPanel() {
