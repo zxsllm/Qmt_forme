@@ -56,37 +56,6 @@ async def _st_alerts(session: AsyncSession) -> list[dict]:
             "time": f"{since[:4]}-{since[4:6]}-{since[6:]}" if len(since) == 8 else since,
         })
 
-    # 2) 业绩预告续亏/首亏（潜在ST风险），排除已ST和-U股票
-    cutoff = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
-    loss_r = await session.execute(text("""
-        SELECT f.ts_code, b.name, f.type, f.ann_date, f.end_date,
-               f.p_change_min, f.p_change_max
-        FROM forecast f
-        JOIN stock_basic b ON f.ts_code = b.ts_code
-        WHERE f.type IN ('首亏', '续亏')
-          AND f.ann_date >= :cutoff
-          AND b.name NOT LIKE '%%-U' AND b.name NOT LIKE '%%-U_'
-          AND f.ts_code NOT IN (
-              SELECT ts_code FROM stock_st
-              WHERE trade_date = (SELECT MAX(trade_date) FROM stock_st)
-          )
-        ORDER BY f.ann_date DESC
-        LIMIT 50
-    """), {"cutoff": cutoff})
-    for row in loss_r.fetchall():
-        pct = ""
-        if row[5] is not None and row[6] is not None:
-            pct = f" (变动 {row[5]:.0f}%~{row[6]:.0f}%)"
-        ann = row[3] or ""
-        alerts.append({
-            "type": "ST预警",
-            "level": "medium",
-            "ts_code": row[0],
-            "name": row[1],
-            "detail": f"预告{row[2]} — 报告期{row[4]}, 公告日{ann}{pct}",
-            "time": f"{ann[:4]}-{ann[4:6]}-{ann[6:]}" if len(ann) == 8 else ann,
-        })
-
     return alerts
 
 
