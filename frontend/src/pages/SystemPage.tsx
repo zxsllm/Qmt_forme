@@ -10,6 +10,12 @@ const FORECAST_COLORS: Record<string, string> = {
   预减: 'green', 略减: 'green', 首亏: 'geekblue', 续亏: 'purple',
 };
 
+// Badge 需要实际 hex 值（Ant Design 命名色 → CSS 色值）
+const BADGE_HEX: Record<string, string> = {
+  red: '#ff4d4f', volcano: '#ff7a45', blue: '#1677ff', cyan: '#13c2c2',
+  green: '#52c41a', geekblue: '#2f54eb', purple: '#722ed1',
+};
+
 function RiskAlertPanel() {
   const { data, isLoading } = useQuery({
     queryKey: ['risk-alerts'],
@@ -33,11 +39,12 @@ function RiskAlertPanel() {
   const cbAlerts = alerts.filter((a) => a.type === '可转债强赎');
 
   const renderAlertItem = (item: RiskAlert) => {
-    const levelColor = item.level === 'high' ? '#ff4d4f' : item.level === 'warning' ? '#faad14' : '#1677ff';
+    const fcKey = FORECAST_COLORS[item.forecast_type ?? ''];
+    const dotColor = fcKey ? (BADGE_HEX[fcKey] ?? fcKey) : item.level === 'high' ? '#ff4d4f' : item.level === 'warning' ? '#faad14' : '#1677ff';
     return (
       <List.Item style={{ padding: '5px 0', borderBottom: '1px solid #1a2332' }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', width: '100%' }}>
-          <Badge color={levelColor} style={{ flexShrink: 0, marginTop: 4 }} />
+          <Badge color={dotColor} style={{ flexShrink: 0, marginTop: 4 }} />
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', minWidth: 0 }}>
