@@ -3,10 +3,13 @@
 Hooks into scheduler's rt_k tick (~1.2s). Maintains a sliding window of
 index & sector snapshots. When index moves beyond threshold in any window,
 fires an anomaly event with sector-level attribution.
+
+Anomaly events are persisted to Redis so they survive process restarts.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import time as _time
 from collections import deque
@@ -30,7 +33,14 @@ WINDOWS = [
 ]
 
 MAX_HISTORY = 1200  # ~20 min at 1 tick/sec
-MAX_ANOMALIES = 50
+
+REDIS_KEY = "monitor:anomalies"
+
+
+def _redis():
+    """Lazy import to avoid circular import at module load."""
+    from app.core.redis import redis_client
+    return redis_client
 
 
 @dataclass
@@ -51,24 +61,61 @@ class AnomalyEvent:
     price_then: float
     top_sectors: list[dict] = field(default_factory=list)
 
+    def to_dict(self) -> dict:
+        return {
+            "ts": self.ts,
+            "time": _time.strftime("%H:%M:%S", _time.localtime(self.ts)),
+            "index_code": self.index_code,
+            "index_name": self.index_name,
+            "window": self.window,
+            "delta_pct": self.delta_pct,
+            "price_now": self.price_now,
+            "price_then": self.price_then,
+            "top_sectors": self.top_sectors,
+        }
+
 
 class MonitorEngine:
 
     def __init__(self):
         self._history: deque[TickRecord] = deque(maxlen=MAX_HISTORY)
-        self._anomalies: deque[AnomalyEvent] = deque(maxlen=MAX_ANOMALIES)
         self._cooldowns: dict[str, float] = {}  # "code:window" -> last fire ts
         self._today: str = ""
 
-    def on_tick(self, snapshot: dict, sector_rankings: list[dict]) -> None:
-        """Called every rt_k tick from the scheduler."""
+    def _new_day_check(self) -> None:
+        """Clear in-memory state and Redis anomalies on day change."""
         from datetime import date
         today = date.today().isoformat()
         if today != self._today:
             self._history.clear()
-            self._anomalies.clear()
             self._cooldowns.clear()
             self._today = today
+            try:
+                _redis().delete(REDIS_KEY)
+            except Exception:
+                logger.warning("failed to clear Redis anomalies on day change", exc_info=True)
+
+    def _persist_anomaly(self, event: AnomalyEvent) -> None:
+        """Append anomaly to Redis list with EOD expiry."""
+        try:
+            r = _redis()
+            r.rpush(REDIS_KEY, json.dumps(event.to_dict(), ensure_ascii=False))
+            r.expire(REDIS_KEY, 18 * 3600)  # auto-expire after 18h
+        except Exception:
+            logger.warning("failed to persist anomaly to Redis", exc_info=True)
+
+    def _load_anomalies_from_redis(self) -> list[dict]:
+        """Load all anomalies from Redis."""
+        try:
+            raw_list = _redis().lrange(REDIS_KEY, 0, -1)
+            return [json.loads(item) for item in raw_list]
+        except Exception:
+            logger.warning("failed to load anomalies from Redis", exc_info=True)
+            return []
+
+    def on_tick(self, snapshot: dict, sector_rankings: list[dict]) -> None:
+        """Called every rt_k tick from the scheduler."""
+        self._new_day_check()
 
         now = _time.time()
 
@@ -133,7 +180,7 @@ class MonitorEngine:
                     price_then=price_then,
                     top_sectors=sec_deltas[:8],
                 )
-                self._anomalies.append(event)
+                self._persist_anomaly(event)
                 self._cooldowns[cooldown_key] = now
 
                 logger.info(
@@ -197,21 +244,9 @@ class MonitorEngine:
                 sectors.append(sec_row)
             sectors.sort(key=lambda x: abs(x["pct_chg"]), reverse=True)
 
-        anomalies = []
-        for ev in reversed(self._anomalies):
-            if now - ev.ts > 3600:
-                continue
-            anomalies.append({
-                "ts": ev.ts,
-                "time": _time.strftime("%H:%M:%S", _time.localtime(ev.ts)),
-                "index_code": ev.index_code,
-                "index_name": ev.index_name,
-                "window": ev.window,
-                "delta_pct": ev.delta_pct,
-                "price_now": ev.price_now,
-                "price_then": ev.price_then,
-                "top_sectors": ev.top_sectors,
-            })
+        # Read anomalies from Redis (survives restart)
+        anomalies = self._load_anomalies_from_redis()
+        anomalies.reverse()  # newest first
 
         return {
             "ts": now,

@@ -26,6 +26,7 @@ node_modules/
 # Data
 reports/
 *.parquet
+dump.rdb
 
 # Cursor (skills are local, rules and plans are committed)
 .cursor/skills/

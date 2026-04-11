@@ -375,6 +375,23 @@ class StockST(Base):
     )
 
 
+class StockNamechange(Base):
+    """Stock name change history from Tushare namechange API."""
+    __tablename__ = "stock_namechange"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str | None] = mapped_column(String(32))
+    start_date: Mapped[str | None] = mapped_column(String(8))
+    end_date: Mapped[str | None] = mapped_column(String(8))
+    ann_date: Mapped[str | None] = mapped_column(String(8), index=True)
+    change_reason: Mapped[str | None] = mapped_column(String(32))
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "start_date", name="uq_namechange_code_start"),
+    )
+
+
 class AdjFactor(Base):
     """Daily adjustment factor from Tushare adj_factor API."""
     __tablename__ = "adj_factor"

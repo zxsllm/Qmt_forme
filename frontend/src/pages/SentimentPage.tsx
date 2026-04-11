@@ -163,25 +163,79 @@ function BoardLeadersTab({ tradeDate }: { tradeDate: string }) {
 
 // ─── Hot Money (C-Step4) ───────────────────────────────────────
 
+function fmtHmAmt(v: number | null | undefined): string {
+  if (v == null) return '-';
+  const abs = Math.abs(v);
+  if (abs >= 1e8) return (v / 1e8).toFixed(2) + '亿';
+  if (abs >= 1e4) return (v / 1e4).toFixed(0) + '万';
+  return v.toFixed(0);
+}
+
+function HotMoneyStockTable({ stocks }: { stocks: HotMoneyItem['stocks'] }) {
+  return (
+    <Table
+      dataSource={stocks} rowKey={(r) => r.ts_code} size="small" pagination={false}
+      columns={[
+        { title: '代码', dataIndex: 'ts_code', width: 90 },
+        { title: '名称', dataIndex: 'name', width: 80 },
+        { title: '买入', dataIndex: 'buy', width: 90, align: 'right',
+          render: (v: number | null) => v ? <span style={{ color: '#ef4444' }}>{fmtHmAmt(v)}</span> : '-' },
+        { title: '卖出', dataIndex: 'sell', width: 90, align: 'right',
+          render: (v: number | null) => v ? <span style={{ color: '#22c55e' }}>{fmtHmAmt(v)}</span> : '-' },
+        { title: '净买入', dataIndex: 'net', width: 100, align: 'right',
+          render: (v: number | null) => v != null
+            ? <span style={{ color: v >= 0 ? '#ef4444' : '#22c55e', fontWeight: 600 }}>{fmtHmAmt(v)}</span> : '-' },
+        { title: '方向', dataIndex: 'net', width: 60, align: 'center', key: 'dir',
+          render: (v: number | null) => {
+            if (v == null) return '-';
+            return v > 0
+              ? <Tag color="red" style={{ margin: 0 }}>买</Tag>
+              : v < 0 ? <Tag color="green" style={{ margin: 0 }}>卖</Tag>
+              : <Tag style={{ margin: 0 }}>平</Tag>;
+          },
+        },
+      ]}
+    />
+  );
+}
+
 const hotMoneyColumns: ColumnsType<HotMoneyItem> = [
-  { title: '游资名称', dataIndex: 'hm_name', width: 180, ellipsis: true },
-  { title: '操作个股', dataIndex: 'stock_count', width: 80, align: 'center' },
-  {
-    title: '买入(亿)', dataIndex: 'total_buy', width: 100, align: 'right',
-    render: (v: number | null) => v != null ? <span style={{ color: '#ef4444' }}>{(v / 1e8).toFixed(2)}</span> : '-',
+  { title: '游资名称', dataIndex: 'hm_name', width: 140, ellipsis: true,
+    render: (v: string) => <span style={{ fontWeight: 600, color: '#ffbf75' }}>{v}</span>,
+  },
+  { title: '个股', dataIndex: 'stock_count', width: 55, align: 'center',
+    sorter: (a, b) => a.stock_count - b.stock_count,
   },
   {
-    title: '卖出(亿)', dataIndex: 'total_sell', width: 100, align: 'right',
-    render: (v: number | null) => v != null ? <span style={{ color: '#22c55e' }}>{(v / 1e8).toFixed(2)}</span> : '-',
+    title: '买入', dataIndex: 'total_buy', width: 90, align: 'right',
+    sorter: (a, b) => (a.total_buy ?? 0) - (b.total_buy ?? 0),
+    render: (v: number | null) => v != null ? <span style={{ color: '#ef4444' }}>{fmtHmAmt(v)}</span> : '-',
   },
   {
-    title: '净买(亿)', dataIndex: 'total_net', width: 100, align: 'right',
+    title: '卖出', dataIndex: 'total_sell', width: 90, align: 'right',
+    render: (v: number | null) => v != null ? <span style={{ color: '#22c55e' }}>{fmtHmAmt(v)}</span> : '-',
+  },
+  {
+    title: '净买', dataIndex: 'total_net', width: 90, align: 'right',
+    sorter: (a, b) => (a.total_net ?? 0) - (b.total_net ?? 0),
+    defaultSortOrder: 'descend',
     render: (v: number | null) => v != null
-      ? <span style={{ color: v >= 0 ? '#ef4444' : '#22c55e' }}>{(v / 1e8).toFixed(2)}</span> : '-',
+      ? <span style={{ color: v >= 0 ? '#ef4444' : '#22c55e', fontWeight: 600 }}>{fmtHmAmt(v)}</span> : '-',
   },
   {
-    title: '涉及股票', dataIndex: 'stocks', width: 250, ellipsis: true,
-    render: (v: string[]) => v?.join('、') || '-',
+    title: '操作概览', dataIndex: 'stocks', ellipsis: true,
+    render: (stocks: HotMoneyItem['stocks']) => {
+      if (!stocks?.length) return '-';
+      const buys = stocks.filter(s => (s.net ?? 0) > 0);
+      const sells = stocks.filter(s => (s.net ?? 0) < 0);
+      return (
+        <span style={{ fontSize: 12 }}>
+          {buys.length > 0 && <span style={{ color: '#ef4444' }}>买 {buys.map(s => s.name).join('/')}</span>}
+          {buys.length > 0 && sells.length > 0 && <span style={{ color: '#555' }}> | </span>}
+          {sells.length > 0 && <span style={{ color: '#22c55e' }}>卖 {sells.map(s => s.name).join('/')}</span>}
+        </span>
+      );
+    },
   },
 ];
 
@@ -191,14 +245,65 @@ function HotMoneyTab({ tradeDate }: { tradeDate: string }) {
     queryFn: () => api.hotMoneySignal(tradeDate),
   });
 
+  const items = data?.data ?? [];
+  const totalNet = items.reduce((s, r) => s + (r.total_net ?? 0), 0);
+  const totalBuy = items.reduce((s, r) => s + (r.total_buy ?? 0), 0);
+  const totalSell = items.reduce((s, r) => s + (r.total_sell ?? 0), 0);
+  const netBuyCount = items.filter(r => (r.total_net ?? 0) > 0).length;
+  const netSellCount = items.filter(r => (r.total_net ?? 0) < 0).length;
+
   return (
-    <div>
-      <div style={{ color: '#93a9bc', fontSize: 12, marginBottom: 8 }}>
-        {data?.trade_date ? `数据日期: ${data.trade_date}` : ''} — 游资按买入金额排序
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div className="flex items-center" style={{ gap: 8 }}>
+        <span style={{ color: '#93a9bc', fontSize: 12 }}>
+          {data?.trade_date ? `数据日期: ${data.trade_date}` : ''}
+        </span>
+        <span style={{ color: '#93a9bc', fontSize: 12 }}>共 {items.length} 家游资</span>
       </div>
-      <Table columns={hotMoneyColumns} dataSource={data?.data ?? []} rowKey="hm_name"
+
+      <Row gutter={10}>
+        <Col span={4}>
+          <Card size="small" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)' }}>
+            <Statistic title="游资总买入" value={+(totalBuy / 1e8).toFixed(1)} suffix="亿" valueStyle={{ fontSize: 17, color: '#ef4444' }} />
+          </Card>
+        </Col>
+        <Col span={4}>
+          <Card size="small" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)' }}>
+            <Statistic title="游资总卖出" value={+(totalSell / 1e8).toFixed(1)} suffix="亿" valueStyle={{ fontSize: 17, color: '#22c55e' }} />
+          </Card>
+        </Col>
+        <Col span={4}>
+          <Card size="small" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)' }}>
+            <Statistic title="游资净买入" value={+(totalNet / 1e8).toFixed(1)} suffix="亿"
+              valueStyle={{ fontSize: 17, color: totalNet >= 0 ? '#ef4444' : '#22c55e', fontWeight: 700 }} />
+          </Card>
+        </Col>
+        <Col span={4}>
+          <Card size="small" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)' }}>
+            <Statistic title="净买入游资" value={netBuyCount} suffix="家" valueStyle={{ fontSize: 17, color: '#ef4444' }} />
+          </Card>
+        </Col>
+        <Col span={4}>
+          <Card size="small" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)' }}>
+            <Statistic title="净卖出游资" value={netSellCount} suffix="家" valueStyle={{ fontSize: 17, color: '#22c55e' }} />
+          </Card>
+        </Col>
+        <Col span={4}>
+          <Card size="small" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)' }}>
+            <Statistic title="活跃游资" value={items.length} suffix="家" valueStyle={{ fontSize: 17, color: '#6bc7ff' }} />
+          </Card>
+        </Col>
+      </Row>
+
+      <Table<HotMoneyItem>
+        columns={hotMoneyColumns} dataSource={items} rowKey="hm_name"
         size="small" loading={isLoading} pagination={{ pageSize: 20, size: 'small' }}
-        locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无游资数据" /> }} />
+        locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无游资数据" /> }}
+        expandable={{
+          expandedRowRender: (record) => <HotMoneyStockTable stocks={record.stocks} />,
+          rowExpandable: (record) => record.stocks?.length > 0,
+        }}
+      />
     </div>
   );
 }
@@ -597,19 +702,31 @@ const limitStepColumns: ColumnsType<LimitStepItem> = [
   { title: '名称', dataIndex: 'name', width: 90 },
 ];
 
+function fmtAmt(v: number | null | undefined): string {
+  if (v == null) return '-';
+  const abs = Math.abs(v);
+  if (abs >= 1e8) return (v / 1e8).toFixed(2) + '亿';
+  return (v / 1e4).toFixed(0) + '万';
+}
+
 const dragonColumns: ColumnsType<DragonTigerItem> = [
-  { title: '代码', dataIndex: 'ts_code', width: 100 },
-  { title: '名称', dataIndex: 'name', width: 90 },
+  { title: '代码', dataIndex: 'ts_code', width: 90 },
+  { title: '名称', dataIndex: 'name', width: 80 },
   {
-    title: '涨跌幅', dataIndex: 'pct_change', width: 80, align: 'right',
-    render: (v: number | null) => v != null ? <span style={{ color: v >= 0 ? '#ef4444' : '#22c55e' }}>{v.toFixed(2)}%</span> : '-',
+    title: '涨跌幅', dataIndex: 'pct_change', width: 72, align: 'right',
+    sorter: (a, b) => (a.pct_change ?? 0) - (b.pct_change ?? 0),
+    render: (v: number | null) => v != null ? <span style={{ color: v >= 0 ? '#ef4444' : '#22c55e', fontWeight: 600 }}>{v >= 0 ? '+' : ''}{v.toFixed(2)}%</span> : '-',
   },
-  { title: '成交额(万)', dataIndex: 'amount', width: 100, align: 'right', render: (v: number | null) => v != null ? (v / 10000).toFixed(0) : '-' },
-  { title: '龙虎买入(万)', dataIndex: 'l_buy', width: 110, align: 'right', render: (v: number | null) => v != null ? <span style={{ color: '#ef4444' }}>{(v / 10000).toFixed(0)}</span> : '-' },
-  { title: '龙虎卖出(万)', dataIndex: 'l_sell', width: 110, align: 'right', render: (v: number | null) => v != null ? <span style={{ color: '#22c55e' }}>{(v / 10000).toFixed(0)}</span> : '-' },
-  { title: '净额(万)', dataIndex: 'net_amount', width: 100, align: 'right', render: (v: number | null) => v != null ? <span style={{ color: v >= 0 ? '#ef4444' : '#22c55e' }}>{(v / 10000).toFixed(0)}</span> : '-' },
-  { title: '净买率', dataIndex: 'net_rate', width: 80, align: 'right', render: (v: number | null) => v != null ? `${v.toFixed(1)}%` : '-' },
-  { title: '上榜原因', dataIndex: 'reason', ellipsis: true },
+  { title: '成交额', dataIndex: 'amount', width: 85, align: 'right', render: (v: number | null) => fmtAmt(v) },
+  { title: '买入', dataIndex: 'l_buy', width: 85, align: 'right', render: (v: number | null) => <span style={{ color: '#ef4444' }}>{fmtAmt(v)}</span> },
+  { title: '卖出', dataIndex: 'l_sell', width: 85, align: 'right', render: (v: number | null) => <span style={{ color: '#22c55e' }}>{fmtAmt(v)}</span> },
+  { title: '净额', dataIndex: 'net_amount', width: 85, align: 'right', sorter: (a, b) => (a.net_amount ?? 0) - (b.net_amount ?? 0),
+    render: (v: number | null) => v != null ? <span style={{ color: v >= 0 ? '#ef4444' : '#22c55e', fontWeight: 600 }}>{fmtAmt(v)}</span> : '-' },
+  { title: '净买率', dataIndex: 'net_rate', width: 68, align: 'right',
+    render: (v: number | null) => v != null ? <span style={{ color: v >= 0 ? '#ef4444' : '#22c55e' }}>{v.toFixed(1)}%</span> : '-' },
+  { title: '机构净额', dataIndex: 'inst_net', width: 85, align: 'right', sorter: (a, b) => (a.inst_net ?? 0) - (b.inst_net ?? 0),
+    render: (v: number) => v ? <Tag color={v > 0 ? 'red' : 'green'} style={{ margin: 0 }}>{fmtAmt(v)}</Tag> : <span style={{ color: '#555' }}>-</span> },
+  { title: '上榜原因', dataIndex: 'reason', ellipsis: true, width: 160 },
 ];
 
 const hotColumns: ColumnsType<HotListItem> = [
@@ -660,47 +777,129 @@ function LimitStepTab({ tradeDate }: { tradeDate: string }) {
   );
 }
 
-function DragonTigerTab({ tradeDate }: { tradeDate: string }) {
-  const { data, isLoading } = useQuery({ queryKey: ['dragon-tiger', tradeDate], queryFn: () => api.dragonTiger(tradeDate), refetchInterval: 60_000 });
-  const { data: topInstData, isLoading: instLoading } = useQuery({
-    queryKey: ['top-inst', tradeDate],
-    queryFn: () => api.getTopInst(tradeDate),
-    staleTime: 300_000,
+function SeatDetail({ tsCode, tradeDate }: { tsCode: string; tradeDate: string }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ['dragon-seats', tsCode, tradeDate],
+    queryFn: () => api.dragonTigerSeats(tsCode, tradeDate),
+    staleTime: 600_000,
   });
+  if (isLoading) return <Spin size="small" />;
+  const seatCols = [
+    { title: '席位', dataIndex: 'exalter', ellipsis: true,
+      render: (v: string, r: { seat_type: string; hm_name?: string | null }) => {
+        const tag = r.seat_type === '机构'
+          ? <Tag color="volcano" style={{ margin: '0 4px 0 0', fontSize: 10, lineHeight: '16px', padding: '0 4px' }}>机构</Tag>
+          : r.seat_type === '游资'
+            ? <Tag color="orange" style={{ margin: '0 4px 0 0', fontSize: 10, lineHeight: '16px', padding: '0 4px' }}>游资</Tag>
+            : null;
+        const hmLabel = r.hm_name ? <span style={{ color: '#ffbf75', fontSize: 11 }}> ({r.hm_name})</span> : null;
+        return <span>{tag}{v}{hmLabel}</span>;
+      },
+    },
+    { title: '买入', dataIndex: 'buy', width: 90, align: 'right' as const,
+      render: (v: number | null) => v ? <span style={{ color: '#ef4444' }}>{fmtAmt(v)}</span> : '-' },
+    { title: '卖出', dataIndex: 'sell', width: 90, align: 'right' as const,
+      render: (v: number | null) => v ? <span style={{ color: '#22c55e' }}>{fmtAmt(v)}</span> : '-' },
+    { title: '净买入', dataIndex: 'net_buy', width: 100, align: 'right' as const,
+      render: (v: number | null) => v != null ? <span style={{ color: v >= 0 ? '#ef4444' : '#22c55e', fontWeight: 600 }}>{fmtAmt(v)}</span> : '-' },
+  ];
+  const buySeats = data?.buy_seats ?? [];
+  const sellSeats = data?.sell_seats ?? [];
+  const buyTotal = buySeats.reduce((s, r) => s + (r.buy ?? 0), 0);
+  const sellTotal = sellSeats.reduce((s, r) => s + (r.sell ?? 0), 0);
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <div>
-        <div style={{ color: '#93a9bc', fontSize: 12, marginBottom: 8 }}>{data?.trade_date ? `数据日期: ${data.trade_date}` : ''}</div>
-        <Table columns={dragonColumns} dataSource={data?.data ?? []} rowKey={(r) => `${r.ts_code}-dragon`}
-          size="small" loading={isLoading} pagination={{ pageSize: 20, size: 'small' }}
-          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无龙虎榜数据" /> }} />
+    <div style={{ display: 'flex', gap: 16, padding: '4px 0' }}>
+      <div style={{ flex: 1 }}>
+        <div style={{ color: '#ef4444', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+          买方席位 TOP5 <span style={{ fontWeight: 400, color: '#93a9bc' }}>合计 {fmtAmt(buyTotal)}</span>
+        </div>
+        <Table dataSource={buySeats.slice(0, 5)} columns={seatCols} rowKey={(_, i) => `b${i}`}
+          size="small" pagination={false} showHeader={false} />
       </div>
-      <div>
-        <div style={{ color: '#93a9bc', fontSize: 13, fontWeight: 600, marginBottom: 8 }}>机构交易明细</div>
-        <Table
-          dataSource={((topInstData?.data ?? []) as Record<string, unknown>[])}
-          rowKey={(_, i) => String(i)}
-          size="small"
-          loading={instLoading}
-          pagination={{ pageSize: 15, size: 'small' }}
-          scroll={{ x: 700 }}
-          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无机构交易数据" /> }}
-          columns={[
-            { title: '日期', dataIndex: 'trade_date', width: 85 },
-            { title: '代码', dataIndex: 'ts_code', width: 90 },
-            { title: '营业部', dataIndex: 'exalter', width: 140, ellipsis: true },
-            { title: '方向', dataIndex: 'side', width: 50,
-              render: (v: string) => <Tag color={v === '买入' || v === '0' ? 'red' : 'green'}>{v === '0' ? '买入' : v === '1' ? '卖出' : v}</Tag> },
-            { title: '买入(万)', dataIndex: 'buy', width: 90, align: 'right',
-              render: (v: number) => v ? (v / 1e4).toFixed(0) : '-' },
-            { title: '卖出(万)', dataIndex: 'sell', width: 90, align: 'right',
-              render: (v: number) => v ? (v / 1e4).toFixed(0) : '-' },
-            { title: '净买入(万)', dataIndex: 'net_buy', width: 100, align: 'right',
-              render: (v: number) => v ? <span style={{ color: v >= 0 ? '#ef4444' : '#22c55e' }}>{(v / 1e4).toFixed(0)}</span> : '-' },
-            { title: '原因', dataIndex: 'reason', ellipsis: true },
-          ]}
-        />
+      <div style={{ flex: 1 }}>
+        <div style={{ color: '#22c55e', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+          卖方席位 TOP5 <span style={{ fontWeight: 400, color: '#93a9bc' }}>合计 {fmtAmt(sellTotal)}</span>
+        </div>
+        <Table dataSource={sellSeats.slice(0, 5)} columns={seatCols} rowKey={(_, i) => `s${i}`}
+          size="small" pagination={false} showHeader={false} />
       </div>
+    </div>
+  );
+}
+
+function DragonTigerTab({ tradeDate }: { tradeDate: string }) {
+  const { data, isLoading } = useQuery({ queryKey: ['dragon-tiger', tradeDate], queryFn: () => api.dragonTiger(tradeDate, 200), refetchInterval: 60_000 });
+  const items = data?.data ?? [];
+
+  // Summary cards
+  const totalBuy = items.reduce((s, r) => s + (r.l_buy ?? 0), 0);
+  const totalSell = items.reduce((s, r) => s + (r.l_sell ?? 0), 0);
+  const totalNet = totalBuy - totalSell;
+  const instNetTotal = items.reduce((s, r) => s + (r.inst_net ?? 0), 0);
+  const instBuyCount = items.filter(r => (r.inst_net ?? 0) > 0).length;
+  const instSellCount = items.filter(r => (r.inst_net ?? 0) < 0).length;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {/* Summary */}
+      <div>
+        <div className="flex items-center" style={{ gap: 8, marginBottom: 8 }}>
+          <span style={{ color: '#93a9bc', fontSize: 12 }}>{data?.trade_date ? `数据日期: ${data.trade_date}` : ''}</span>
+          <span style={{ color: '#93a9bc', fontSize: 12 }}>共 {items.length} 只</span>
+        </div>
+        <Row gutter={10}>
+          <Col span={4}>
+            <Card size="small" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)' }}>
+              <Statistic title="龙虎买入" value={+(totalBuy / 1e8).toFixed(1)} suffix="亿" valueStyle={{ fontSize: 18, color: '#ef4444' }} />
+            </Card>
+          </Col>
+          <Col span={4}>
+            <Card size="small" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)' }}>
+              <Statistic title="龙虎卖出" value={+(totalSell / 1e8).toFixed(1)} suffix="亿" valueStyle={{ fontSize: 18, color: '#22c55e' }} />
+            </Card>
+          </Col>
+          <Col span={4}>
+            <Card size="small" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)' }}>
+              <Statistic title="龙虎净额" value={+(totalNet / 1e8).toFixed(1)} suffix="亿"
+                valueStyle={{ fontSize: 18, color: totalNet >= 0 ? '#ef4444' : '#22c55e', fontWeight: 700 }} />
+            </Card>
+          </Col>
+          <Col span={4}>
+            <Card size="small" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)' }}>
+              <Statistic title="机构净额" value={+(instNetTotal / 1e8).toFixed(1)} suffix="亿"
+                valueStyle={{ fontSize: 18, color: instNetTotal >= 0 ? '#ef4444' : '#22c55e', fontWeight: 700 }} />
+            </Card>
+          </Col>
+          <Col span={4}>
+            <Card size="small" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)' }}>
+              <Statistic title="机构净买" value={instBuyCount} suffix="只" valueStyle={{ fontSize: 18, color: '#ef4444' }} />
+            </Card>
+          </Col>
+          <Col span={4}>
+            <Card size="small" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)' }}>
+              <Statistic title="机构净卖" value={instSellCount} suffix="只" valueStyle={{ fontSize: 18, color: '#22c55e' }} />
+            </Card>
+          </Col>
+        </Row>
+      </div>
+
+      {/* Main table with expandable seat detail */}
+      <Table<DragonTigerItem>
+        columns={dragonColumns}
+        dataSource={items}
+        rowKey={(r) => `${r.ts_code}-dragon`}
+        size="small"
+        loading={isLoading}
+        pagination={{ pageSize: 30, size: 'small' }}
+        scroll={{ x: 900 }}
+        locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无龙虎榜数据" /> }}
+        expandable={{
+          expandedRowRender: (record) => (
+            <SeatDetail tsCode={record.ts_code} tradeDate={record.trade_date} />
+          ),
+          rowExpandable: () => true,
+        }}
+      />
     </div>
   );
 }

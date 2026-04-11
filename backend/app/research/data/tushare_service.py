@@ -77,6 +77,10 @@ class TushareService:
         kwargs.setdefault("fields", "ts_code,name,trade_date,type,type_name")
         return self.query("stock_st", **kwargs)
 
+    def namechange(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault("fields", "ts_code,name,start_date,end_date,ann_date,change_reason")
+        return self.query("namechange", **kwargs)
+
     # ── 行情数据 ─────────────────────────────────────────────
 
     def daily(self, **kwargs) -> pd.DataFrame:
@@ -233,6 +237,14 @@ class TushareService:
             "operate_profit,total_profit,income_tax,n_income,n_income_attr_p,basic_eps",
         )
         return self.query("income", **kwargs)
+
+    def dividend(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "ts_code,end_date,ann_date,div_proc,stk_div,cash_div,cash_div_tax,"
+            "record_date,ex_date,pay_date",
+        )
+        return self.query("dividend", **kwargs)
 
     def forecast(self, **kwargs) -> pd.DataFrame:
         kwargs.setdefault(

@@ -266,35 +266,52 @@ async def continuation_analysis(session: AsyncSession, ts_code: str) -> dict:
 
 
 async def hot_money_signal(session: AsyncSession, trade_date: str = "") -> dict:
-    """Get hot-money activity signals for a given day."""
+    """Get hot-money activity: aggregated per trader + per-stock detail."""
     from datetime import datetime
     if not trade_date:
         trade_date = datetime.now().strftime("%Y%m%d")
 
+    # Aggregated summary per trader
     r = await session.execute(text("""
         SELECT hm_name,
                COUNT(DISTINCT ts_code) as stock_count,
                SUM(buy_amount) as total_buy,
                SUM(sell_amount) as total_sell,
-               SUM(net_amount) as total_net,
-               ARRAY_AGG(DISTINCT ts_name) as stocks
+               SUM(net_amount) as total_net
         FROM hm_detail
         WHERE trade_date = :td
         GROUP BY hm_name
         ORDER BY SUM(buy_amount) DESC NULLS LAST
-        LIMIT 20
+        LIMIT 30
     """), {"td": trade_date})
+
+    # Per-stock detail for all traders
+    detail_r = await session.execute(text("""
+        SELECT hm_name, ts_code, ts_name, buy_amount, sell_amount, net_amount
+        FROM hm_detail
+        WHERE trade_date = :td
+        ORDER BY hm_name, net_amount DESC NULLS LAST
+    """), {"td": trade_date})
+
+    # Build detail map: hm_name -> list of stock trades
+    detail_map: dict[str, list] = {}
+    for hm_name, ts_code, ts_name, buy, sell, net in detail_r.fetchall():
+        detail_map.setdefault(hm_name, []).append({
+            "ts_code": ts_code, "name": ts_name,
+            "buy": buy, "sell": sell, "net": net,
+        })
 
     data = []
     for row in r.fetchall():
-        stocks_arr = row[5] if row[5] else []
+        hm_name = row[0]
+        stocks = detail_map.get(hm_name, [])
         data.append({
-            "hm_name": row[0],
+            "hm_name": hm_name,
             "stock_count": row[1],
             "total_buy": row[2],
             "total_sell": row[3],
             "total_net": row[4],
-            "stocks": stocks_arr[:5],
+            "stocks": stocks,
         })
 
     return {"trade_date": trade_date, "data": _clean(data)}

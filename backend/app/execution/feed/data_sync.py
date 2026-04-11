@@ -275,13 +275,69 @@ def sync_st_list(conn, svc: TushareService, trade_date: str) -> int:
     return len(df)
 
 
+def sync_namechange(conn, svc: TushareService) -> int:
+    """Pull recent namechange records (last 90 days by ann_date) for ST detection."""
+    start = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
+    df = svc.namechange(start_date=start)
+    if df is None or df.empty:
+        return 0
+    df = df.where(df.notnull(), None)
+    df = df.drop_duplicates(subset=["ts_code", "start_date"], keep="first")
+    with conn.cursor() as cur:
+        cols, vals = _df_to_values(df)
+        execute_values(
+            cur,
+            f"INSERT INTO stock_namechange ({','.join(cols)}) VALUES %s "
+            "ON CONFLICT (ts_code, start_date) DO UPDATE SET "
+            "name=EXCLUDED.name, end_date=EXCLUDED.end_date, "
+            "ann_date=EXCLUDED.ann_date, change_reason=EXCLUDED.change_reason",
+            vals,
+        )
+    conn.commit()
+    logger.info("sync: stock_namechange +%d rows (since %s)", len(df), start)
+    return len(df)
+
+
+def sync_dividend(conn, svc: TushareService) -> int:
+    """Pull dividend data for recent 4 years (实施 records only)."""
+    now = datetime.now()
+    total = 0
+    for year in range(now.year - 3, now.year + 1):
+        end_date = f"{year}1231"
+        try:
+            _time.sleep(1.0)
+            df = svc.dividend(end_date=end_date)
+            if df is None or df.empty:
+                continue
+            # Keep only 实施 records (executed dividends) since 3 years ago
+            df = df[(df["div_proc"] == "实施") & (df["end_date"] >= str(now.year - 3) + "0101")]
+            if df.empty:
+                continue
+            df = df.drop_duplicates(subset=["ts_code", "end_date", "div_proc"], keep="last")
+            cols, vals = _df_to_values(df)
+            _auto_add_columns(conn, "dividend", cols, df)
+            sql = (
+                f"INSERT INTO dividend ({','.join(cols)}) VALUES %s "
+                f"ON CONFLICT ON CONSTRAINT uq_dividend_code_date_proc DO NOTHING"
+            )
+            with conn.cursor() as cur:
+                execute_values(cur, sql, vals)
+            conn.commit()
+            total += len(df)
+        except Exception:
+            conn.rollback()
+            logger.warning("sync dividend(%s) failed", end_date, exc_info=True)
+    if total:
+        logger.info("sync: dividend +%d rows", total)
+    return total
+
+
 def sync_forecast(conn, svc: TushareService) -> int:
     """Pull forecast by ann_date for recent days (including tomorrow for evening announcements)."""
-    today = datetime.now().strftime("%Y%m%d")
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
-    tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y%m%d")
+    today = datetime.now()
+    dates = [(today + timedelta(days=d)).strftime("%Y%m%d") for d in range(1, -7, -1)]
     total = 0
-    for ann_d in [tomorrow, today, yesterday]:
+    for ann_d in dates:
         try:
             df = svc.forecast(ann_date=ann_d)
             if df is None or df.empty:
@@ -842,7 +898,7 @@ def sync_margin(conn, svc: TushareService, trade_date: str) -> int:
     for d in dates_to_try:
         with conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM margin WHERE trade_date = %s", (d,))
-            if cur.fetchone()[0] > 0:
+            if cur.fetchone()[0] >= 3:
                 return 0
         df = svc.margin(trade_date=d)
         if df is not None and not df.empty:
@@ -1027,7 +1083,9 @@ def run_post_market_sync(trade_date: str) -> dict[str, bool]:
         _run("daily_bars", sync_daily_bars, conn, svc)
         _run("stk_limit", sync_stk_limit, conn, svc, trade_date)
         _run("st_list", sync_st_list, conn, svc, trade_date)
+        _run("namechange", sync_namechange, conn, svc)
         _run("forecast", sync_forecast, conn, svc)
+        _run("dividend", sync_dividend, conn, svc)
         _run("disclosure", sync_disclosure, conn, svc)
         _run("limit_board", sync_limit_board, conn, svc, trade_date)
         _run("cb", sync_cb, conn, svc, trade_date)
