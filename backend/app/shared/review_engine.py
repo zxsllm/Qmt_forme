@@ -129,7 +129,7 @@ def build_market_feature_vector(review_data: dict) -> list[float]:
     [5-11]  情绪指标 (7)
     [12-21] 板块轮动 — Top5 涨幅+资金流 (10)
     [22-25] 资金面 (4)
-    [26-29] 技术面 — 预留 (4)
+    [26-29] 技术面 — 上证MA位置+波动率 (4)
     [30-35] 策略适配 — 预留 (6)
     """
     g = review_data.get
@@ -160,11 +160,11 @@ def build_market_feature_vector(review_data: dict) -> list[float]:
         normalize(g("hot_money_net"),   -50,   50),      # 24 游资净买入(亿)
         normalize(g("inst_net_buy"),    -100,  100),     # 25 机构净买入(亿)
 
-        # ── [26-29] 技术面 — 预留，后续接入指数MA位置+波动率 ──
-        0.5,                                             # 26 指数vs MA5
-        0.5,                                             # 27 指数vs MA20
-        0.5,                                             # 28 指数vs MA60
-        0.5,                                             # 29 波动率
+        # ── [26-29] 技术面 — 上证指数MA位置+波动率 ──
+        normalize(g("sh_close_vs_ma5"),   -5,   5),      # 26 上证 close vs MA5 (%)
+        normalize(g("sh_close_vs_ma20"),  -10,  10),     # 27 上证 close vs MA20 (%)
+        normalize(g("sh_close_vs_ma60"),  -15,  15),     # 28 上证 close vs MA60 (%)
+        normalize(g("sh_volatility_20d"), 0,    5),      # 29 近20日波动率(%)
 
         # ── [30-35] 策略适配 — 预留，后续接入首板成功率等 ──
         0.5,                                             # 30 首板成功率
@@ -190,7 +190,7 @@ def build_env_feature_vector(plan_data: dict) -> list[float]:
     ----------
     [0-3]   外盘隔夜涨跌 (4)
     [4-7]   昨日情绪 (4)
-    [8-11]  策略预判 (4)
+    [8-11]  客观市场特征 — 涨跌停比/成交额变化/两融/外盘 (4)
     [12-15] 预留 (4)
     """
     g = plan_data.get
@@ -208,11 +208,11 @@ def build_env_feature_vector(plan_data: dict) -> list[float]:
         normalize(g("prev_seal_rate"),       0,  100),   # 6  昨日封板率%
         normalize(g("prev_up_down_ratio"),   0.2, 5.0),  # 7  昨日涨跌比
 
-        # ── [8-11] 策略预判 ──
-        temp_to_float(g("predicted_temperature")),       # 8  预判温度
-        direction_to_float(g("predicted_direction")),    # 9  预判方向
-        normalize(g("confidence_score"),     0,  100),   # 10 信心分
-        _strategy_weight_bias(g("strategy_weights_json")),  # 11 策略倾向
+        # ── [8-11] 客观市场特征（替代自引用的策略预判） ──
+        normalize(g("prev_limit_up_down_ratio"), 0, 10), # 8  昨日涨停/跌停比
+        normalize(g("prev_amount_chg_pct"), -30, 30),    # 9  昨日成交额环比变化%
+        normalize(g("margin_net_buy_dir"),  -1,  1),     # 10 两融净买入方向(-1空/0平/1多)
+        normalize(g("overnight_index_pct"), -3,  3),     # 11 外盘综合涨跌%
 
         # ── [12-15] 预留 ──
         0.5,                                             # 12

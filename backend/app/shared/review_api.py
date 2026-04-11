@@ -147,6 +147,42 @@ async def _get_sector_ranking(session: AsyncSession, trade_date: str,
 
 
 # ---------------------------------------------------------------------------
+# Helper: 为龙头股/关注股补充 MA 位置信息
+# ---------------------------------------------------------------------------
+
+async def _enrich_leaders_with_ma(
+    session: AsyncSession, leaders: dict
+) -> dict:
+    """为 board_leader 返回的龙头股列表补充 MA5/MA10/MA20 位置数据。
+
+    方便 AI 判断龙头股当前处于均线之上还是之下。
+    """
+    from app.shared.tech_signal import support_resistance
+
+    stocks = leaders.get("data", []) if isinstance(leaders, dict) else []
+    if not stocks:
+        return leaders
+
+    # 只为前 10 只龙头股计算（避免过多查询）
+    for stock in stocks[:10]:
+        code = stock.get("ts_code")
+        if not code:
+            continue
+        try:
+            sr = await support_resistance(session, code, days=60)
+            sr_data = sr.get("data")
+            if sr_data:
+                stock["ma5"] = sr_data.get("ma5")
+                stock["ma10"] = sr_data.get("ma10")
+                stock["ma20"] = sr_data.get("ma20")
+                stock["position_pct"] = sr_data.get("position_pct")
+        except Exception:
+            pass  # 个别股票查询失败不影响整体
+
+    return leaders
+
+
+# ---------------------------------------------------------------------------
 # Main aggregation: collect all review data for a given trade_date
 # ---------------------------------------------------------------------------
 
@@ -171,6 +207,9 @@ async def aggregate_review_data(session: AsyncSession, trade_date: str) -> dict:
     index_summary = await _get_index_summary(session, trade_date)
     breadth = await _get_market_breadth(session, trade_date)
     sectors = await _get_sector_ranking(session, trade_date)
+
+    # Task 1: 为龙头股补充 MA 位置，辅助价格锚点分析
+    leaders = await _enrich_leaders_with_ma(session, leaders)
 
     return {
         "trade_date": trade_date,
@@ -239,11 +278,10 @@ async def save_review(payload: dict = Body(...)):
         "strategy_switch_signal",
     }
 
-    # Filter payload to only allowed columns
+    # Filter payload: only include non-None allowed columns
     cols = {}
     for k, v in payload.items():
-        if k in allowed_cols:
-            # Serialize dicts/lists to JSON strings for Text columns
+        if k in allowed_cols and v is not None:
             if isinstance(v, (dict, list)):
                 cols[k] = json.dumps(v, ensure_ascii=False)
             else:
@@ -255,12 +293,13 @@ async def save_review(payload: dict = Body(...)):
     # Build dynamic INSERT ... ON CONFLICT DO UPDATE
     col_names = list(cols.keys())
     placeholders = [f":{c}" for c in col_names]
+    # COALESCE: only overwrite if new value is non-null, else keep existing
     update_set = ", ".join(
-        f"{c} = EXCLUDED.{c}" for c in col_names if c != "trade_date"
+        f"{c} = COALESCE(EXCLUDED.{c}, daily_review.{c})"
+        for c in col_names if c != "trade_date"
     )
 
     # Add vector column if available
-    vector_clause = ""
     if vector_val is not None:
         col_names.append("market_feature_vector")
         placeholders.append(":mvec")
@@ -388,6 +427,11 @@ async def get_review_history(
                    limit_up_count, limit_down_count, broken_count,
                    seal_rate, max_board, up_count, down_count, up_down_ratio,
                    margin_balance, margin_net_buy,
+                   top_sectors_json, bottom_sectors_json, dragon_stocks_json,
+                   hot_money_json, limit_ladder_json, risk_alerts_json,
+                   market_summary, sector_analysis, sentiment_narrative,
+                   board_play_summary, swing_trade_summary, value_invest_summary,
+                   strategy_conclusion, risk_summary,
                    dominant_strategy, strategy_switch_signal,
                    created_at
             FROM daily_review
@@ -403,6 +447,11 @@ async def get_review_history(
         "limit_up_count", "limit_down_count", "broken_count",
         "seal_rate", "max_board", "up_count", "down_count", "up_down_ratio",
         "margin_balance", "margin_net_buy",
+        "top_sectors_json", "bottom_sectors_json", "dragon_stocks_json",
+        "hot_money_json", "limit_ladder_json", "risk_alerts_json",
+        "market_summary", "sector_analysis", "sentiment_narrative",
+        "board_play_summary", "swing_trade_summary", "value_invest_summary",
+        "strategy_conclusion", "risk_summary",
         "dominant_strategy", "strategy_switch_signal",
         "created_at",
     ]

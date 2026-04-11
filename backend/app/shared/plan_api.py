@@ -20,6 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import async_session
+from app.shared.data.data_loader import DataLoader
 
 logger = logging.getLogger(__name__)
 
@@ -238,6 +239,167 @@ async def _get_key_events(session: AsyncSession, trade_date: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Helper: 个股价格锚点（MA / 支撑阻力 / 涨跌停价）
+# ---------------------------------------------------------------------------
+
+async def _get_price_anchors(
+    session: AsyncSession, ts_codes: list[str], trade_date: str
+) -> list[dict]:
+    """为关注个股计算价格锚点，供 AI 生成具体 target_price / stop_loss。
+
+    每只股票返回: close, ma5, ma10, ma20, ma60, support/resistance,
+    up_limit, down_limit, period_high, period_low。
+    """
+    from app.shared.tech_signal import support_resistance
+
+    loader = DataLoader(session)
+    anchors = []
+    for code in ts_codes:
+        sr = await support_resistance(session, code, days=60)
+        sr_data = sr.get("data") or {}
+
+        # 涨跌停价
+        limit_info = await loader.stk_limit(code, trade_date)
+        up_limit = limit_info["up_limit"] if limit_info else None
+        down_limit = limit_info["down_limit"] if limit_info else None
+
+        # 补算 ma60（support_resistance 只算到 ma20）
+        ma60 = None
+        r = await session.execute(text("""
+            SELECT close FROM stock_daily
+            WHERE ts_code = :code ORDER BY trade_date DESC LIMIT 60
+        """), {"code": code})
+        closes = [row[0] for row in r.fetchall() if row[0] is not None]
+        if len(closes) >= 60:
+            ma60 = round(sum(closes[:60]) / 60, 2)
+
+        anchors.append({
+            "ts_code": code,
+            "close": sr_data.get("current_close"),
+            "ma5": sr_data.get("ma5"),
+            "ma10": sr_data.get("ma10"),
+            "ma20": sr_data.get("ma20"),
+            "ma60": ma60,
+            "support_levels": sr_data.get("support", []),
+            "resistance_levels": sr_data.get("resistance", []),
+            "up_limit": _clean_float(up_limit),
+            "down_limit": _clean_float(down_limit),
+            "period_high": sr_data.get("period_high"),
+            "period_low": sr_data.get("period_low"),
+        })
+    return anchors
+
+
+# ---------------------------------------------------------------------------
+# Helper: 历史预判回溯统计（学习闭环）
+# ---------------------------------------------------------------------------
+
+async def _get_retrospect_summary(
+    session: AsyncSession, trade_date: str, lookback: int = 10
+) -> dict:
+    """获取近 N 次已回溯的预判记录，计算准确率统计。
+
+    用于注入 prompt，让 AI 参考自身历史预判偏差做适度校正。
+    """
+    r = await session.execute(text("""
+        SELECT trade_date, predicted_direction, predicted_temperature,
+               actual_result, accuracy_score, retrospect_note
+        FROM daily_plan
+        WHERE trade_date < :td AND actual_result IS NOT NULL
+        ORDER BY trade_date DESC
+        LIMIT :lookback
+    """), {"td": trade_date, "lookback": lookback})
+    rows = r.fetchall()
+    if not rows:
+        return {"stats": None, "recent_predictions": []}
+
+    cols = ["trade_date", "predicted_direction", "predicted_temperature",
+            "actual_result", "accuracy_score", "retrospect_note"]
+    predictions = []
+    scores = []
+    correct = partial = wrong = 0
+    for row in rows:
+        rec = dict(zip(cols, row))
+        predictions.append(rec)
+        if rec["accuracy_score"] is not None:
+            scores.append(float(rec["accuracy_score"]))
+        result = rec["actual_result"]
+        if result == "正确":
+            correct += 1
+        elif result == "部分正确":
+            partial += 1
+        elif result == "错误":
+            wrong += 1
+
+    total = len(rows)
+    avg_score = round(sum(scores) / len(scores), 1) if scores else None
+
+    # 判断近期系统性偏差：连续同向预判
+    directions = [p["predicted_direction"] for p in predictions if p["predicted_direction"]]
+    recent_bias = None
+    if len(directions) >= 3 and len(set(directions[:3])) == 1:
+        # 最近3次预判方向一致，检查实际结果是否相反
+        actual_results = [p["actual_result"] for p in predictions[:3]]
+        if actual_results.count("错误") >= 2:
+            recent_bias = f"连续预判{directions[0]}但多数错误，可能存在{directions[0]}偏差"
+
+    return {
+        "stats": {
+            "total_count": total,
+            "correct_count": correct,
+            "partial_count": partial,
+            "wrong_count": wrong,
+            "accuracy_rate": round(correct / total * 100, 1) if total else 0,
+            "avg_score": avg_score,
+            "recent_bias": recent_bias,
+        },
+        "recent_predictions": predictions,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Helper: 昨日计划执行回顾
+# ---------------------------------------------------------------------------
+
+async def _get_yesterday_plan(session: AsyncSession, trade_date: str) -> dict | None:
+    """获取上一个交易日的早盘计划及其回溯验证结果。
+
+    供 AI 对比昨日计划与实际走势，形成学习闭环。
+    """
+    r = await session.execute(text("""
+        SELECT trade_date, predicted_direction, predicted_temperature, confidence_score,
+               watch_sectors_json, watch_stocks_json, entry_plan_json,
+               key_logic, actual_result, accuracy_score, retrospect_note
+        FROM daily_plan
+        WHERE trade_date < :td
+        ORDER BY trade_date DESC
+        LIMIT 1
+    """), {"td": trade_date})
+    row = r.fetchone()
+    if not row:
+        return None
+
+    cols = ["trade_date", "predicted_direction", "predicted_temperature",
+            "confidence_score", "watch_sectors_json", "watch_stocks_json",
+            "entry_plan_json", "key_logic", "actual_result", "accuracy_score",
+            "retrospect_note"]
+    rec = dict(zip(cols, row))
+    # 清理 float
+    for k, v in rec.items():
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            rec[k] = None
+    # 解析 JSON 字段
+    for json_col in ("watch_sectors_json", "watch_stocks_json", "entry_plan_json"):
+        raw = rec.get(json_col)
+        if isinstance(raw, str):
+            try:
+                rec[json_col] = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                pass
+    return rec
+
+
+# ---------------------------------------------------------------------------
 # Main aggregation: collect all morning plan data
 # ---------------------------------------------------------------------------
 
@@ -245,7 +407,8 @@ async def aggregate_plan_data(session: AsyncSession, trade_date: str) -> dict:
     """Aggregate all data sources needed for the morning plan.
 
     Combines: yesterday's review + global indices + premarket signals
-    + risk alerts + key events + margin + valuation.
+    + risk alerts + key events + margin + valuation
+    + 价格锚点 + 历史回溯 + 昨日计划（学习闭环）。
     """
     from app.shared.premarket import generate_premarket_plan
     from app.shared.risk_alerts import generate_risk_alerts
@@ -261,6 +424,33 @@ async def aggregate_plan_data(session: AsyncSession, trade_date: str) -> dict:
     margin = await margin_analysis(session, prev_td or trade_date)
     valuation = await index_valuation_position(session, prev_td or trade_date)
 
+    # --- Task 2: 学习闭环 —— 历史回溯 + 昨日计划 ---
+    retrospect = await _get_retrospect_summary(session, trade_date)
+    yesterday_plan = await _get_yesterday_plan(session, trade_date)
+
+    # --- Task 1: 价格锚点 —— 从昨日计划 / premarket 提取关注股票代码 ---
+    watch_codes: list[str] = []
+    # 优先从昨日计划的 watch_stocks 取
+    if yesterday_plan:
+        ws = yesterday_plan.get("watch_stocks_json")
+        if isinstance(ws, list):
+            for item in ws:
+                code = item.get("ts_code") if isinstance(item, dict) else item
+                if isinstance(code, str) and code not in watch_codes:
+                    watch_codes.append(code)
+    # 再从 premarket 龙头股补充
+    if premarket and isinstance(premarket, dict):
+        for key in ("dragon_stocks", "leaders", "hot_stocks"):
+            items = premarket.get(key, [])
+            if isinstance(items, list):
+                for item in items:
+                    code = item.get("ts_code") if isinstance(item, dict) else item
+                    if isinstance(code, str) and code not in watch_codes:
+                        watch_codes.append(code)
+    # 限制数量，避免过多查询
+    watch_codes = watch_codes[:15]
+    price_anchors = await _get_price_anchors(session, watch_codes, prev_td or trade_date) if watch_codes else []
+
     return {
         "trade_date": trade_date,
         "prev_trade_date": prev_td,
@@ -271,6 +461,9 @@ async def aggregate_plan_data(session: AsyncSession, trade_date: str) -> dict:
         "key_events": key_events,
         "margin": margin,
         "valuation": valuation,
+        "price_anchors": price_anchors,
+        "retrospect": retrospect,
+        "yesterday_plan": yesterday_plan,
     }
 
 
@@ -315,24 +508,19 @@ async def save_plan(payload: dict = Body(...)):
     # Define the columns we accept (matching DailyPlan model)
     allowed_cols = {
         "trade_date",
-        # overnight environment
         "us_sp500_pct", "us_nasdaq_pct", "a50_night_pct", "hk_hsi_pct",
-        # predictions
         "predicted_temperature", "predicted_direction", "confidence_score",
-        # structured JSON
         "watch_sectors_json", "watch_stocks_json", "avoid_sectors_json",
         "key_events_json", "auction_signals_json", "strategy_weights_json",
-        # operation plans
         "position_plan_json", "entry_plan_json", "exit_plan_json",
-        # text fields
         "overnight_summary", "board_play_plan", "swing_trade_plan",
         "value_invest_plan", "key_logic", "risk_notes",
     }
 
-    # Filter payload to only allowed columns
+    # Filter payload: only include non-None allowed columns
     cols = {}
     for k, v in payload.items():
-        if k in allowed_cols:
+        if k in allowed_cols and v is not None:
             if isinstance(v, (dict, list)):
                 cols[k] = json.dumps(v, ensure_ascii=False)
             else:
@@ -344,8 +532,10 @@ async def save_plan(payload: dict = Body(...)):
     # Build dynamic INSERT ... ON CONFLICT DO UPDATE
     col_names = list(cols.keys())
     placeholders = [f":{c}" for c in col_names]
+    # COALESCE: only overwrite if new value is non-null, else keep existing
     update_set = ", ".join(
-        f"{c} = EXCLUDED.{c}" for c in col_names if c != "trade_date"
+        f"{c} = COALESCE(EXCLUDED.{c}, daily_plan.{c})"
+        for c in col_names if c != "trade_date"
     )
 
     # Add vector column if available
@@ -478,10 +668,14 @@ async def get_plan_history(
     async with async_session() as session:
         r = await session.execute(text(f"""
             SELECT id, trade_date,
+                   us_sp500_pct, us_nasdaq_pct, a50_night_pct, hk_hsi_pct,
                    predicted_temperature, predicted_direction, confidence_score,
-                   watch_sectors_json, avoid_sectors_json,
+                   watch_sectors_json, watch_stocks_json, avoid_sectors_json,
+                   key_events_json, auction_signals_json,
                    strategy_weights_json, position_plan_json,
-                   key_logic, risk_notes,
+                   entry_plan_json, exit_plan_json,
+                   overnight_summary, board_play_plan, swing_trade_plan,
+                   value_invest_plan, key_logic, risk_notes,
                    actual_result, accuracy_score, retrospect_note,
                    created_at
             FROM daily_plan
@@ -493,10 +687,14 @@ async def get_plan_history(
 
     cols = [
         "id", "trade_date",
+        "us_sp500_pct", "us_nasdaq_pct", "a50_night_pct", "hk_hsi_pct",
         "predicted_temperature", "predicted_direction", "confidence_score",
-        "watch_sectors_json", "avoid_sectors_json",
+        "watch_sectors_json", "watch_stocks_json", "avoid_sectors_json",
+        "key_events_json", "auction_signals_json",
         "strategy_weights_json", "position_plan_json",
-        "key_logic", "risk_notes",
+        "entry_plan_json", "exit_plan_json",
+        "overnight_summary", "board_play_plan", "swing_trade_plan",
+        "value_invest_plan", "key_logic", "risk_notes",
         "actual_result", "accuracy_score", "retrospect_note",
         "created_at",
     ]
@@ -509,8 +707,11 @@ async def get_plan_history(
             elif isinstance(v, datetime):
                 rec[k] = v.isoformat()
         # Parse JSON text fields for readability
-        for json_col in ("watch_sectors_json", "avoid_sectors_json",
-                         "strategy_weights_json", "position_plan_json"):
+        for json_col in ("watch_sectors_json", "watch_stocks_json",
+                         "avoid_sectors_json", "key_events_json",
+                         "auction_signals_json", "strategy_weights_json",
+                         "position_plan_json", "entry_plan_json",
+                         "exit_plan_json"):
             raw = rec.get(json_col)
             if isinstance(raw, str):
                 try:
