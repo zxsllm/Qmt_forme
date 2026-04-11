@@ -11,6 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.shared.data import DataLoader
 from app.execution.api import router as trading_router
 from app.research.api import router as backtest_router
+from app.shared.review_api import router as review_router
+from app.shared.plan_api import router as plan_router
 from app.execution.feed.ws_manager import ws_manager
 from app.execution.feed.market_feed import REDIS_CHANNEL
 from app.execution.feed.scheduler import scheduler
@@ -38,6 +40,8 @@ app.add_middleware(
 
 app.include_router(trading_router)
 app.include_router(backtest_router)
+app.include_router(review_router)
+app.include_router(plan_router)
 
 
 # ---------------------------------------------------------------------------

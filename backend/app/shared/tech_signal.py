@@ -5,13 +5,18 @@ Lightweight technical analysis focused on price + volume:
   - Volume anomaly (vs 20-day average)
   - Gap detection (price gaps between trading days)
   - Simple support/resistance levels
+  - Technical indicator snapshot (MACD/RSI/KDJ/BOLL)
 """
 
 from __future__ import annotations
 
 import math
+
+import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.research.indicators import macd, rsi, kdj, boll, ma
 
 
 def _safe(v) -> float | None:
@@ -330,3 +335,290 @@ async def risk_check(session: AsyncSession, ts_code: str, trade_date: str = "") 
         "warnings": warnings,
         "risk_level": risk_level,
     }
+
+
+# ── Technical indicator snapshot ───────────────────────────────
+
+
+async def technical_snapshot(
+    session: AsyncSession, ts_code: str, trade_date: str = ""
+) -> dict:
+    """Compute MACD / RSI / KDJ / BOLL snapshot and detect signals.
+
+    Returns a structured dict with current indicator values and
+    actionable signals (golden/death cross, overbought/oversold,
+    Bollinger band position) for use in review/pre-market reports.
+    """
+    date_filter = "AND trade_date <= :td" if trade_date else ""
+    params: dict = {"code": ts_code}
+    if trade_date:
+        params["td"] = trade_date
+
+    r = await session.execute(text(f"""
+        SELECT trade_date, open, high, low, close, vol
+        FROM stock_daily
+        WHERE ts_code = :code {date_filter}
+        ORDER BY trade_date DESC
+        LIMIT 120
+    """), params)
+
+    rows = r.fetchall()
+    if len(rows) < 35:
+        return {"ts_code": ts_code, "data": None, "signals": []}
+
+    # Build DataFrame in chronological order (oldest first)
+    cols = ["trade_date", "open", "high", "low", "close", "vol"]
+    df = pd.DataFrame(rows, columns=cols).iloc[::-1].reset_index(drop=True)
+    for c in ("open", "high", "low", "close", "vol"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    close = df["close"]
+    high = df["high"]
+    low = df["low"]
+
+    # ── Compute indicators ──────────────────────────────────
+    dif, dea, macd_hist = macd(close)
+    rsi_val = rsi(close, period=14)
+    k_val, d_val, j_val = kdj(high, low, close)
+    boll_mid, boll_upper, boll_lower = boll(close)
+    ma5 = ma(close, window=5)
+    ma10 = ma(close, window=10)
+    ma20 = ma(close, window=20)
+
+    # Latest values
+    idx = len(df) - 1
+    prev = idx - 1
+
+    def _v(series: pd.Series, i: int = idx) -> float | None:
+        val = series.iloc[i] if i < len(series) else None
+        if val is None or (isinstance(val, float) and (math.isnan(val) or math.isinf(val))):
+            return None
+        return round(float(val), 4)
+
+    latest_close = _v(close)
+
+    # ── Inline signal labels for each indicator ────────────
+    # MACD signal
+    cur_dif, cur_dea = _v(dif), _v(dea)
+    pre_dif, pre_dea = _v(dif, prev), _v(dea, prev)
+    macd_signal = ""
+    if cur_dif is not None and cur_dea is not None and pre_dif is not None and pre_dea is not None:
+        if pre_dif <= pre_dea and cur_dif > cur_dea:
+            macd_signal = "金叉"
+        elif pre_dif >= pre_dea and cur_dif < cur_dea:
+            macd_signal = "死叉"
+        elif cur_dif > cur_dea:
+            macd_signal = "多头"
+        else:
+            macd_signal = "空头"
+
+    # RSI signal
+    cur_rsi = _v(rsi_val)
+    if cur_rsi is not None:
+        if cur_rsi >= 80:
+            rsi_signal = "超买"
+        elif cur_rsi >= 50:
+            rsi_signal = "偏强"
+        elif cur_rsi >= 20:
+            rsi_signal = "偏弱"
+        else:
+            rsi_signal = "超卖"
+    else:
+        rsi_signal = ""
+
+    # KDJ signal
+    cur_k, cur_d, cur_j = _v(k_val), _v(d_val), _v(j_val)
+    pre_k, pre_d = _v(k_val, prev), _v(d_val, prev)
+    kdj_signal = ""
+    if cur_k is not None and cur_d is not None:
+        if cur_k > 80:
+            kdj_signal = "超买"
+        elif cur_k < 20:
+            kdj_signal = "超卖"
+        elif pre_k is not None and pre_d is not None:
+            if pre_k <= pre_d and cur_k > cur_d:
+                kdj_signal = "金叉"
+            elif pre_k >= pre_d and cur_k < cur_d:
+                kdj_signal = "死叉"
+            else:
+                kdj_signal = "中性"
+
+    # BOLL position
+    cur_upper, cur_lower, cur_mid = _v(boll_upper), _v(boll_lower), _v(boll_mid)
+    boll_position = ""
+    if latest_close is not None and cur_upper is not None and cur_lower is not None and cur_mid is not None:
+        if latest_close >= cur_upper:
+            boll_position = "突破上轨"
+        elif latest_close <= cur_lower:
+            boll_position = "跌破下轨"
+        elif latest_close > cur_mid:
+            boll_position = "中轨上方"
+        else:
+            boll_position = "中轨下方"
+
+    data = {
+        "trade_date": df.iloc[idx]["trade_date"],
+        "close": latest_close,
+        "macd": {
+            "dif": _v(dif), "dea": _v(dea), "hist": _v(macd_hist),
+            "prev_dif": _v(dif, prev), "prev_dea": _v(dea, prev),
+            "signal": macd_signal,
+        },
+        "rsi": {"value": cur_rsi, "signal": rsi_signal},
+        "kdj": {"k": cur_k, "d": cur_d, "j": cur_j, "signal": kdj_signal},
+        "boll": {
+            "upper": cur_upper, "mid": cur_mid, "lower": cur_lower,
+            "position": boll_position,
+        },
+        "ma": {"ma5": _v(ma5), "ma10": _v(ma10), "ma20": _v(ma20)},
+    }
+
+    # ── Detailed signal list ──────────────────────────────────
+    signals: list[dict] = []
+
+    # MACD cross signals
+    if macd_signal == "金叉":
+        signals.append({"indicator": "MACD", "signal": "golden_cross",
+                        "level": "bullish", "message": "MACD金叉（DIF上穿DEA）"})
+    elif macd_signal == "死叉":
+        signals.append({"indicator": "MACD", "signal": "death_cross",
+                        "level": "bearish", "message": "MACD死叉（DIF下穿DEA）"})
+
+    # MACD zero-axis cross
+    if cur_dif is not None and pre_dif is not None:
+        if pre_dif <= 0 and cur_dif > 0:
+            signals.append({"indicator": "MACD", "signal": "above_zero",
+                            "level": "bullish", "message": "MACD DIF上穿零轴，趋势转多"})
+        elif pre_dif >= 0 and cur_dif < 0:
+            signals.append({"indicator": "MACD", "signal": "below_zero",
+                            "level": "bearish", "message": "MACD DIF下穿零轴，趋势转空"})
+
+    # RSI signals
+    if cur_rsi is not None:
+        if cur_rsi >= 80:
+            signals.append({"indicator": "RSI", "signal": "overbought",
+                            "level": "bearish", "message": f"RSI={cur_rsi}，超买区间（≥80）"})
+        elif cur_rsi >= 70:
+            signals.append({"indicator": "RSI", "signal": "near_overbought",
+                            "level": "caution", "message": f"RSI={cur_rsi}，接近超买（≥70）"})
+        elif cur_rsi <= 20:
+            signals.append({"indicator": "RSI", "signal": "oversold",
+                            "level": "bullish", "message": f"RSI={cur_rsi}，超卖区间（≤20）"})
+        elif cur_rsi <= 30:
+            signals.append({"indicator": "RSI", "signal": "near_oversold",
+                            "level": "bullish", "message": f"RSI={cur_rsi}，接近超卖（≤30）"})
+
+    # KDJ signals
+    if kdj_signal == "金叉":
+        zone = "低位" if cur_k and cur_k < 30 else "高位" if cur_k and cur_k > 70 else "中位"
+        signals.append({"indicator": "KDJ", "signal": "golden_cross",
+                        "level": "bullish" if (cur_k or 50) < 50 else "caution",
+                        "message": f"KDJ{zone}金叉（K={cur_k}, D={cur_d}）"})
+    elif kdj_signal == "死叉":
+        zone = "高位" if cur_k and cur_k > 70 else "低位" if cur_k and cur_k < 30 else "中位"
+        signals.append({"indicator": "KDJ", "signal": "death_cross",
+                        "level": "bearish" if (cur_k or 50) > 50 else "caution",
+                        "message": f"KDJ{zone}死叉（K={cur_k}, D={cur_d}）"})
+    if cur_j is not None:
+        if cur_j > 100:
+            signals.append({"indicator": "KDJ", "signal": "j_overbought",
+                            "level": "bearish", "message": f"KDJ J值={cur_j}，超买钝化（>100）"})
+        elif cur_j < 0:
+            signals.append({"indicator": "KDJ", "signal": "j_oversold",
+                            "level": "bullish", "message": f"KDJ J值={cur_j}，超卖钝化（<0）"})
+
+    # Bollinger Band signals
+    if boll_position == "突破上轨":
+        signals.append({"indicator": "BOLL", "signal": "above_upper",
+                        "level": "bearish", "message": f"股价({latest_close})突破布林上轨({cur_upper})，短期超强或回调风险"})
+    elif boll_position == "跌破下轨":
+        signals.append({"indicator": "BOLL", "signal": "below_lower",
+                        "level": "bullish", "message": f"股价({latest_close})跌破布林下轨({cur_lower})，超跌或支撑位"})
+    if cur_upper and cur_lower and cur_mid and cur_mid > 0:
+        bandwidth = (cur_upper - cur_lower) / cur_mid * 100
+        if bandwidth < 5:
+            signals.append({"indicator": "BOLL", "signal": "squeeze",
+                            "level": "caution", "message": f"布林带收窄({bandwidth:.1f}%)，变盘临近"})
+
+    # MA trend
+    cur_ma5, cur_ma10, cur_ma20 = _v(ma5), _v(ma10), _v(ma20)
+    ma_signal = ""
+    if cur_ma5 is not None and cur_ma10 is not None and cur_ma20 is not None:
+        if cur_ma5 > cur_ma10 > cur_ma20:
+            ma_signal = "多头排列"
+            signals.append({"indicator": "MA", "signal": "bullish_alignment",
+                            "level": "bullish", "message": "均线多头排列（MA5>MA10>MA20）"})
+        elif cur_ma5 < cur_ma10 < cur_ma20:
+            ma_signal = "空头排列"
+            signals.append({"indicator": "MA", "signal": "bearish_alignment",
+                            "level": "bearish", "message": "均线空头排列（MA5<MA10<MA20）"})
+
+    # ── Generate summary for Claude CLI ────────────────────
+    bullish_count = sum(1 for s in signals if s["level"] == "bullish")
+    bearish_count = sum(1 for s in signals if s["level"] == "bearish")
+
+    parts = []
+    if macd_signal:
+        parts.append(f"MACD{macd_signal}")
+    if rsi_signal:
+        parts.append(f"RSI{rsi_signal}")
+    if kdj_signal:
+        parts.append(f"KDJ{kdj_signal}")
+    if boll_position:
+        parts.append(f"BOLL{boll_position}")
+    if ma_signal:
+        parts.append(f"均线{ma_signal}")
+
+    if bullish_count > bearish_count:
+        tone = "技术面偏多"
+    elif bearish_count > bullish_count:
+        tone = "技术面偏空"
+    else:
+        tone = "技术面中性"
+
+    caution_parts = []
+    if rsi_signal in ("超买", "超卖"):
+        caution_parts.append(f"RSI{rsi_signal}")
+    if kdj_signal in ("超买", "超卖"):
+        caution_parts.append(f"KDJ{kdj_signal}")
+    if boll_position in ("突破上轨", "跌破下轨"):
+        caution_parts.append(f"BOLL{boll_position}")
+
+    summary = f"{tone}，{'，'.join(parts)}"
+    if caution_parts:
+        summary += f"，注意{'和'.join(caution_parts)}风险"
+
+    return {
+        "ts_code": ts_code,
+        "data": data,
+        "signals": signals,
+        "summary": summary,
+    }
+
+
+async def batch_technical_signals(
+    session: AsyncSession, ts_codes: list[str], trade_date: str = ""
+) -> list[dict]:
+    """Batch technical snapshot for multiple stocks.
+
+    Returns a list of compact signal summaries for use in review reports.
+    Skips stocks with insufficient data.
+    """
+    results = []
+    for code in ts_codes:
+        snap = await technical_snapshot(session, code, trade_date)
+        if snap.get("data") is None:
+            continue
+        results.append({
+            "ts_code": code,
+            "trade_date": snap["data"]["trade_date"],
+            "macd_signal": snap["data"]["macd"]["signal"],
+            "rsi_value": snap["data"]["rsi"]["value"],
+            "rsi_signal": snap["data"]["rsi"]["signal"],
+            "kdj_signal": snap["data"]["kdj"]["signal"],
+            "boll_position": snap["data"]["boll"]["position"],
+            "summary": snap["summary"],
+            "bullish_signals": sum(1 for s in snap["signals"] if s["level"] == "bullish"),
+            "bearish_signals": sum(1 for s in snap["signals"] if s["level"] == "bearish"),
+        })
+    return results

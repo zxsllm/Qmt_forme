@@ -34,6 +34,8 @@ FULL_MARKET_PATTERN = "6*.SH,0*.SZ,3*.SZ,9*.BJ"
 
 SETTLEMENT_TIME = dtime(15, 1)
 SYNC_TIME = dtime(15, 30)
+REVIEW_TIME = dtime(16, 0)       # generate daily review after sync completes
+PLAN_TIME = dtime(8, 0)          # generate morning plan before market open
 
 
 def _is_trading_time(now: datetime | None = None) -> bool:
@@ -232,6 +234,8 @@ class MarketDataScheduler:
         self._last_alert_pull: float = 0
         self._mins_backfilled = False
         self._industry_loaded = False
+        self._review_generated_today = False
+        self._plan_generated_today = False
 
     def _maybe_pull_mins(self) -> None:
         """Pull minute bars for watched stocks — fire-and-forget, every 60s."""
@@ -533,6 +537,8 @@ class MarketDataScheduler:
                     self._last_check_date = date.today()
                     self._settled_today = False
                     self._synced_today = False
+                    self._review_generated_today = False
+                    self._plan_generated_today = False
                     if self._today_is_trading:
                         from app.execution.engine import trading_engine
                         trading_engine.begin_day()
@@ -600,9 +606,16 @@ class MarketDataScheduler:
                     if not self._synced_today and t >= SYNC_TIME:
                         self._run_daily_sync()
                         self._synced_today = True
+                    if not self._review_generated_today and t >= REVIEW_TIME and self._synced_today:
+                        self._run_review_generation()
+                        self._review_generated_today = True
                     await asyncio.sleep(self.NEWS_REFRESH_INTERVAL)
 
                 else:
+                    # Pre-market: generate morning plan at 08:00
+                    if not self._plan_generated_today and t >= PLAN_TIME:
+                        self._run_plan_generation()
+                        self._plan_generated_today = True
                     await asyncio.sleep(self.NEWS_REFRESH_INTERVAL)
 
             except asyncio.CancelledError:
@@ -893,6 +906,78 @@ class MarketDataScheduler:
             await self._load_limits_for(self._watch_codes)
 
     # ------------------------------------------------------------------
+    # Review & plan generation
+    # ------------------------------------------------------------------
+
+    def _run_review_generation(self) -> None:
+        """Post-market: generate daily review via CLI subprocess.
+
+        Called at ~16:00 after data_sync completes. Launches
+        scripts/review_cli.sh which calls `claude-sg -p` to produce the
+        review, then saves structured data to daily_review via API.
+        """
+        trade_date = datetime.now().strftime("%Y%m%d")
+        logger.info("review generation: triggering for %s", trade_date)
+
+        async def _gen():
+            try:
+                await asyncio.to_thread(self._run_cli_script, "review_cli.sh", trade_date)
+            except Exception:
+                logger.exception("review generation failed for %s", trade_date)
+
+        asyncio.ensure_future(_gen())
+
+    def _run_plan_generation(self) -> None:
+        """Pre-market: generate morning plan via CLI subprocess.
+
+        Called at ~08:00 on trade dates. Launches
+        scripts/morning_plan_cli.sh which calls `claude-sg -p` to produce
+        the plan, then saves structured data to daily_plan via API.
+        """
+        trade_date = datetime.now().strftime("%Y%m%d")
+        logger.info("plan generation: triggering for %s", trade_date)
+
+        async def _gen():
+            try:
+                await asyncio.to_thread(self._run_cli_script, "morning_plan_cli.sh", trade_date)
+            except Exception:
+                logger.exception("plan generation failed for %s", trade_date)
+
+        asyncio.ensure_future(_gen())
+
+    @staticmethod
+    def _run_cli_script(script_name: str, trade_date: str) -> None:
+        """Run a shell script from scripts/ dir as a subprocess with logging."""
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        scripts_dir = Path(__file__).resolve().parents[4] / "scripts"
+        script = scripts_dir / script_name
+
+        if not script.exists():
+            logger.warning("CLI script not found: %s (will be created later)", script)
+            return
+
+        log_dir = scripts_dir.parent / "logs"
+        log_dir.mkdir(exist_ok=True)
+        log_file = log_dir / f"{script_name.replace('.sh', '')}_{trade_date}.log"
+
+        try:
+            fh = open(log_file, "a", encoding="utf-8")
+            proc = subprocess.Popen(
+                ["bash", str(script), trade_date],
+                cwd=str(scripts_dir.parent),
+                env={**__import__("os").environ, "TRADE_DATE": trade_date},
+                stdout=fh,
+                stderr=subprocess.STDOUT,
+            )
+            logger.info("%s subprocess started (PID=%d), log=%s",
+                        script_name, proc.pid, log_file)
+        except Exception:
+            logger.exception("failed to start %s subprocess", script_name)
+
+    # ------------------------------------------------------------------
     # Status
     # ------------------------------------------------------------------
 
@@ -908,6 +993,8 @@ class MarketDataScheduler:
             "snapshot_stocks": len(_rt_snapshot),
             "snapshot_age_s": snap_age,
             "data_source": "rt_k (full-market)",
+            "review_generated_today": self._review_generated_today,
+            "plan_generated_today": self._plan_generated_today,
         }
 
 

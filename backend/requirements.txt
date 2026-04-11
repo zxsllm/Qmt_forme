@@ -7,3 +7,4 @@ tushare>=1.4.2
 pandas>=2.2.0
 python-dotenv>=1.0.0
 pypinyin>=0.55.0
+pgvector>=0.3.6

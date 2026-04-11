@@ -1,4 +1,5 @@
-"""Risk alert engine — generates warnings for ST, earnings forecast, CB forced redemption.
+"""Risk alert engine — generates warnings for ST, earnings forecast, CB forced
+redemption, share unlock, and shareholder increase/decrease.
 
 Called by GET /api/v1/risk/alerts. All queries are async via SQLAlchemy session.
 """
@@ -159,12 +160,170 @@ async def _cb_call_alerts(session: AsyncSession) -> list[dict]:
     return alerts
 
 
-async def generate_risk_alerts(session: AsyncSession) -> dict:
-    """Main entry: generate all risk alerts."""
+async def _unlock_alerts(session: AsyncSession, trade_date: str = "",
+                         days: int = 5) -> list[dict]:
+    """D. 限售解禁预警：未来N天内有大额解禁的个股。
+
+    Args:
+        trade_date: 起始日期(YYYYMMDD)，默认今天
+        days: 向前看N天
+    """
+    alerts: list[dict] = []
+    if not trade_date:
+        trade_date = datetime.now().strftime("%Y%m%d")
+    horizon = (datetime.strptime(trade_date, "%Y%m%d") + timedelta(days=days)).strftime("%Y%m%d")
+
+    r = await session.execute(text("""
+        SELECT f.ts_code, b.name, f.float_date, f.float_share, f.float_ratio,
+               f.holder_name, f.share_type,
+               d.close, d.total_mv
+        FROM share_float f
+        JOIN stock_basic b ON f.ts_code = b.ts_code
+        LEFT JOIN daily_basic d ON f.ts_code = d.ts_code
+             AND d.trade_date = (
+                 SELECT MAX(trade_date) FROM daily_basic
+                 WHERE ts_code = f.ts_code AND trade_date <= :td
+             )
+        WHERE f.float_date BETWEEN :td AND :horizon
+          AND f.float_share IS NOT NULL
+        ORDER BY COALESCE(f.float_ratio, 0) DESC, f.float_date ASC
+        LIMIT 100
+    """), {"td": trade_date, "horizon": horizon})
+
+    for row in r.fetchall():
+        ts_code, name = row[0], row[1]
+        float_date, float_share, float_ratio = row[2], row[3], row[4]
+        holder_name, share_type = row[5], row[6]
+        close_price, total_mv = row[7], row[8]
+
+        ratio = float_ratio or 0
+        if ratio >= 10:
+            risk_level = "高"
+            level = "high"
+        elif ratio >= 5:
+            risk_level = "中"
+            level = "warning"
+        else:
+            risk_level = "低"
+            level = "info"
+
+        # 估算解禁市值(亿)
+        unlock_value = None
+        if float_share and close_price:
+            unlock_value = float_share * close_price / 1e8  # float_share单位万股→亿元
+
+        fd = float_date or ""
+        fd_fmt = f"{fd[:4]}-{fd[4:6]}-{fd[6:]}" if len(fd) == 8 else fd
+
+        msg_parts = [f"{fd_fmt}解禁{ratio:.1f}%"]
+        if unlock_value is not None:
+            msg_parts.append(f"约{unlock_value:.1f}亿元")
+        if share_type:
+            msg_parts.append(share_type)
+        message = "，".join(msg_parts)
+
+        alerts.append({
+            "type": "解禁预警",
+            "level": level,
+            "ts_code": ts_code,
+            "name": name,
+            "float_date": float_date,
+            "float_share": float_share,
+            "float_ratio": float_ratio,
+            "risk_level": risk_level,
+            "message": message,
+            "detail": message,
+            "time": fd_fmt,
+        })
+
+    return alerts
+
+
+async def _holdertrade_alerts(session: AsyncSession, trade_date: str = "",
+                              days: int = 7) -> list[dict]:
+    """E. 股东增减持预警：近N天大额减持/增持。
+
+    Args:
+        trade_date: 截止日期(YYYYMMDD)，默认今天
+        days: 向前回溯N天
+    """
+    alerts: list[dict] = []
+    if not trade_date:
+        trade_date = datetime.now().strftime("%Y%m%d")
+    cutoff = (datetime.strptime(trade_date, "%Y%m%d") - timedelta(days=days)).strftime("%Y%m%d")
+
+    r = await session.execute(text("""
+        SELECT h.ts_code, b.name, h.ann_date, h.holder_name, h.holder_type,
+               h.in_de, h.change_vol, h.change_ratio, h.avg_price, h.after_ratio
+        FROM stk_holdertrade h
+        JOIN stock_basic b ON h.ts_code = b.ts_code
+        WHERE h.ann_date BETWEEN :cutoff AND :td
+        ORDER BY h.ann_date DESC, ABS(COALESCE(h.change_ratio, 0)) DESC
+        LIMIT 100
+    """), {"cutoff": cutoff, "td": trade_date})
+
+    for row in r.fetchall():
+        ts_code, name, ann_date = row[0], row[1], row[2]
+        holder_name, holder_type = row[3], row[4]
+        in_de, change_vol, change_ratio = row[5], row[6], row[7]
+        avg_price, after_ratio = row[8], row[9]
+
+        is_decrease = in_de and "减" in in_de
+        abs_ratio = abs(change_ratio) if change_ratio else 0
+
+        if is_decrease:
+            alert_type = "股东减持"
+            if abs_ratio >= 5:
+                risk_level, level = "高", "high"
+            elif abs_ratio >= 1:
+                risk_level, level = "中", "warning"
+            else:
+                risk_level, level = "低", "info"
+        else:
+            alert_type = "股东增持"
+            risk_level, level = "利好", "info"
+
+        holder_short = (holder_name[:10] + "…") if holder_name and len(holder_name) > 10 else (holder_name or "未知")
+        direction = "减持" if is_decrease else "增持"
+        msg_parts = [f"股东{holder_short}近{days}日{direction}{abs_ratio:.2f}%"]
+        if change_vol:
+            msg_parts.append(f"{abs(change_vol) / 10000:.2f}万股")
+        if avg_price:
+            msg_parts.append(f"均价{avg_price:.2f}")
+        message = "，".join(msg_parts)
+
+        ad = ann_date or ""
+        alerts.append({
+            "type": alert_type,
+            "level": level,
+            "ts_code": ts_code,
+            "name": name,
+            "holder_name": holder_name,
+            "in_de": in_de,
+            "change_vol": -abs(change_vol) if is_decrease and change_vol else change_vol,
+            "change_ratio": -abs_ratio if is_decrease else abs_ratio,
+            "ann_date": ann_date,
+            "risk_level": risk_level,
+            "message": message,
+            "detail": message,
+            "time": f"{ad[:4]}-{ad[4:6]}-{ad[6:]}" if len(ad) == 8 else ad,
+        })
+
+    return alerts
+
+
+async def generate_risk_alerts(session: AsyncSession, trade_date: str = "") -> dict:
+    """Main entry: generate all risk alerts.
+
+    Args:
+        trade_date: 基准日期(YYYYMMDD)，默认今天。传递给需要日期的子函数。
+    """
     st = await _st_alerts(session)
     fc = await _forecast_alerts(session)
     cb = await _cb_call_alerts(session)
-    all_alerts = st + fc + cb
+    unlock = await _unlock_alerts(session, trade_date=trade_date, days=5)
+    holder = await _holdertrade_alerts(session, trade_date=trade_date, days=7)
+    all_alerts = st + fc + cb + unlock + holder
     return {
         "count": len(all_alerts),
         "data": _clean(all_alerts),
@@ -172,5 +331,7 @@ async def generate_risk_alerts(session: AsyncSession) -> dict:
             "st": len(st),
             "forecast": len(fc),
             "cb_call": len(cb),
+            "unlock": len(unlock),
+            "holdertrade": len(holder),
         },
     }

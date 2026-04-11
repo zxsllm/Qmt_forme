@@ -1,4 +1,5 @@
 from app.shared.models.base import Base
+from app.shared.models.review import DailyPlan, DailyReview
 from app.shared.models.stock import (
     AuditLog,
     BacktestRun,
@@ -40,4 +41,6 @@ __all__ = [
     "StrategyMeta",
     "BacktestRun",
     "PromotionHistory",
+    "DailyReview",
+    "DailyPlan",
 ]
