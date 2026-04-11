@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Body, Query
 from sqlalchemy import text
@@ -88,35 +88,65 @@ async def _get_yesterday_review(session: AsyncSession, trade_date: str) -> dict 
 
 
 # ---------------------------------------------------------------------------
-# Helper: overnight foreign market data
+# Helper: previous trade date from trade_cal
 # ---------------------------------------------------------------------------
 
-async def _get_overnight_markets(session: AsyncSession, trade_date: str) -> dict:
-    """Fetch overnight foreign-market index data for morning context.
+async def _get_prev_trade_date(session: AsyncSession, trade_date: str) -> str:
+    """Get the most recent trading day strictly before trade_date."""
+    r = await session.execute(text(
+        "SELECT cal_date FROM trade_cal WHERE is_open='1' AND cal_date < :d "
+        "ORDER BY cal_date DESC LIMIT 1"
+    ), {"d": trade_date})
+    row = r.fetchone()
+    return row[0] if row else ""
 
-    Uses index_daily for A50 (XIN9.FI) and global index proxies if synced,
-    otherwise returns an empty structure.
+
+# ---------------------------------------------------------------------------
+# Helper: overnight global index data (index_global table)
+# ---------------------------------------------------------------------------
+
+# Codes consistent with data_sync.sync_index_global
+_GLOBAL_INDEX_CODES = [
+    "XIN9", "SPX", "DJI", "IXIC", "FTSE", "FCHI", "GDAXI",
+    "N225", "KS11", "AS51", "SENSEX", "MXX",
+]
+
+_GLOBAL_INDEX_NAMES = {
+    "XIN9": "富时A50", "SPX": "标普500", "DJI": "道琼斯",
+    "IXIC": "纳斯达克", "FTSE": "富时100", "FCHI": "法国CAC40",
+    "GDAXI": "德国DAX", "N225": "日经225", "KS11": "韩国KOSPI",
+    "AS51": "澳洲标普200", "SENSEX": "印度SENSEX", "MXX": "墨西哥MXX",
+}
+
+
+async def _get_global_indices(session: AsyncSession, trade_date: str) -> list[dict]:
+    """Fetch latest global index bars from index_global (before trade_date).
+
+    Returns one row per index with close, pct_chg, etc.
     """
-    result: dict = {}
-
-    # A50 night session — most recent bar before trade_date
-    a50_r = await session.execute(text("""
-        SELECT trade_date, close, pct_chg, pre_close
-        FROM index_daily
-        WHERE ts_code = 'XIN9.FI' AND trade_date < :td
-        ORDER BY trade_date DESC
-        LIMIT 1
-    """), {"td": trade_date})
-    a50_row = a50_r.fetchone()
-    if a50_row:
-        result["a50"] = {
-            "trade_date": a50_row[0],
-            "close": _clean_float(a50_row[1]),
-            "pct_chg": _clean_float(a50_row[2]),
-            "pre_close": _clean_float(a50_row[3]),
-        }
-
-    return result
+    results = []
+    for code in _GLOBAL_INDEX_CODES:
+        r = await session.execute(text("""
+            SELECT ts_code, trade_date, close, pct_chg, pre_close, open, high, low
+            FROM index_global
+            WHERE ts_code = :code AND trade_date < :td
+            ORDER BY trade_date DESC
+            LIMIT 1
+        """), {"code": code, "td": trade_date})
+        row = r.fetchone()
+        if row:
+            results.append({
+                "ts_code": row[0],
+                "name": _GLOBAL_INDEX_NAMES.get(row[0], row[0]),
+                "trade_date": row[1],
+                "close": _clean_float(row[2]),
+                "pct_chg": _clean_float(row[3]),
+                "pre_close": _clean_float(row[4]),
+                "open": _clean_float(row[5]),
+                "high": _clean_float(row[6]),
+                "low": _clean_float(row[7]),
+            })
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -124,11 +154,10 @@ async def _get_overnight_markets(session: AsyncSession, trade_date: str) -> dict
 # ---------------------------------------------------------------------------
 
 async def _get_key_events(session: AsyncSession, trade_date: str) -> dict:
-    """Gather key events around trade_date: unlocks, forecasts, holder trades."""
-    events: dict = {"unlock": [], "forecast": [], "holdertrade": []}
+    """Gather key events around trade_date: unlocks, forecasts, holder trades, disclosures."""
+    events: dict = {"unlock": [], "forecast": [], "holdertrade": [], "disclosure": []}
 
     # Upcoming share unlocks within 5 days
-    from datetime import timedelta
     try:
         dt = datetime.strptime(trade_date, "%Y%m%d")
     except ValueError:
@@ -189,6 +218,22 @@ async def _get_key_events(session: AsyncSession, trade_date: str) -> dict:
             "change_ratio": _clean_float(row[6]),
         })
 
+    # Upcoming financial report disclosures (actual_date within 5 days)
+    disc_r = await session.execute(text("""
+        SELECT d.ts_code, b.name, d.end_date, d.actual_date, d.pre_date
+        FROM disclosure_date d
+        JOIN stock_basic b ON d.ts_code = b.ts_code
+        WHERE d.actual_date BETWEEN :td AND :horizon
+        ORDER BY d.actual_date ASC
+        LIMIT 30
+    """), {"td": trade_date, "horizon": horizon})
+    for row in disc_r.fetchall():
+        events["disclosure"].append({
+            "ts_code": row[0], "name": row[1],
+            "end_date": row[2], "actual_date": row[3],
+            "pre_date": row[4],
+        })
+
     return events
 
 
@@ -199,28 +244,33 @@ async def _get_key_events(session: AsyncSession, trade_date: str) -> dict:
 async def aggregate_plan_data(session: AsyncSession, trade_date: str) -> dict:
     """Aggregate all data sources needed for the morning plan.
 
-    Combines: yesterday's review + overnight markets + premarket signals
-    + risk alerts + key events + sentiment context.
+    Combines: yesterday's review + global indices + premarket signals
+    + risk alerts + key events + margin + valuation.
     """
     from app.shared.premarket import generate_premarket_plan
     from app.shared.risk_alerts import generate_risk_alerts
-    from app.shared.fundamental import margin_analysis
+    from app.shared.fundamental import margin_analysis, index_valuation_position
+
+    prev_td = await _get_prev_trade_date(session, trade_date)
 
     yesterday_review = await _get_yesterday_review(session, trade_date)
-    overnight = await _get_overnight_markets(session, trade_date)
+    global_indices = await _get_global_indices(session, trade_date)
     premarket = await generate_premarket_plan(session, trade_date)
     risk = await generate_risk_alerts(session, trade_date)
     key_events = await _get_key_events(session, trade_date)
-    margin = await margin_analysis(session, trade_date)
+    margin = await margin_analysis(session, prev_td or trade_date)
+    valuation = await index_valuation_position(session, prev_td or trade_date)
 
     return {
         "trade_date": trade_date,
+        "prev_trade_date": prev_td,
         "yesterday_review": yesterday_review,
-        "overnight_markets": overnight,
+        "global_indices": global_indices,
         "premarket": premarket,
         "risk_alerts": risk,
         "key_events": key_events,
         "margin": margin,
+        "valuation": valuation,
     }
 
 
