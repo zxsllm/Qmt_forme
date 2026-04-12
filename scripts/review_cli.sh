@@ -78,6 +78,19 @@ fi
 
 SIMILAR="暂无历史相似行情数据"
 
+# 提取盘中新闻和龙虎榜
+echo "$DATA_CONTENT" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+json.dump(d.get('intraday_news', []), sys.stdout, ensure_ascii=False)
+" 2>/dev/null > "$TMP_DIR/intraday_news.json" || echo '[]' > "$TMP_DIR/intraday_news.json"
+
+echo "$DATA_CONTENT" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+json.dump(d.get('dragon_tiger', {}), sys.stdout, ensure_ascii=False)
+" 2>/dev/null > "$TMP_DIR/dragon_tiger.json" || echo '{}' > "$TMP_DIR/dragon_tiger.json"
+
 # ── 3. Round 1: 核心判断 ───────────────────────────────────────
 echo "[3/6] Round 1: 生成核心判断..."
 echo "  (约 15-30 秒)"
@@ -89,7 +102,9 @@ echo "$SIMILAR" > "$TMP_DIR/similar.txt"
 _render_prompt "$TMP_DIR/core_prompt.txt" \
     "$PROMPTS_DIR/review_prompt_core.txt" \
     "{data}" "$TMP_DIR/data.json" \
-    "{similar}" "$TMP_DIR/similar.txt"
+    "{similar}" "$TMP_DIR/similar.txt" \
+    "{intraday_news}" "$TMP_DIR/intraday_news.json" \
+    "{dragon_tiger}" "$TMP_DIR/dragon_tiger.json"
 
 if ! _run_claude_round "$TMP_DIR/core_prompt.txt" "$TMP_DIR/core_raw.txt"; then
     _save_raw_on_failure "$TMP_DIR/core_raw.txt" "Round1"
@@ -127,7 +142,9 @@ cat "$TMP_DIR/core.json" > "$TMP_DIR/core_content.json"
 _render_prompt "$TMP_DIR/detail_prompt.txt" \
     "$PROMPTS_DIR/review_prompt_detail.txt" \
     "{core}" "$TMP_DIR/core_content.json" \
-    "{data}" "$TMP_DIR/data.json"
+    "{data}" "$TMP_DIR/data.json" \
+    "{intraday_news}" "$TMP_DIR/intraday_news.json" \
+    "{dragon_tiger}" "$TMP_DIR/dragon_tiger.json"
 
 if ! _run_claude_round "$TMP_DIR/detail_prompt.txt" "$TMP_DIR/detail_raw.txt"; then
     _save_raw_on_failure "$TMP_DIR/detail_raw.txt" "Round2"

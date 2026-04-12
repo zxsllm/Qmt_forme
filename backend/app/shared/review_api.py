@@ -199,6 +199,102 @@ async def _enrich_leaders_with_ma(
 
 
 # ---------------------------------------------------------------------------
+# Helper: intraday news (09:25 ~ 15:00) for review context
+# ---------------------------------------------------------------------------
+
+async def _get_intraday_news(session: AsyncSession, trade_date: str) -> list[dict]:
+    """盘中新闻：当天 09:25 ~ 15:00 的已分类重要新闻。
+
+    用于复盘时判断个股涨跌是消息驱动还是纯资金博弈。
+    """
+    date_fmt = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
+    start = f"{date_fmt} 09:25:00"
+    end = f"{date_fmt} 15:00:00"
+
+    r = await session.execute(text("""
+        SELECT nc.related_codes, nc.sentiment, nc.news_scope,
+               n.content, n.datetime
+        FROM news_classified nc
+        JOIN stock_news n ON n.id = nc.news_id
+        WHERE n.datetime >= :start AND n.datetime <= :end
+          AND nc.sentiment IN ('positive', 'negative')
+          AND nc.related_codes IS NOT NULL
+        ORDER BY n.datetime DESC
+        LIMIT 30
+    """), {"start": start, "end": end})
+
+    import json as _json
+    results = []
+    for row in r.fetchall():
+        try:
+            codes = _json.loads(row[0]) if row[0] else []
+        except (ValueError, TypeError):
+            codes = []
+        results.append({
+            "codes": codes[:5],
+            "sentiment": row[1],
+            "scope": row[2],
+            "content": (row[3] or "").strip()[:200],
+            "time": str(row[4])[:16] if row[4] else "",
+        })
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Helper: dragon-tiger list (龙虎榜) for review context
+# ---------------------------------------------------------------------------
+
+async def _get_dragon_tiger(session: AsyncSession, trade_date: str) -> dict:
+    """龙虎榜汇总 + 机构明细，判断当日大幅异动股的资金性质。"""
+
+    # 1. top_list 汇总：上榜股票 + 净买入
+    tl_r = await session.execute(text("""
+        SELECT ts_code, name, close, pct_change, net_amount, reason
+        FROM top_list
+        WHERE trade_date = :td
+        ORDER BY ABS(COALESCE(net_amount, 0)) DESC
+        LIMIT 20
+    """), {"td": trade_date})
+    top_stocks = []
+    for row in tl_r.fetchall():
+        top_stocks.append({
+            "ts_code": row[0], "name": row[1],
+            "close": _clean_float(row[2]),
+            "pct_change": _clean_float(row[3]),
+            "net_amount": _clean_float(row[4]),
+            "reason": row[5],
+        })
+
+    # 2. top_inst 机构明细：按股票聚合机构净买入
+    ti_r = await session.execute(text("""
+        SELECT ts_code,
+               SUM(CASE WHEN buy > 0 THEN buy ELSE 0 END) AS inst_buy,
+               SUM(CASE WHEN sell > 0 THEN sell ELSE 0 END) AS inst_sell
+        FROM top_inst
+        WHERE trade_date = :td
+        GROUP BY ts_code
+        ORDER BY SUM(COALESCE(buy, 0)) - SUM(COALESCE(sell, 0)) DESC
+        LIMIT 15
+    """), {"td": trade_date})
+    inst_flow = []
+    for row in ti_r.fetchall():
+        inst_buy = float(row[1] or 0)
+        inst_sell = float(row[2] or 0)
+        inst_flow.append({
+            "ts_code": row[0],
+            "inst_buy": round(inst_buy, 2),
+            "inst_sell": round(inst_sell, 2),
+            "inst_net": round(inst_buy - inst_sell, 2),
+        })
+
+    return {
+        "trade_date": trade_date,
+        "top_stocks": top_stocks,
+        "inst_flow": inst_flow,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Main aggregation: collect all review data for a given trade_date
 # ---------------------------------------------------------------------------
 
@@ -227,6 +323,12 @@ async def aggregate_review_data(session: AsyncSession, trade_date: str) -> dict:
     # Task 1: 为龙头股补充 MA 位置，辅助价格锚点分析
     leaders = await _enrich_leaders_with_ma(session, leaders)
 
+    # 盘中新闻（09:25 ~ 15:00），辅助判断涨跌是消息驱动还是资金博弈
+    intraday_news = await _get_intraday_news(session, trade_date)
+
+    # 龙虎榜（当日），判断资金性质：机构 vs 游资
+    dragon_tiger = await _get_dragon_tiger(session, trade_date)
+
     return {
         "trade_date": trade_date,
         "index_summary": index_summary,
@@ -238,6 +340,8 @@ async def aggregate_review_data(session: AsyncSession, trade_date: str) -> dict:
         "margin": margin,
         "valuation": valuation,
         "sector_ranking": sectors,
+        "intraday_news": intraday_news,
+        "dragon_tiger": dragon_tiger,
     }
 
 

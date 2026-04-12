@@ -36,3 +36,9 @@
 
 ## 风险预警数据
 {risk}
+
+## 前一交易日龙虎榜
+{dragon_tiger}
+
+## 关注股票的盘后公告
+{watchlist_anns}

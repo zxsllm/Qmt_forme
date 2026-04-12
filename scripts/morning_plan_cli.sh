@@ -70,16 +70,23 @@ json.dump(out, open(tmp / 'premarket.json', 'w', encoding='utf-8'), ensure_ascii
 alerts = d.get('risk_alerts', {}).get('data', [])
 filtered = [a for a in alerts if a.get('level') in ('high', 'warning')]
 json.dump(filtered[:30], open(tmp / 'risk.json', 'w', encoding='utf-8'), ensure_ascii=False)
+
+json.dump(d.get('dragon_tiger', {}), open(tmp / 'dragon_tiger.json', 'w', encoding='utf-8'), ensure_ascii=False)
+json.dump(d.get('watchlist_anns', []), open(tmp / 'watchlist_anns.json', 'w', encoding='utf-8'), ensure_ascii=False)
 " "$TMP_DIR/plan_raw.json" "$TMP_DIR" 2>/dev/null || {
         echo '{}' > "$TMP_DIR/review.json"
         echo '{}' > "$TMP_DIR/premarket.json"
         echo '[]' > "$TMP_DIR/risk.json"
+        echo '{}' > "$TMP_DIR/dragon_tiger.json"
+        echo '[]' > "$TMP_DIR/watchlist_anns.json"
     }
 else
     echo "  ⚠️  聚合端点不可用，使用空数据..."
     echo '{}' > "$TMP_DIR/review.json"
     echo '{}' > "$TMP_DIR/premarket.json"
     echo '[]' > "$TMP_DIR/risk.json"
+    echo '{}' > "$TMP_DIR/dragon_tiger.json"
+    echo '[]' > "$TMP_DIR/watchlist_anns.json"
 fi
 
 echo "暂无历史相似行情数据" > "$TMP_DIR/similar.txt"
@@ -93,7 +100,9 @@ _render_prompt "$TMP_DIR/core_prompt.txt" \
     "{review}" "$TMP_DIR/review.json" \
     "{premarket}" "$TMP_DIR/premarket.json" \
     "{risk}" "$TMP_DIR/risk.json" \
-    "{similar}" "$TMP_DIR/similar.txt"
+    "{similar}" "$TMP_DIR/similar.txt" \
+    "{dragon_tiger}" "$TMP_DIR/dragon_tiger.json" \
+    "{watchlist_anns}" "$TMP_DIR/watchlist_anns.json"
 
 if ! _run_claude_round "$TMP_DIR/core_prompt.txt" "$TMP_DIR/core_raw.txt"; then
     _save_raw_on_failure "$TMP_DIR/core_raw.txt" "Round1"
@@ -133,7 +142,9 @@ _render_prompt "$TMP_DIR/detail_prompt.txt" \
     "{core}" "$TMP_DIR/core_content.json" \
     "{review}" "$TMP_DIR/review.json" \
     "{premarket}" "$TMP_DIR/premarket.json" \
-    "{risk}" "$TMP_DIR/risk.json"
+    "{risk}" "$TMP_DIR/risk.json" \
+    "{dragon_tiger}" "$TMP_DIR/dragon_tiger.json" \
+    "{watchlist_anns}" "$TMP_DIR/watchlist_anns.json"
 
 if ! _run_claude_round "$TMP_DIR/detail_prompt.txt" "$TMP_DIR/detail_raw.txt"; then
     _save_raw_on_failure "$TMP_DIR/detail_raw.txt" "Round2"

@@ -529,6 +529,88 @@ async def _get_similar_days(
 
 
 # ---------------------------------------------------------------------------
+# Helper: yesterday's dragon-tiger list for morning plan
+# ---------------------------------------------------------------------------
+
+async def _get_yesterday_dragon_tiger(session: AsyncSession, prev_td: str) -> dict:
+    """前一交易日龙虎榜：上榜股票 + 机构净买入，辅助次日标的筛选。"""
+    if not prev_td:
+        return {"trade_date": "", "top_stocks": [], "inst_flow": []}
+
+    tl_r = await session.execute(text("""
+        SELECT ts_code, name, close, pct_change, net_amount, reason
+        FROM top_list
+        WHERE trade_date = :td
+        ORDER BY ABS(COALESCE(net_amount, 0)) DESC
+        LIMIT 20
+    """), {"td": prev_td})
+    top_stocks = []
+    for row in tl_r.fetchall():
+        top_stocks.append({
+            "ts_code": row[0], "name": row[1],
+            "close": _clean_float(row[2]),
+            "pct_change": _clean_float(row[3]),
+            "net_amount": _clean_float(row[4]),
+            "reason": row[5],
+        })
+
+    ti_r = await session.execute(text("""
+        SELECT ts_code,
+               SUM(CASE WHEN buy > 0 THEN buy ELSE 0 END) AS inst_buy,
+               SUM(CASE WHEN sell > 0 THEN sell ELSE 0 END) AS inst_sell
+        FROM top_inst
+        WHERE trade_date = :td
+        GROUP BY ts_code
+        ORDER BY SUM(COALESCE(buy, 0)) - SUM(COALESCE(sell, 0)) DESC
+        LIMIT 15
+    """), {"td": prev_td})
+    inst_flow = []
+    for row in ti_r.fetchall():
+        inst_buy = float(row[1] or 0)
+        inst_sell = float(row[2] or 0)
+        inst_flow.append({
+            "ts_code": row[0],
+            "inst_buy": round(inst_buy, 2),
+            "inst_sell": round(inst_sell, 2),
+            "inst_net": round(inst_buy - inst_sell, 2),
+        })
+
+    return {"trade_date": prev_td, "top_stocks": top_stocks, "inst_flow": inst_flow}
+
+
+# ---------------------------------------------------------------------------
+# Helper: watchlist/holding announcements for morning plan
+# ---------------------------------------------------------------------------
+
+async def _get_watchlist_anns(
+    session: AsyncSession, watch_codes: list[str], prev_td: str
+) -> list[dict]:
+    """仅获取 watchlist/持仓股票的盘后公告（前一交易日），避免全市场噪音。"""
+    if not watch_codes or not prev_td:
+        return []
+
+    r = await session.execute(text("""
+        SELECT a.ts_code, b.name, a.title, a.ann_date
+        FROM stock_anns a
+        JOIN stock_basic b ON a.ts_code = b.ts_code
+        WHERE a.ts_code = ANY(:codes)
+          AND a.ann_date = :td
+        ORDER BY a.ann_date DESC
+        LIMIT 30
+    """), {"codes": watch_codes, "td": prev_td})
+
+    results = []
+    for row in r.fetchall():
+        results.append({
+            "ts_code": row[0],
+            "name": row[1],
+            "title": (row[2] or "").strip()[:120],
+            "ann_date": row[3],
+        })
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Main aggregation: collect all morning plan data
 # ---------------------------------------------------------------------------
 
@@ -584,6 +666,12 @@ async def aggregate_plan_data(session: AsyncSession, trade_date: str) -> dict:
     watch_codes = watch_codes[:50]
     price_anchors = await _get_price_anchors(session, watch_codes, prev_td or trade_date) if watch_codes else []
 
+    # 前一交易日龙虎榜：机构 vs 游资，辅助次日标的筛选
+    dragon_tiger = await _get_yesterday_dragon_tiger(session, prev_td)
+
+    # watchlist/持仓股票的盘后公告
+    watchlist_anns = await _get_watchlist_anns(session, watch_codes, prev_td)
+
     return {
         "trade_date": trade_date,
         "prev_trade_date": prev_td,
@@ -599,6 +687,8 @@ async def aggregate_plan_data(session: AsyncSession, trade_date: str) -> dict:
         "yesterday_plan": yesterday_plan,
         "accuracy_history": accuracy_history,
         "similar_days": similar_days,
+        "dragon_tiger": dragon_tiger,
+        "watchlist_anns": watchlist_anns,
     }
 
 
