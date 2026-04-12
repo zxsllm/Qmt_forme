@@ -35,6 +35,7 @@ FULL_MARKET_PATTERN = "6*.SH,0*.SZ,3*.SZ,9*.BJ"
 SETTLEMENT_TIME = dtime(15, 1)
 SYNC_TIME = dtime(15, 30)
 REVIEW_TIME = dtime(16, 0)       # generate daily review after sync completes
+VERIFY_TIME = dtime(16, 5)       # auto-verify morning plan after review + sync
 PLAN_TIME = dtime(8, 0)          # generate morning plan before market open
 
 
@@ -236,6 +237,7 @@ class MarketDataScheduler:
         self._industry_loaded = False
         self._review_generated_today = False
         self._plan_generated_today = False
+        self._plan_verified_today = False
 
     def _maybe_pull_mins(self) -> None:
         """Pull minute bars for watched stocks — fire-and-forget, every 60s."""
@@ -539,6 +541,7 @@ class MarketDataScheduler:
                     self._synced_today = False
                     self._review_generated_today = False
                     self._plan_generated_today = False
+                    self._plan_verified_today = False
                     if self._today_is_trading:
                         from app.execution.engine import trading_engine
                         trading_engine.begin_day()
@@ -609,6 +612,9 @@ class MarketDataScheduler:
                     if not self._review_generated_today and t >= REVIEW_TIME and self._synced_today:
                         self._run_review_generation()
                         self._review_generated_today = True
+                    if not self._plan_verified_today and t >= VERIFY_TIME and self._synced_today:
+                        self._run_plan_verification()
+                        self._plan_verified_today = True
                     await asyncio.sleep(self.NEWS_REFRESH_INTERVAL)
 
                 else:
@@ -927,6 +933,32 @@ class MarketDataScheduler:
 
         asyncio.ensure_future(_gen())
 
+    def _run_plan_verification(self) -> None:
+        """Post-market: auto-verify today's morning plan vs actual results.
+
+        Called at ~16:05 after data_sync completes. Compares predicted
+        direction, watchlist, risk alerts, and sectors against actual
+        closing data and writes accuracy_score back to daily_plan.
+        """
+        trade_date = datetime.now().strftime("%Y%m%d")
+        logger.info("plan verification: triggering for %s", trade_date)
+
+        async def _verify():
+            try:
+                from app.shared.plan_verifier import auto_verify_plan
+                result = await auto_verify_plan(trade_date)
+                if result:
+                    logger.info(
+                        "plan verification complete: %s → score=%.1f result=%s",
+                        trade_date, result["accuracy_score"], result["actual_result"],
+                    )
+                else:
+                    logger.info("plan verification: skipped for %s (no plan or already verified)", trade_date)
+            except Exception:
+                logger.exception("plan verification failed for %s", trade_date)
+
+        asyncio.ensure_future(_verify())
+
     def _run_plan_generation(self) -> None:
         """Pre-market: generate morning plan via CLI subprocess.
 
@@ -995,6 +1027,7 @@ class MarketDataScheduler:
             "data_source": "rt_k (full-market)",
             "review_generated_today": self._review_generated_today,
             "plan_generated_today": self._plan_generated_today,
+            "plan_verified_today": self._plan_verified_today,
         }
 
 

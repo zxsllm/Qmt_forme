@@ -516,6 +516,19 @@ export const api = {
 
   dataHealth: () =>
     fetchJson<DataHealthReport>('/api/v1/system/data-health'),
+
+  // ── Command Center: Plan / Review / Signals ────────────────
+  planData: (tradeDate: string) =>
+    fetchJson<PlanDataResp>(`/api/v1/plan/data/${tradeDate}`),
+
+  reviewData: (tradeDate: string) =>
+    fetchJson<ReviewDataResp>(`/api/v1/review/data/${tradeDate}`),
+
+  planHistory: (limit = 30) =>
+    fetchJson<PlanHistoryResp>(`/api/v1/plan/history?limit=${limit}`),
+
+  signalRanked: (tradeDate = '', limit = 50, minScore = 0) =>
+    fetchJson<SignalRankedResp>(`/api/v1/signals/ranked?trade_date=${tradeDate}&limit=${limit}&min_score=${minScore}`),
 };
 
 // ── P2-Plus types ────────────────────────────────────────
@@ -1056,5 +1069,126 @@ export interface RiskAlertsResponse {
     st: number;
     forecast: number;
     cb_call: number;
+  };
+}
+
+// ── Command Center types ────────────────────────────────────
+
+export interface PlanDataResp {
+  trade_date: string;
+  prev_trade_date: string | null;
+  resolved_trade_date?: string;
+  yesterday_review: {
+    trade_date: string;
+    sh_close: number | null;
+    sh_pct_chg: number | null;
+    sz_pct_chg: number | null;
+    cy_pct_chg: number | null;
+    total_amount: number | null;
+    amount_chg_pct: number | null;
+    temperature: string | null;
+    limit_up_count: number | null;
+    limit_down_count: number | null;
+    broken_count: number | null;
+    seal_rate: number | null;
+    max_board: number | null;
+    up_count: number | null;
+    down_count: number | null;
+    up_down_ratio: number | null;
+    market_summary: string | null;
+    strategy_conclusion: string | null;
+    dominant_strategy: string | null;
+    strategy_switch_signal: string | null;
+    top_sectors_json: unknown;
+    dragon_stocks_json: unknown;
+    limit_ladder_json: unknown;
+    [key: string]: unknown;
+  } | null;
+  global_indices: {
+    ts_code: string;
+    trade_date: string;
+    close: number | null;
+    pct_chg: number | null;
+    [key: string]: unknown;
+  }[];
+  premarket: {
+    watchlist?: { ts_code: string; name: string; reason: string; nums?: string; tag?: string; pct_chg?: number | null }[];
+    dragon_stocks?: { ts_code: string; name: string; [key: string]: unknown }[];
+    risk_alerts?: { ts_code: string; name: string; type: string; detail: string }[];
+    hot_sectors?: { name: string; [key: string]: unknown }[];
+    [key: string]: unknown;
+  } | null;
+  risk_alerts: RiskAlertsResponse | null;
+  key_events: unknown;
+  margin: unknown;
+  valuation: unknown;
+  price_anchors: { ts_code: string; close: number | null; ma5: number | null; ma10: number | null; ma20: number | null; ma60: number | null; support_levels: number[]; resistance_levels: number[]; up_limit: number | null; down_limit: number | null; period_high: number | null; period_low: number | null; [key: string]: unknown }[];
+  retrospect: { stats: { total_count: number; correct_count: number; partial_count: number; wrong_count: number; accuracy_rate: number; avg_score: number | null; recent_bias: string | null } | null; recent_predictions: { trade_date: string; predicted_direction: string; predicted_temperature: string | null; actual_result: string | null; accuracy_score: number | null; retrospect_note: string | null }[] } | null;
+  accuracy_history: { avg_accuracy: number | null; trend: string; recent_scores: number[] } | null;
+  similar_days: { date: string; plan_summary: string; actual_result: string | null; accuracy_score: number | null; retrospect_note: string | null; similarity: number | null }[];
+  yesterday_plan: {
+    trade_date: string;
+    predicted_temperature: string | null;
+    predicted_direction: string | null;
+    confidence_score: number | null;
+    watch_stocks_json: unknown;
+    strategy_weights_json: unknown;
+    key_logic: string | null;
+    risk_notes: string | null;
+    actual_result: string | null;
+    accuracy_score: number | null;
+    retrospect_note: string | null;
+    [key: string]: unknown;
+  } | null;
+}
+
+export interface ReviewDataResp {
+  trade_date: string;
+  index_summary: { ts_code: string; trade_date: string; close: number | null; pct_chg: number | null; vol: number | null; amount: number | null; pre_close: number | null; open: number | null; high: number | null; low: number | null; [key: string]: unknown }[];
+  market_breadth: { trade_date: string; total: number; up_count: number; down_count: number; flat_count: number; limit_up: number; limit_down: number; avg_pct_chg: number | null; total_amount_yi: number | null } | null;
+  temperature: MarketTemperatureResp | null;
+  leaders: unknown;
+  hot_money: HotMoneyResp | null;
+  risk_alerts: RiskAlertsResponse | null;
+  margin: unknown;
+  valuation: unknown;
+  sector_ranking: { trade_date: string; top: { ts_code: string; name: string; pct_change: number | null; amount: number | null; [key: string]: unknown }[]; bottom: { ts_code: string; name: string; pct_change: number | null; amount: number | null; [key: string]: unknown }[]; count: number } | null;
+}
+
+export interface PlanHistoryResp {
+  count: number;
+  data: {
+    trade_date: string;
+    predicted_temperature: string | null;
+    predicted_direction: string | null;
+    confidence_score: number | null;
+    actual_result: string | null;
+    accuracy_score: number | null;
+    [key: string]: unknown;
+  }[];
+}
+
+export interface SignalRankedItem {
+  ts_code: string;
+  name: string;
+  total_score: number;
+  tech_score: number;
+  sentiment_score: number;
+  fundamental_score: number;
+  news_score: number;
+  signals: string[];
+  tech_detail: Record<string, unknown>;
+  sentiment_detail: Record<string, unknown>;
+  fundamental_detail: Record<string, unknown>;
+  news_detail: Record<string, unknown>;
+}
+
+export interface SignalRankedResp {
+  trade_date: string;
+  scored_stocks: SignalRankedItem[];
+  market_overview: {
+    temperature: string;
+    avg_score: number;
+    high_score_count: number;
   };
 }

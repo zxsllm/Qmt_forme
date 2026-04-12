@@ -9,6 +9,7 @@ import {
   FireOutlined,
   BarChartOutlined,
   DashboardOutlined,
+  AimOutlined,
   MonitorOutlined,
   CheckCircleOutlined,
   WarningOutlined,
@@ -21,6 +22,7 @@ import { api, type DataHealthReport, type DataHealthCheck } from '../services/ap
 import SidebarNews from '../components/SidebarNews';
 
 const menuItems = [
+  { key: '/command', icon: <AimOutlined />, label: '决策中枢' },
   { key: '/', icon: <DashboardOutlined />, label: '控制台' },
   { key: '/monitor', icon: <MonitorOutlined />, label: '盘中监控' },
   { key: '/trading', icon: <SwapOutlined />, label: '交易中心' },

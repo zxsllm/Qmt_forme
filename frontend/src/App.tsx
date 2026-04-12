@@ -10,6 +10,7 @@ import NewsPage from './pages/NewsPage';
 import SentimentPage from './pages/SentimentPage';
 import FundamentalPage from './pages/FundamentalPage';
 import MonitorPage from './pages/MonitorPage';
+import CommandCenter from './pages/CommandCenter';
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, retry: 1 } },
@@ -34,6 +35,7 @@ export default function App() {
           <Routes>
             <Route element={<MainLayout />}>
               <Route index element={<Dashboard />} />
+              <Route path="/command" element={<CommandCenter />} />
               <Route path="/trading" element={<TradingPage />} />
               <Route path="/strategy" element={<StrategyPage />} />
               <Route path="/system" element={<SystemPage />} />

@@ -27,6 +27,21 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/plan", tags=["plan"])
 
 
+# ---------------------------------------------------------------------------
+# Helper: resolve trade date (roll back non-trading days)
+# ---------------------------------------------------------------------------
+
+async def _resolve_trade_date(session: AsyncSession, date_str: str) -> str:
+    """如果 date_str 不是交易日，回退到最近的交易日。"""
+    r = await session.execute(text("""
+        SELECT cal_date FROM trade_cal
+        WHERE is_open = '1' AND cal_date <= :d
+        ORDER BY cal_date DESC LIMIT 1
+    """), {"d": date_str})
+    row = r.fetchone()
+    return row[0] if row else date_str
+
+
 def _clean_float(val):
     """Return None for NaN/Inf floats, otherwise the value."""
     if val is None:
@@ -263,7 +278,7 @@ async def _get_price_anchors(
         up_limit = limit_info["up_limit"] if limit_info else None
         down_limit = limit_info["down_limit"] if limit_info else None
 
-        # 补算 ma60（support_resistance 只算到 ma20）
+        # 补算 ma60（support_resistance 只算到 ma20），不足60条时降级到 ma30
         ma60 = None
         r = await session.execute(text("""
             SELECT close FROM stock_daily
@@ -272,6 +287,8 @@ async def _get_price_anchors(
         closes = [row[0] for row in r.fetchall() if row[0] is not None]
         if len(closes) >= 60:
             ma60 = round(sum(closes[:60]) / 60, 2)
+        elif len(closes) >= 30:
+            ma60 = round(sum(closes[:30]) / 30, 2)
 
         anchors.append({
             "ts_code": code,
@@ -362,16 +379,18 @@ async def _get_retrospect_summary(
 # ---------------------------------------------------------------------------
 
 async def _get_yesterday_plan(session: AsyncSession, trade_date: str) -> dict | None:
-    """获取上一个交易日的早盘计划及其回溯验证结果。
+    """获取选定日期 D 当天的早盘计划记录。
 
-    供 AI 对比昨日计划与实际走势，形成学习闭环。
+    命名保留 yesterday_plan 以保持前端兼容，但语义是"当日的 daily_plan"。
+    ActionBanner 从这里取 predicted_direction / predicted_temperature 等。
+    如果 D 当天没有计划，则回退取上一个交易日的计划。
     """
     r = await session.execute(text("""
         SELECT trade_date, predicted_direction, predicted_temperature, confidence_score,
                watch_sectors_json, watch_stocks_json, entry_plan_json,
                key_logic, actual_result, accuracy_score, retrospect_note
         FROM daily_plan
-        WHERE trade_date < :td
+        WHERE trade_date <= :td
         ORDER BY trade_date DESC
         LIMIT 1
     """), {"td": trade_date})
@@ -397,6 +416,116 @@ async def _get_yesterday_plan(session: AsyncSession, trade_date: str) -> dict | 
             except (json.JSONDecodeError, TypeError):
                 pass
     return rec
+
+
+# ---------------------------------------------------------------------------
+# Helper: accuracy_history — 近 N 天准确率趋势
+# ---------------------------------------------------------------------------
+
+async def _get_accuracy_history(
+    session: AsyncSession, trade_date: str, days: int = 10
+) -> dict:
+    """查询最近 N 天已验证计划的准确率，计算趋势。
+
+    Returns: {"avg_accuracy": 65.2, "trend": "improving", "recent_scores": [70, 55, ...]}
+    """
+    r = await session.execute(text("""
+        SELECT trade_date, accuracy_score
+        FROM daily_plan
+        WHERE trade_date < :td AND accuracy_score IS NOT NULL
+        ORDER BY trade_date DESC
+        LIMIT :days
+    """), {"td": trade_date, "days": days})
+    rows = r.fetchall()
+
+    if not rows:
+        return {"avg_accuracy": None, "trend": "unknown", "recent_scores": []}
+
+    scores = [float(row[1]) for row in rows if row[1] is not None]
+    if not scores:
+        return {"avg_accuracy": None, "trend": "unknown", "recent_scores": []}
+
+    avg = round(sum(scores) / len(scores), 1)
+
+    # Trend: compare first half vs second half (recent scores are DESC order)
+    trend = "stable"
+    if len(scores) >= 4:
+        mid = len(scores) // 2
+        recent_avg = sum(scores[:mid]) / mid         # more recent
+        older_avg = sum(scores[mid:]) / (len(scores) - mid)  # older
+        diff = recent_avg - older_avg
+        if diff > 5:
+            trend = "improving"
+        elif diff < -5:
+            trend = "declining"
+
+    return {
+        "avg_accuracy": avg,
+        "trend": trend,
+        "recent_scores": scores,  # most recent first
+    }
+
+
+# ---------------------------------------------------------------------------
+# Helper: similar_days — 相似交易日计划 + 实际结果
+# ---------------------------------------------------------------------------
+
+async def _get_similar_days(
+    session: AsyncSession, trade_date: str, top_k: int = 3
+) -> list[dict]:
+    """利用 pgvector 相似搜索找到最相似的 N 个历史交易日。
+
+    Returns: [{date, plan_summary, actual_result, accuracy_score, similarity}]
+    容错: pgvector 未安装或无特征向量时返回空列表。
+    """
+    try:
+        # Get target vector
+        target_r = await session.execute(text("""
+            SELECT env_feature_vector
+            FROM daily_plan
+            WHERE trade_date = :td AND env_feature_vector IS NOT NULL
+        """), {"td": trade_date})
+        target_row = target_r.fetchone()
+
+        if not target_row or target_row[0] is None:
+            return []
+
+        target_vec = target_row[0]
+
+        r = await session.execute(text("""
+            SELECT trade_date, predicted_direction, predicted_temperature,
+                   key_logic, actual_result, accuracy_score,
+                   retrospect_note,
+                   1 - (env_feature_vector <=> :target) AS similarity
+            FROM daily_plan
+            WHERE trade_date != :td
+              AND env_feature_vector IS NOT NULL
+              AND actual_result IS NOT NULL
+            ORDER BY env_feature_vector <=> :target ASC
+            LIMIT :k
+        """), {"target": str(target_vec), "td": trade_date, "k": top_k})
+
+        rows = r.fetchall()
+        results = []
+        for row in rows:
+            plan_summary = f"方向:{row[1] or '?'} 温度:{row[2] or '?'}"
+            if row[3]:
+                # Truncate key_logic to first 100 chars
+                logic = row[3][:100] + ("..." if len(row[3]) > 100 else "")
+                plan_summary += f" 逻辑:{logic}"
+
+            results.append({
+                "date": row[0],
+                "plan_summary": plan_summary,
+                "actual_result": row[4],
+                "accuracy_score": _clean_float(row[5]),
+                "retrospect_note": row[6][:200] if row[6] else None,
+                "similarity": round(float(row[7]), 4) if row[7] is not None else None,
+            })
+        return results
+    except Exception as e:
+        logger.warning("similar_days query failed (pgvector?): %s", e)
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +557,10 @@ async def aggregate_plan_data(session: AsyncSession, trade_date: str) -> dict:
     retrospect = await _get_retrospect_summary(session, trade_date)
     yesterday_plan = await _get_yesterday_plan(session, trade_date)
 
+    # --- Task 3: 闭环验证 —— 准确率趋势 + 相似日参考 ---
+    accuracy_history = await _get_accuracy_history(session, trade_date)
+    similar_days = await _get_similar_days(session, trade_date)
+
     # --- Task 1: 价格锚点 —— 从昨日计划 / premarket 提取关注股票代码 ---
     watch_codes: list[str] = []
     # 优先从昨日计划的 watch_stocks 取
@@ -440,15 +573,15 @@ async def aggregate_plan_data(session: AsyncSession, trade_date: str) -> dict:
                     watch_codes.append(code)
     # 再从 premarket 龙头股补充
     if premarket and isinstance(premarket, dict):
-        for key in ("dragon_stocks", "leaders", "hot_stocks"):
+        for key in ("watchlist", "dragon_stocks", "leaders", "hot_stocks"):
             items = premarket.get(key, [])
             if isinstance(items, list):
                 for item in items:
                     code = item.get("ts_code") if isinstance(item, dict) else item
                     if isinstance(code, str) and code not in watch_codes:
                         watch_codes.append(code)
-    # 限制数量，避免过多查询
-    watch_codes = watch_codes[:15]
+    # 限制数量，避免过多查询（覆盖完整 watchlist，上限 50）
+    watch_codes = watch_codes[:50]
     price_anchors = await _get_price_anchors(session, watch_codes, prev_td or trade_date) if watch_codes else []
 
     return {
@@ -464,6 +597,8 @@ async def aggregate_plan_data(session: AsyncSession, trade_date: str) -> dict:
         "price_anchors": price_anchors,
         "retrospect": retrospect,
         "yesterday_plan": yesterday_plan,
+        "accuracy_history": accuracy_history,
+        "similar_days": similar_days,
     }
 
 
@@ -473,9 +608,15 @@ async def aggregate_plan_data(session: AsyncSession, trade_date: str) -> dict:
 
 @router.get("/data/{trade_date}")
 async def get_plan_data(trade_date: str):
-    """Aggregate all morning plan data for a given trade date (YYYYMMDD)."""
+    """Aggregate all morning plan data for a given trade date (YYYYMMDD).
+
+    如果 trade_date 是非交易日（周末/节假日），自动回退到最近的交易日。
+    返回数据中 resolved_trade_date 标明实际使用的交易日。
+    """
     async with async_session() as session:
-        data = await aggregate_plan_data(session, trade_date)
+        resolved = await _resolve_trade_date(session, trade_date)
+        data = await aggregate_plan_data(session, resolved)
+        data["resolved_trade_date"] = resolved
     return data
 
 

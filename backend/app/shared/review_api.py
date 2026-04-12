@@ -24,6 +24,22 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/review", tags=["review"])
 
+
+# ---------------------------------------------------------------------------
+# Helper: resolve trade date (roll back non-trading days)
+# ---------------------------------------------------------------------------
+
+async def _resolve_trade_date(session: AsyncSession, date_str: str) -> str:
+    """如果 date_str 不是交易日，回退到最近的交易日。"""
+    r = await session.execute(text("""
+        SELECT cal_date FROM trade_cal
+        WHERE is_open = '1' AND cal_date <= :d
+        ORDER BY cal_date DESC LIMIT 1
+    """), {"d": date_str})
+    row = r.fetchone()
+    return row[0] if row else date_str
+
+
 # 7 core indices — consistent with data_sync.CORE_INDICES
 CORE_INDICES = [
     "000001.SH", "399001.SZ", "399006.SZ",
@@ -231,9 +247,15 @@ async def aggregate_review_data(session: AsyncSession, trade_date: str) -> dict:
 
 @router.get("/data/{trade_date}")
 async def get_review_data(trade_date: str):
-    """Aggregate all review data for a given trade date (YYYYMMDD)."""
+    """Aggregate all review data for a given trade date (YYYYMMDD).
+
+    如果 trade_date 是非交易日（周末/节假日），自动回退到最近的交易日。
+    返回数据中 resolved_trade_date 标明实际使用的交易日。
+    """
     async with async_session() as session:
-        data = await aggregate_review_data(session, trade_date)
+        resolved = await _resolve_trade_date(session, trade_date)
+        data = await aggregate_review_data(session, resolved)
+        data["resolved_trade_date"] = resolved
     return data
 
 
