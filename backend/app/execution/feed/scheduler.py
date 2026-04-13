@@ -571,6 +571,10 @@ class MarketDataScheduler:
                     self._last_trading_log = _time.time()
 
                 if is_trading:
+                    # 补生成：如果 scheduler 在开盘后启动，plan 可能未生成
+                    if not self._plan_generated_today:
+                        self._run_plan_generation()
+                        self._plan_generated_today = True
                     self._maybe_pull_mins()
 
                     t0 = _time.monotonic()

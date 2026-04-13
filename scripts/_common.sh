@@ -8,6 +8,12 @@
 # Windows 下 Python 默认编码为 GBK，强制使用 UTF-8
 export PYTHONUTF8=1
 
+# 确保 npm global bin 在 PATH 中（claude-sg 等工具）
+_NPM_BIN="${APPDATA:-$HOME/AppData/Roaming}/npm"
+if [ -d "$_NPM_BIN" ] && [[ ":$PATH:" != *":$_NPM_BIN:"* ]]; then
+    export PATH="$_NPM_BIN:$PATH"
+fi
+
 # ── API 地址自动检测 ──────────────────────────────────────────────
 # WSL2 下 localhost 不通 Windows 侧，需要用网关 IP
 _detect_api_base() {
@@ -42,6 +48,12 @@ _check_health() {
 _run_claude_round() {
     local prompt_file="$1" output_file="$2"
     local cmd="${CLAUDE_CMD:-claude-sg}"
+    # git-bash 下 which 找不到 .cmd，自动加后缀
+    if ! command -v "$cmd" > /dev/null 2>&1; then
+        if command -v "${cmd}.cmd" > /dev/null 2>&1; then
+            cmd="${cmd}.cmd"
+        fi
+    fi
     # Windows 上 claude-sg.cmd 的 PowerShell 封装需要 Windows 格式路径
     local win_path="$prompt_file"
     if command -v cygpath > /dev/null 2>&1; then
