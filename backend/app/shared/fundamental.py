@@ -224,18 +224,24 @@ async def event_calendar(session: AsyncSession, start_date: str, end_date: str) 
 
     fc_r = await session.execute(text("""
         SELECT f.ts_code, sb.name, f.ann_date, f.end_date, f.type,
-               f.p_change_min, f.p_change_max, f.summary
+               f.p_change_min, f.p_change_max,
+               f.net_profit_min, f.net_profit_max, f.last_parent_net,
+               f.summary, f.source,
+               sa.url AS ann_url
         FROM forecast f
         JOIN stock_basic sb ON f.ts_code = sb.ts_code
+        LEFT JOIN stock_anns sa ON sa.ts_code = f.ts_code
+            AND sa.ann_date = f.ann_date
+            AND (sa.title LIKE '%%业绩预告%%' OR sa.title LIKE '%%业绩快报%%')
         WHERE f.ann_date BETWEEN :start AND :end
         ORDER BY f.ann_date DESC
         LIMIT 200
     """), {"start": start_date, "end": end_date})
-    forecasts = [
-        dict(zip(["ts_code", "name", "ann_date", "end_date", "type",
-                   "p_change_min", "p_change_max", "summary"], row))
-        for row in fc_r.fetchall()
-    ]
+    fc_cols = ["ts_code", "name", "ann_date", "end_date", "type",
+               "p_change_min", "p_change_max",
+               "net_profit_min", "net_profit_max", "last_parent_net",
+               "summary", "source", "ann_url"]
+    forecasts = [dict(zip(fc_cols, row)) for row in fc_r.fetchall()]
 
     def clean(items):
         for d in items:

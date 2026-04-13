@@ -721,22 +721,31 @@ function EventCalendarTab() {
             size="small"
             loading={isLoading}
             pagination={{ pageSize: 15, size: 'small' }}
-            scroll={{ x: 600 }}
+            scroll={{ x: 650 }}
             columns={[
               { title: '公告日', dataIndex: 'ann_date', width: 85 },
               { title: '代码', dataIndex: 'ts_code', width: 90 },
               { title: '名称', dataIndex: 'name', width: 80 },
               { title: '类型', dataIndex: 'type', width: 60,
-                render: (v: string) => {
-                  const colors: Record<string, string> = { '预增': 'red', '预减': 'green', '扭亏': 'orange', '续亏': 'green', '略增': 'red', '略减': 'green', '首亏': 'green' };
+                render: (v: string, r: any) => {
+                  const colors: Record<string, string> = { '预增': 'red', '预减': 'green', '扭亏': 'orange', '续亏': 'green', '略增': 'red', '略减': 'green', '首亏': 'green', '预告': 'blue', '快报': 'cyan' };
                   return v ? <Tag color={colors[v] || 'default'} style={{ margin: 0 }}>{v}</Tag> : '-';
                 } },
-              { title: '变动幅度', width: 100,
-                render: (_: unknown, r: { p_change_min: number | null; p_change_max: number | null }) =>
-                  (r.p_change_min != null || r.p_change_max != null)
-                    ? `${fmtNum(r.p_change_min, 0)}% ~ ${fmtNum(r.p_change_max, 0)}%` : '-',
+              { title: '变动/净利润', width: 140,
+                render: (_: unknown, r: any) => {
+                  if (r.p_change_min != null || r.p_change_max != null) {
+                    const pct = `同比${fmtNum(r.p_change_min, 0)}%~${fmtNum(r.p_change_max, 0)}%`;
+                    const profit = (r.net_profit_min != null)
+                      ? `, 净利润 ${(r.net_profit_min / 10000).toFixed(2)}~${(r.net_profit_max / 10000).toFixed(2)} 亿`
+                      : '';
+                    return <span style={{ fontSize: 11 }}>{pct}{profit}</span>;
+                  }
+                  if (r.source === 'anns_parsed' && r.ann_url) {
+                    return <a href={r.ann_url} target="_blank" rel="noreferrer" style={{ color: '#6bc7ff', fontSize: 11 }}>查看公告原文</a>;
+                  }
+                  return <span style={{ color: '#4b5563' }}>报告期{r.end_date}</span>;
+                },
               },
-              { title: '摘要', dataIndex: 'summary', ellipsis: true },
             ]}
           />
         </div>
