@@ -416,11 +416,11 @@ def sync_forecast_from_anns(conn, trade_date: str) -> int:
         if not end_date:
             continue
 
-        # 推断 type
-        fc_type = None
+        # 推断 type（标题含关键词则精确匹配，否则默认"预告"）
+        fc_type = "预告"
         for kw, tp in [("预增", "预增"), ("预减", "预减"), ("扭亏", "扭亏"),
                         ("首亏", "首亏"), ("续亏", "续亏"), ("略增", "略增"),
-                        ("略减", "略减"), ("续盈", "续盈")]:
+                        ("略减", "略减"), ("续盈", "续盈"), ("快报", "快报")]:
             if kw in title:
                 fc_type = tp
                 break
