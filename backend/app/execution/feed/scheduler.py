@@ -229,6 +229,7 @@ class MarketDataScheduler:
         self._today_is_trading: bool | None = None
         self._last_check_date: date | None = None
         self._settled_today = False
+        self._sync_started_today = False
         self._synced_today = False
         self._last_news_pull: float = 0
         self._last_mins_pull: float = 0
@@ -538,6 +539,7 @@ class MarketDataScheduler:
                     self._today_is_trading = await is_trade_date()
                     self._last_check_date = date.today()
                     self._settled_today = False
+                    self._sync_started_today = False
                     self._synced_today = False
                     self._review_generated_today = False
                     self._plan_generated_today = False
@@ -610,9 +612,11 @@ class MarketDataScheduler:
                     if not self._settled_today and t >= SETTLEMENT_TIME:
                         await self._run_settlement()
                         self._settled_today = True
-                    if not self._synced_today and t >= SYNC_TIME:
+                    if not self._sync_started_today and t >= SYNC_TIME:
                         self._run_daily_sync()
-                        self._synced_today = True
+                        self._sync_started_today = True
+                        # _synced_today 在 _sync 完成后由回调设 True，
+                        # 防止 review 在 sync 未完成时就开始生成
                     if not self._review_generated_today and t >= REVIEW_TIME and self._synced_today:
                         self._run_review_generation()
                         self._review_generated_today = True
@@ -775,6 +779,8 @@ class MarketDataScheduler:
             try:
                 await asyncio.to_thread(run_post_market_sync, trade_date)
                 await asyncio.to_thread(run_minutes_subprocess)
+                self._synced_today = True
+                logger.info("post-market sync completed for %s", trade_date)
             except Exception:
                 logger.exception("post-market sync failed")
 
