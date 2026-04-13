@@ -616,6 +616,7 @@ class Forecast(Base):
     last_parent_net: Mapped[float | None] = mapped_column(Float)
     summary: Mapped[str | None] = mapped_column(Text)
     change_reason: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str | None] = mapped_column(String(16), server_default="tushare")
 
     __table_args__ = (
         UniqueConstraint("ts_code", "ann_date", "end_date", name="uq_forecast_code_ann_end"),

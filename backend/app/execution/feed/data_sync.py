@@ -333,7 +333,11 @@ def sync_dividend(conn, svc: TushareService) -> int:
 
 
 def sync_forecast(conn, svc: TushareService) -> int:
-    """Pull forecast by ann_date for recent days (including tomorrow for evening announcements)."""
+    """Pull forecast by ann_date for recent days (including tomorrow for evening announcements).
+
+    Tushare forecast records overwrite any earlier anns_parsed placeholders
+    via ON CONFLICT DO UPDATE (source is reset to 'tushare').
+    """
     today = datetime.now()
     dates = [(today + timedelta(days=d)).strftime("%Y%m%d") for d in range(1, -7, -1)]
     total = 0
@@ -343,6 +347,7 @@ def sync_forecast(conn, svc: TushareService) -> int:
             if df is None or df.empty:
                 continue
             df = df.drop_duplicates(subset=["ts_code", "ann_date", "end_date"], keep="last")
+            df["source"] = "tushare"
             cols, vals = _df_to_values(df)
             conflict_cols = ("ts_code", "ann_date", "end_date")
             update_cols = [c for c in cols if c not in conflict_cols]
@@ -361,6 +366,78 @@ def sync_forecast(conn, svc: TushareService) -> int:
     if total:
         logger.info("sync: forecast +%d rows", total)
     return total
+
+
+# ── 季度关键字 → end_date 映射 ────────────────────────────────────
+import re as _re
+
+_QUARTER_PATTERNS = [
+    # "2026第一季度" / "2026年一季度" / "2026年第1季度"
+    (_re.compile(r"(\d{4})\D*(?:第?[一1]季度|一季报)"), "0331"),
+    # "2026半年度" / "2026年中报"
+    (_re.compile(r"(\d{4})\D*(?:半年度?|中报|中期)"), "0630"),
+    # "2026第三季度" / "2026年三季报"
+    (_re.compile(r"(\d{4})\D*(?:第?[三3]季度|三季报|前三季度)"), "0930"),
+    # "2025年度" / "2025年年报" (年度 must come after quarterly patterns)
+    (_re.compile(r"(\d{4})\D*(?:年度|年报)"), "1231"),
+]
+
+
+def _parse_end_date(title: str) -> str | None:
+    """Extract end_date (YYYYMMDD) from announcement title."""
+    for pat, mmdd in _QUARTER_PATTERNS:
+        m = pat.search(title)
+        if m:
+            return m.group(1) + mmdd
+    return None
+
+
+def sync_forecast_from_anns(conn, trade_date: str) -> int:
+    """Parse forecast placeholders from recent stock_anns titles.
+
+    Scans announcements containing '业绩预告' / '业绩快报' and creates
+    lightweight forecast records with source='anns_parsed'.
+    Only inserts if no existing forecast for that (ts_code, ann_date, end_date).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT ts_code, ann_date, title FROM stock_anns "
+            "WHERE ann_date >= %s AND (title LIKE '%%业绩预告%%' OR title LIKE '%%业绩快报%%')",
+            (trade_date,),
+        )
+        rows = cur.fetchall()
+
+    if not rows:
+        return 0
+
+    inserted = 0
+    for ts_code, ann_date, title in rows:
+        end_date = _parse_end_date(title)
+        if not end_date:
+            continue
+
+        # 推断 type
+        fc_type = None
+        for kw, tp in [("预增", "预增"), ("预减", "预减"), ("扭亏", "扭亏"),
+                        ("首亏", "首亏"), ("续亏", "续亏"), ("略增", "略增"),
+                        ("略减", "略减"), ("续盈", "续盈")]:
+            if kw in title:
+                fc_type = tp
+                break
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO forecast (ts_code, ann_date, end_date, type, summary, source) "
+                "VALUES (%s, %s, %s, %s, %s, 'anns_parsed') "
+                "ON CONFLICT (ts_code, ann_date, end_date) DO NOTHING",
+                (ts_code, ann_date, end_date, fc_type, f"从公告标题解析: {title}"),
+            )
+            inserted += cur.rowcount
+
+    conn.commit()
+    if inserted:
+        logger.info("sync: forecast_from_anns +%d placeholder rows", inserted)
+    return inserted
 
 
 def sync_fina_annual(conn, svc: TushareService) -> int:
@@ -761,23 +838,25 @@ def sync_news_batch(conn, svc: TushareService) -> int:
 
 
 def sync_anns(conn, svc: TushareService, trade_date: str) -> int:
+    """Sync announcements. Uses ON CONFLICT DO NOTHING to allow incremental fills."""
     ann_date = trade_date
-    with conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM stock_anns WHERE ann_date = %s", (ann_date,))
-        if cur.fetchone()[0] > 0:
-            return 0
     try:
         df = svc.anns(ann_date=ann_date)
         if df is None or df.empty:
             return 0
         cols_want = ["ts_code", "ann_date", "title", "url"]
         cols = [c for c in cols_want if c in df.columns]
-        df = df[cols]
+        df = df[cols].dropna(subset=["ts_code"])
         cols_list, vals = _df_to_values(df)
         with conn.cursor() as cur:
-            execute_values(cur, f"INSERT INTO stock_anns ({','.join(cols_list)}) VALUES %s", vals)
+            execute_values(
+                cur,
+                f"INSERT INTO stock_anns ({','.join(cols_list)}) VALUES %s "
+                "ON CONFLICT (ts_code, ann_date, md5(title)) DO NOTHING",
+                vals,
+            )
         conn.commit()
-        logger.info("sync: anns %s +%d rows", ann_date, len(df))
+        logger.info("sync: anns %s +%d rows (upsert)", ann_date, len(df))
         return len(df)
     except Exception:
         conn.rollback()
@@ -1202,6 +1281,7 @@ def run_post_market_sync(trade_date: str) -> dict[str, bool]:
         _run("moneyflow", sync_moneyflow, conn, svc, trade_date)
         _run("news_batch", sync_news_batch, conn, svc)
         _run("anns", sync_anns, conn, svc, trade_date)
+        _run("forecast_from_anns", sync_forecast_from_anns, conn, trade_date)
         _run("classify_news", sync_classify_news, conn)
         _run("adj_factor", sync_adj_factor, conn, svc, trade_date)
         _run("sw_daily", sync_sw_daily, conn, svc, trade_date)
