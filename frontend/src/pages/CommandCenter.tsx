@@ -94,27 +94,35 @@ function ActionBanner({
   planData,
   reviewData,
   tradeDate,
+  rtIndices,
 }: {
   planData: PlanDataResp | undefined;
   reviewData: ReviewDataResp | undefined;
   tradeDate: string;
+  rtIndices: Array<{ ts_code: string; close: number; pct_chg: number; name?: string }> | undefined;
 }) {
   const tempData = reviewData?.temperature?.data;
   const temperature = tempData?.temperature
     ?? planData?.yesterday_review?.temperature
     ?? null;
-  const indices = reviewData?.index_summary ?? planData?.global_indices ?? [];
-  const mainIndices = indices.filter(i =>
-    ['000001.SH', '399001.SZ', '399006.SZ'].includes(i.ts_code),
-  );
 
-  // Extract direction from strategy conclusion
+  // 盘中优先用实时指数，否则 fallback 到 review 里的收盘数据
+  const mainCodes = ['000001.SH', '399001.SZ', '399006.SZ'];
+  const rtMain = rtIndices?.filter(i => mainCodes.includes(i.ts_code));
+  const hasRt = rtMain && rtMain.length > 0;
+  const fallbackIndices = reviewData?.index_summary ?? planData?.global_indices ?? [];
+  const mainIndices = hasRt
+    ? rtMain!
+    : fallbackIndices.filter(i => mainCodes.includes(i.ts_code));
+
+  // Direction priority: 今日早盘计划 > 昨日复盘结论
+  const yp = planData?.yesterday_plan;
   const sc = useMemo(
     () => parseStrategyConclusion(planData?.yesterday_review?.strategy_conclusion),
     [planData?.yesterday_review?.strategy_conclusion],
   );
-  const direction = sc?.direction ?? planData?.yesterday_plan?.predicted_direction ?? null;
-  const confidence = sc?.confidence ?? null;
+  const direction = yp?.predicted_direction ?? sc?.direction ?? null;
+  const confidence = yp?.confidence_score ?? sc?.confidence ?? null;
 
   // Build action sentence
   const watchStocks = useMemo(() => {
@@ -206,6 +214,11 @@ function ActionBanner({
           </span>
         </div>
 
+        {hasRt && (
+          <span style={{ fontSize: 10, color: '#22c55e', border: '1px solid rgba(34,197,94,0.3)', borderRadius: 6, padding: '0 4px' }}>
+            实时
+          </span>
+        )}
         {mainIndices.map(idx => (
           <div key={idx.ts_code} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
             <span style={{ color: '#556575', fontSize: 11 }}>{INDEX_NAMES[idx.ts_code] ?? idx.ts_code}</span>
@@ -1084,6 +1097,16 @@ export default function CommandCenter() {
     retry: 1,
   });
 
+  // 盘中实时指数（每 30 秒刷新，选择今天时启用）
+  const isToday = tradeDate === fmtDate(dayjs());
+  const { data: rtIndicesResp } = useQuery({
+    queryKey: ['rt-indices'],
+    queryFn: () => api.globalIndices(),
+    enabled: isToday,
+    refetchInterval: 30_000,
+    staleTime: 15_000,
+  });
+
   return (
     <div
       style={{
@@ -1108,7 +1131,7 @@ export default function CommandCenter() {
           <KillSwitchButton />
         </div>
         <div style={{ flex: 1 }}>
-          <ActionBanner planData={planData} reviewData={reviewData} tradeDate={tradeDate} />
+          <ActionBanner planData={planData} reviewData={reviewData} tradeDate={tradeDate} rtIndices={isToday ? rtIndicesResp?.data : undefined} />
         </div>
       </div>
 
