@@ -1,6 +1,6 @@
 ---
 name: AI Trade 量化交易系统
-overview: 构建一个包含专业交易仪表盘UI、模拟交易引擎、策略回测系统的全栈量化交易平台，以Tushare为数据源，QMT为实盘交易通道，分6个阶段逐步实现。
+overview: 构建一个包含专业交易仪表盘UI、模拟交易引擎、策略回测系统的全栈量化交易平台，以Tushare为数据源，QMT为实盘交易通道，分7个阶段逐步实现。
 todos:
   - id: phase1-mvp-rules
     content: "Phase 1 Step 1: 创建 .cursor/rules/ + AGENTS.md 防遗忘约束"
@@ -44,11 +44,14 @@ todos:
   - id: p2plus-opt
     content: "P2-Plus-Opt: 性能优化 & 数据增强 — TushareService fields优化 + 脚本try-except + 批量INSERT + scheduler DRY + stock_st/adj_factor/sw_daily 三新API + 动态ST风控 + 前复权daily_qfq + 申万行业板块排行升级"
     status: completed
-  - id: phase5-qmt
-    content: "Phase 5: QMT实盘桥接"
+  - id: phase5-review
+    content: "Phase 5: 自动化复盘与早盘计划系统"
+    status: completed
+  - id: phase6-qmt
+    content: "Phase 6: QMT实盘桥接"
     status: pending
-  - id: phase6-ai
-    content: "Phase 6: AI/ML策略增强"
+  - id: phase7-ai
+    content: "Phase 7: AI/ML策略增强"
     status: pending
 isProject: false
 ---
@@ -98,7 +101,7 @@ isProject: false
 - 一个策略类同时满足回测和实盘的接口契约，但底层实现完全不同
 - UI/API层作为独立的展示层，不属于任何一层，通过接口调用两层的服务
 
-Phase 1-3 阶段为同一进程内的逻辑分层 (package级隔离)；Phase 5 对接QMT前评估是否需要物理拆分为独立进程。
+Phase 1-3 阶段为同一进程内的逻辑分层 (package级隔离)；Phase 6 对接QMT前评估是否需要物理拆分为独立进程。
 
 ### 2.2 架构图
 
@@ -383,8 +386,9 @@ data/cache/
 - **v0.2.0** - Phase 2: 仪表盘UI
 - **v0.3.0** - Phase 3: 实时数据 + 模拟交易
 - **v0.4.0** - Phase 4: 策略 + 回测
-- **v0.5.0** - Phase 5: QMT实盘
-- **v1.0.0** - Phase 6: AI增强 (首个完整版)
+- **v0.5.0** - Phase 5: 自动化复盘与早盘计划
+- **v0.6.0** - Phase 6: QMT实盘
+- **v1.0.0** - Phase 7: AI增强 (首个完整版)
 
 ### 4.6 需要提交到Git的Cursor配置
 
@@ -1000,7 +1004,26 @@ Step 5 (路由实体化) ── 依赖 Step 1 + Step 4
 
 ---
 
-### Phase 5: QMT实盘桥接 (约2-3周)
+### Phase 5: 自动化复盘与早盘计划 (已完成)
+
+**目标**: 每日自动生成收盘复盘报告和早盘交易计划，积累结构化市场特征向量用于历史对比
+
+**已完成内容**:
+
+- **DailyReview + DailyPlan ORM模型** (`shared/models/review.py`)
+- **特征向量构建器** (`shared/review_engine.py`): 复盘36维 + 早盘16维数值向量
+- **复盘API** (`shared/review_api.py`): 4个路由，聚合指数/涨跌/情绪/行业/两融/估值/风控数据
+- **早盘计划API** (`shared/plan_api.py`): 5个路由，聚合昨日复盘/外盘/盘前信号/风控预警/事件/两融/估值
+- **CLI脚本**: `review_cli.sh` + `morning_plan_cli.sh`，调用 claude-sg 生成结构化JSON报告
+- **定时触发**: scheduler 08:00早盘计划 / 16:00收盘复盘
+- **数据库迁移**: daily_review + daily_plan 表 + pgvector向量索引
+- **已激活数据**: MACD/RSI/KDJ/BOLL技术信号、两融分析、指数估值百分位、解禁预警、增减持预警
+- **历史对比**: pgvector余弦相似度匹配历史相似行情
+- **回溯验证**: actual_result / accuracy_score / retrospect_note 三字段回填机制
+
+---
+
+### Phase 6: QMT实盘桥接 (约2-3周)
 
 **目标**: OMS对接真实券商通道，实现模拟->实盘无缝切换
 
@@ -1047,7 +1070,7 @@ Step 5 (路由实体化) ── 依赖 Step 1 + Step 4
 | 复权因子(成本校验) | `adj_factor` | `references/股票数据/行情数据/复权因子.md`     |
 
 
-### Phase 6: AI/ML策略增强 (持续迭代)
+### Phase 7: AI/ML策略增强 (持续迭代)
 
 **目标**: 引入机器学习提升策略能力
 
@@ -1114,7 +1137,7 @@ Qmt_forme/
 │   │   │   │   ├── pre_trade.py  # 下单前风控检查
 │   │   │   │   ├── realtime.py   # 盘中实时风控
 │   │   │   │   └── kill_switch.py # 紧急停机
-│   │   │   ├── observability/     # 可观测性 (Phase 3基础 + Phase 5增强)
+│   │   │   ├── observability/     # 可观测性 (Phase 3基础 + Phase 6增强)
 │   │   │   │   ├── heartbeat.py       # 模块心跳检测
 │   │   │   │   ├── metrics.py         # 关键指标收集 (延迟/成功率/差异)
 │   │   │   │   ├── alert.py           # 告警规则与通知
@@ -1404,7 +1427,7 @@ MINUTES_PER_DAY = 240  # 每日交易分钟数
   - 长文本截断/分段 (为后续LLM处理做准备)
 3. **分类与标签**:
   - 自动关联股票代码 (从标题/正文中提取股票名称 -> ts_code映射)
-  - 分类标签: 利好/利空/中性 (基础规则版, Phase 6升级为AI版)
+  - 分类标签: 利好/利空/中性 (基础规则版, Phase 7升级为AI版)
   - 行业标签: 关联申万行业分类
 4. **存储**:
   - 结构化元数据入PostgreSQL (id, title, source, pub_time, ts_codes, category)
@@ -1422,7 +1445,7 @@ MINUTES_PER_DAY = 240  # 每日交易分钟数
 - `references/大模型语料专题数据/上证e互动问答.md`
 - `references/大模型语料专题数据/深证易互动问答.md`
 
-#### Skill 8: `skill-report-writer` -- 研究报告生成 (P2-Plus创建, Phase 6增强)
+#### Skill 8: `skill-report-writer` -- 研究报告生成 (P2-Plus创建, Phase 7增强)
 
 **解决什么问题**: 你希望对新闻/信息/数据进行解读并生成报告。这涉及多种数据源的交叉分析和结构化输出，是一个反复使用的复合流程。
 
@@ -1476,7 +1499,7 @@ MINUTES_PER_DAY = 240  # 每日交易分钟数
 **演进路线**:
 
 - Phase 2: 基础版，规则驱动，数据拼接 + Markdown模板
-- Phase 6: AI增强版，LLM生成分析文本，情感分析驱动评估
+- Phase 7: AI增强版，LLM生成分析文本，情感分析驱动评估
 
 #### Skills 路线图总览
 

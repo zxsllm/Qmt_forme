@@ -42,12 +42,30 @@ _check_health() {
     return 0
 }
 
+# ── 清理残留 claude-sg 代理进程 ───────────────────────────────────
+# claude-sg 在 port 18880 启动本地代理，进程可能在上一轮调用结束后残留，
+# 导致下一轮 ECONNRESET 或挂死。每次调用前主动清理。
+_cleanup_claude_proxy() {
+    local pids
+    pids=$(netstat -ano 2>/dev/null | grep ':18880 ' | grep 'LISTEN' | awk '{print $NF}' | sort -u)
+    if [ -n "$pids" ]; then
+        for pid in $pids; do
+            taskkill //F //PID "$pid" > /dev/null 2>&1 || true
+        done
+        sleep 2
+    fi
+}
+
 # ── Claude 调用封装 ───────────────────────────────────────────────
 # 用法: _run_claude_round prompt_file output_file
 # 大 prompt 通过 --append-system-prompt-file 传入（绕过命令行参数长度限制）
 _run_claude_round() {
     local prompt_file="$1" output_file="$2"
     local cmd="${CLAUDE_CMD:-claude-sg}"
+
+    # 清理上一轮残留的代理进程
+    _cleanup_claude_proxy
+
     # git-bash 下 which 找不到 .cmd，自动加后缀
     if ! command -v "$cmd" > /dev/null 2>&1; then
         if command -v "${cmd}.cmd" > /dev/null 2>&1; then

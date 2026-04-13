@@ -363,6 +363,114 @@ def sync_forecast(conn, svc: TushareService) -> int:
     return total
 
 
+def sync_fina_annual(conn, svc: TushareService) -> int:
+    """年报季增量同步: 找到当天实际披露年报的股票, 拉取其 income + fina_indicator.
+
+    仅 4-5 月运行, 其余月份跳过. 每天只拉「当天发布 + 前3天发布」的年报数据,
+    避免全量遍历, API 调用量 ≈ 新披露股票数 × 2.
+    """
+    now = datetime.now()
+    if now.month not in (4, 5):
+        logger.debug("sync_fina_annual: not in Apr/May, skipping")
+        return 0
+
+    report_year = now.year - 1
+    report_end = f"{report_year}1231"
+
+    # 找近 3 天内实际披露年报的股票 (actual_date 在 [today-3, today])
+    today_str = now.strftime("%Y%m%d")
+    lookback = (now - timedelta(days=3)).strftime("%Y%m%d")
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT ts_code FROM disclosure_date "
+            "WHERE end_date = %s AND actual_date BETWEEN %s AND %s",
+            (report_end, lookback, today_str),
+        )
+        newly_disclosed = [r[0] for r in cur.fetchall()]
+
+    if not newly_disclosed:
+        logger.info("sync_fina_annual: no newly disclosed stocks")
+        return 0
+
+    # 过滤掉 income 表中已有该年报数据的股票
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT ts_code FROM income "
+            "WHERE end_date = %s AND report_type = '1'",
+            (report_end,),
+        )
+        existing = {r[0] for r in cur.fetchall()}
+
+    to_pull = [c for c in newly_disclosed if c not in existing]
+    if not to_pull:
+        logger.info("sync_fina_annual: %d disclosed, all already synced", len(newly_disclosed))
+        return 0
+
+    logger.info("sync_fina_annual: %d newly disclosed, %d to pull", len(newly_disclosed), len(to_pull))
+
+    income_cols = [
+        "ts_code", "ann_date", "f_ann_date", "end_date", "report_type",
+        "total_revenue", "revenue", "oper_cost", "sell_exp", "admin_exp",
+        "fin_exp", "rd_exp", "operate_profit", "total_profit", "income_tax",
+        "n_income", "n_income_attr_p", "basic_eps",
+    ]
+    fina_cols = [
+        "ts_code", "ann_date", "end_date", "eps", "dt_eps", "profit_dedt",
+        "roe", "roe_waa", "roe_dt", "roa", "netprofit_margin", "grossprofit_margin",
+        "debt_to_assets", "ocfps", "bps", "current_ratio", "quick_ratio",
+        "netprofit_yoy", "dt_netprofit_yoy", "tr_yoy", "or_yoy",
+    ]
+    total = 0
+
+    for code in to_pull:
+        # income
+        try:
+            df = svc.income(ts_code=code, start_date=report_end)
+            if df is not None and not df.empty:
+                df = df.drop_duplicates(subset=["ts_code", "end_date", "report_type"], keep="first")
+                cols, vals = _df_to_values(df[income_cols])
+                with conn.cursor() as cur:
+                    execute_values(
+                        cur,
+                        f"INSERT INTO income ({','.join(cols)}) VALUES %s "
+                        "ON CONFLICT (ts_code, end_date, report_type) DO UPDATE SET "
+                        "ann_date=EXCLUDED.ann_date, n_income_attr_p=EXCLUDED.n_income_attr_p, "
+                        "revenue=EXCLUDED.revenue, total_profit=EXCLUDED.total_profit",
+                        vals,
+                    )
+                total += len(df)
+        except Exception:
+            conn.rollback()
+            logger.debug("sync_fina_annual income %s failed", code, exc_info=True)
+
+        # fina_indicator
+        try:
+            df2 = svc.fina_indicator(ts_code=code, start_date=report_end)
+            if df2 is not None and not df2.empty:
+                df2 = df2.drop_duplicates(subset=["ts_code", "end_date"], keep="first")
+                cols2, vals2 = _df_to_values(df2[fina_cols])
+                with conn.cursor() as cur:
+                    execute_values(
+                        cur,
+                        f"INSERT INTO fina_indicator ({','.join(cols2)}) VALUES %s "
+                        "ON CONFLICT (ts_code, end_date) DO UPDATE SET "
+                        "bps=EXCLUDED.bps, profit_dedt=EXCLUDED.profit_dedt, ann_date=EXCLUDED.ann_date",
+                        vals2,
+                    )
+                total += len(df2)
+        except Exception:
+            conn.rollback()
+            logger.debug("sync_fina_annual fina %s failed", code, exc_info=True)
+
+        if total > 0 and len(to_pull) > 50:
+            conn.commit()
+
+    conn.commit()
+    logger.info("sync_fina_annual: pulled %d rows for %d stocks", total, len(to_pull))
+    return total
+
+
 def sync_disclosure(conn, svc: TushareService) -> int:
     """Pull disclosure_date for recent quarters."""
     total = 0
@@ -1088,6 +1196,7 @@ def run_post_market_sync(trade_date: str) -> dict[str, bool]:
         _run("forecast", sync_forecast, conn, svc)
         _run("dividend", sync_dividend, conn, svc)
         _run("disclosure", sync_disclosure, conn, svc)
+        _run("fina_annual", sync_fina_annual, conn, svc)
         _run("limit_board", sync_limit_board, conn, svc, trade_date)
         _run("cb", sync_cb, conn, svc, trade_date)
         _run("moneyflow", sync_moneyflow, conn, svc, trade_date)
