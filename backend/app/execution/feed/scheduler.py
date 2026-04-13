@@ -1001,8 +1001,19 @@ class MarketDataScheduler:
 
         try:
             fh = open(log_file, "a", encoding="utf-8")
+            # Windows: 用 Git\bin\bash.exe（支持 /e/ 路径映射），
+            # 而非 Git\usr\bin\bash.EXE（MSYS2 底层，不支持）
+            bash_cmd = "bash"
+            if sys.platform == "win32":
+                git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
+                if git_bash.exists():
+                    bash_cmd = str(git_bash)
+            # bash 参数用 POSIX 路径（/e/...），cwd 用 Windows 原生路径
+            script_str = str(script).replace("\\", "/")
+            if sys.platform == "win32" and len(script_str) > 2 and script_str[1] == ":":
+                script_str = "/" + script_str[0].lower() + script_str[2:]
             proc = subprocess.Popen(
-                ["bash", str(script), trade_date],
+                [bash_cmd, script_str, trade_date],
                 cwd=str(scripts_dir.parent),
                 env={**__import__("os").environ, "TRADE_DATE": trade_date},
                 stdout=fh,
