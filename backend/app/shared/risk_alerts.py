@@ -67,9 +67,13 @@ async def _forecast_alerts(session: AsyncSession) -> list[dict]:
 
     r = await session.execute(text("""
         SELECT f.ts_code, b.name, f.type, f.ann_date, f.end_date,
-               f.p_change_min, f.p_change_max, f.net_profit_min, f.net_profit_max
+               f.p_change_min, f.p_change_max, f.net_profit_min, f.net_profit_max,
+               f.source, sa.url AS ann_url
         FROM forecast f
         JOIN stock_basic b ON f.ts_code = b.ts_code
+        LEFT JOIN stock_anns sa ON sa.ts_code = f.ts_code
+            AND sa.ann_date = f.ann_date
+            AND (sa.title LIKE '%%业绩预告%%' OR sa.title LIKE '%%业绩快报%%')
         WHERE f.ann_date >= :cutoff
         ORDER BY f.ann_date DESC
         LIMIT 100
@@ -84,6 +88,7 @@ async def _forecast_alerts(session: AsyncSession) -> list[dict]:
         ts_code, name, ftype, ann_date, end_date = row[0], row[1], row[2], row[3], row[4]
         p_min, p_max = row[5], row[6]
         np_min, np_max = row[7], row[8]
+        source, ann_url = row[9], row[10]
 
         pct_range = ""
         if p_min is not None and p_max is not None:
@@ -98,6 +103,8 @@ async def _forecast_alerts(session: AsyncSession) -> list[dict]:
             detail_parts.append(f"同比{pct_range}")
         if profit_str:
             detail_parts.append(profit_str)
+        if source == "anns_parsed" and not pct_range:
+            detail_parts.append("数据待更新")
 
         alerts.append({
             "type": "业绩预告",
@@ -108,6 +115,7 @@ async def _forecast_alerts(session: AsyncSession) -> list[dict]:
             "pct_range": pct_range,
             "detail": ", ".join(detail_parts),
             "time": f"{ann_date[:4]}-{ann_date[4:6]}-{ann_date[6:]}" if ann_date and len(ann_date) == 8 else ann_date,
+            "ann_url": ann_url,
         })
 
     return alerts

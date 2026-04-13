@@ -58,7 +58,15 @@ function RiskAlertPanel() {
               </div>
               {item.time && <span style={{ color: '#556677', fontSize: 11, flexShrink: 0, marginLeft: 8 }}>{item.time}</span>}
             </div>
-            <div style={{ color: '#7a8ea0', fontSize: 12, marginTop: 2, wordBreak: 'break-all' }}>{item.detail}</div>
+            <div style={{ color: '#7a8ea0', fontSize: 12, marginTop: 2, wordBreak: 'break-all' }}>
+              {item.detail}
+              {item.ann_url && (
+                <a href={item.ann_url} target="_blank" rel="noreferrer"
+                  style={{ color: '#6bc7ff', marginLeft: 6, fontSize: 11 }}>
+                  查看公告
+                </a>
+              )}
+            </div>
           </div>
         </div>
       </List.Item>

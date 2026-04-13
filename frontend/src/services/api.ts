@@ -1037,6 +1037,20 @@ export interface MonitorAnomalyEvent {
   top_sectors: { name: string; delta: number; pct_now: number }[];
 }
 
+export interface LargecapAlertEvent {
+  ts: number;
+  time: string;
+  ts_code: string;
+  name: string;
+  price_now: number;
+  price_yesterday: number;
+  price_chg_pct: number;
+  vol_now: number;
+  vol_yesterday: number;
+  vol_ratio: number;
+  circ_mv_yi: number;
+}
+
 export interface MonitorSnapshot {
   ts: number;
   history_len: number;
@@ -1044,6 +1058,8 @@ export interface MonitorSnapshot {
   sectors: MonitorSectorRow[];
   anomalies: MonitorAnomalyEvent[];
   anomaly_count: number;
+  largecap_alerts: LargecapAlertEvent[];
+  largecap_alert_count: number;
 }
 
 export interface RiskAlert {
@@ -1060,6 +1076,7 @@ export interface RiskAlert {
   stk_code?: string;
   is_call?: string;
   call_date?: string;
+  ann_url?: string;
 }
 
 export interface RiskAlertsResponse {
