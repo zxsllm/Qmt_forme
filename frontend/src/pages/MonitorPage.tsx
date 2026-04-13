@@ -1,7 +1,7 @@
 import { Tag, Empty, Badge } from 'antd';
-import { WarningOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { WarningOutlined, ThunderboltOutlined, RiseOutlined } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
-import { api, type MonitorSnapshot, type MonitorAnomalyEvent, type MonitorSectorRow } from '../services/api';
+import { api, type MonitorSnapshot, type MonitorAnomalyEvent, type MonitorSectorRow, type LargecapAlertEvent } from '../services/api';
 
 function pctColor(v: number | null | undefined): string {
   if (v == null) return '#64748b';
@@ -145,6 +145,47 @@ function SectorHeatmap({ sectors }: { sectors: MonitorSectorRow[] }) {
   );
 }
 
+function LargecapAlertFeed({ alerts }: { alerts: LargecapAlertEvent[] }) {
+  if (alerts.length === 0) return null;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {alerts.map((a, i) => (
+        <div key={`${a.ts_code}-${i}`} style={{
+          padding: '10px 14px', borderRadius: 12,
+          background: 'rgba(255,191,117,0.04)',
+          border: '1px solid rgba(255,191,117,0.20)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+            <RiseOutlined style={{ color: '#ffbf75', fontSize: 14 }} />
+            <span style={{ color: '#e6f1fa', fontWeight: 600, fontSize: 13 }}>{a.name}</span>
+            <span style={{ color: '#93a9bc', fontSize: 10 }}>{a.ts_code}</span>
+            <Tag color="orange" style={{ margin: 0, fontSize: 11 }}>
+              {a.price_chg_pct > 0 ? '+' : ''}{a.price_chg_pct.toFixed(2)}%
+            </Tag>
+            <span style={{ color: '#556677', fontSize: 10, marginLeft: 'auto' }}>{a.time}</span>
+          </div>
+          <div style={{ display: 'flex', gap: 16, fontSize: 11 }}>
+            <span style={{ color: '#93a9bc' }}>
+              现价 <span style={{ color: '#e6f1fa', fontWeight: 600 }}>{a.price_now.toFixed(2)}</span>
+              <span style={{ color: '#556677' }}> / 昨同 {a.price_yesterday.toFixed(2)}</span>
+            </span>
+            <span style={{ color: '#93a9bc' }}>
+              量比 <span style={{
+                color: a.vol_ratio >= 2 ? '#ef4444' : a.vol_ratio >= 1.5 ? '#f97316' : '#ffbf75',
+                fontWeight: 600,
+              }}>{a.vol_ratio.toFixed(1)}x</span>
+            </span>
+            <span style={{ color: '#556677' }}>
+              流通 {a.circ_mv_yi.toFixed(0)}亿
+            </span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function MonitorPage() {
   const { data, isLoading } = useQuery({
     queryKey: ['monitor-snapshot'],
@@ -207,6 +248,23 @@ export default function MonitorPage() {
             </div>
             <AnomalyFeed anomalies={data.anomalies} />
           </div>
+
+          {/* Largecap Volume-Price Surge */}
+          {data.largecap_alerts && data.largecap_alerts.length > 0 && (
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+                <RiseOutlined style={{ color: '#ffbf75' }} />
+                <span style={{ color: '#b8cfe0', fontSize: 13, fontWeight: 600 }}>大盘股量价齐升</span>
+                <span style={{ color: '#556677', fontSize: 10 }}>
+                  流通市值&gt;1000亿 · 相对昨日同时刻 · 全天保持
+                </span>
+                <Tag color="orange" style={{ margin: 0, marginLeft: 4, fontSize: 10 }}>
+                  {data.largecap_alert_count}
+                </Tag>
+              </div>
+              <LargecapAlertFeed alerts={data.largecap_alerts} />
+            </div>
+          )}
 
           {/* Sector Heatmap */}
           <div>

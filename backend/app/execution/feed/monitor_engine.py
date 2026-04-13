@@ -36,6 +36,11 @@ MAX_HISTORY = 1200  # ~20 min at 1 tick/sec
 
 REDIS_KEY = "monitor:anomalies"
 
+# ── Large-cap volume-price surge detection ──────────────────────
+LARGECAP_MV_THRESHOLD = 10_000_000  # circ_mv 万元 = 1000亿
+LARGECAP_VOL_RATIO_MIN = 1.2        # 今日累计量 > 昨日同时刻 × 1.2
+REDIS_KEY_LARGECAP = "monitor:largecap_alerts"
+
 
 def _redis():
     """Lazy import to avoid circular import at module load."""
@@ -75,12 +80,45 @@ class AnomalyEvent:
         }
 
 
+@dataclass
+class LargecapAlert:
+    ts: float
+    ts_code: str
+    name: str
+    price_now: float
+    price_yesterday: float
+    vol_now: float
+    vol_yesterday: float
+    vol_ratio: float
+    circ_mv: float  # 万元
+
+    def to_dict(self) -> dict:
+        pchg = round((self.price_now - self.price_yesterday) / self.price_yesterday * 100, 2) if self.price_yesterday else 0
+        return {
+            "ts": self.ts,
+            "time": _time.strftime("%H:%M:%S", _time.localtime(self.ts)),
+            "ts_code": self.ts_code,
+            "name": self.name,
+            "price_now": round(self.price_now, 2),
+            "price_yesterday": round(self.price_yesterday, 2),
+            "price_chg_pct": pchg,
+            "vol_now": round(self.vol_now, 2),
+            "vol_yesterday": round(self.vol_yesterday, 2),
+            "vol_ratio": round(self.vol_ratio, 2),
+            "circ_mv_yi": round(self.circ_mv / 10000, 1),  # 转为亿元
+        }
+
+
 class MonitorEngine:
 
     def __init__(self):
         self._history: deque[TickRecord] = deque(maxlen=MAX_HISTORY)
         self._cooldowns: dict[str, float] = {}  # "code:window" -> last fire ts
         self._today: str = ""
+        # largecap volume-price surge
+        self._largecap_mv: dict[str, float] = {}       # code -> circ_mv (万元)
+        self._yesterday_baseline: dict[str, dict[str, dict]] = {}  # code -> {HH:MM -> {close, cum_vol}}
+        self._triggered_largecap: set[str] = set()
 
     def _new_day_check(self) -> None:
         """Clear in-memory state and Redis anomalies on day change."""
@@ -89,11 +127,15 @@ class MonitorEngine:
         if today != self._today:
             self._history.clear()
             self._cooldowns.clear()
+            self._triggered_largecap = set()
             self._today = today
             try:
-                _redis().delete(REDIS_KEY)
+                r = _redis()
+                r.delete(REDIS_KEY)
+                r.delete(REDIS_KEY_LARGECAP)
             except Exception:
-                logger.warning("failed to clear Redis anomalies on day change", exc_info=True)
+                logger.warning("failed to clear Redis on day change", exc_info=True)
+            self._load_largecap_baseline()
 
     def _persist_anomaly(self, event: AnomalyEvent) -> None:
         """Append anomaly to Redis list with EOD expiry."""
@@ -111,6 +153,145 @@ class MonitorEngine:
             return [json.loads(item) for item in raw_list]
         except Exception:
             logger.warning("failed to load anomalies from Redis", exc_info=True)
+            return []
+
+    # ── Large-cap volume-price surge ────────────────────────────────
+
+    def _load_largecap_baseline(self) -> None:
+        """Load large-cap stocks list and yesterday's minute-level price/volume baseline."""
+        try:
+            from sqlalchemy import create_engine, text as sa_text
+            from app.core.config import settings
+            from collections import defaultdict
+
+            sync_url = settings.DATABASE_URL.replace("+asyncpg", "+psycopg")
+            eng = create_engine(sync_url, echo=False)
+            today_str = __import__("datetime").date.today().strftime("%Y%m%d")
+
+            with eng.connect() as conn:
+                row = conn.execute(sa_text(
+                    "SELECT MAX(cal_date) FROM trade_cal "
+                    "WHERE is_open = 1 AND cal_date < :td"
+                ), {"td": today_str}).fetchone()
+                if not row or not row[0]:
+                    logger.warning("largecap: no previous trading day found")
+                    return
+                prev_date = row[0]
+
+                mv_rows = conn.execute(sa_text(
+                    "SELECT ts_code, circ_mv FROM daily_basic "
+                    "WHERE trade_date = ("
+                    "  SELECT MAX(trade_date) FROM daily_basic WHERE trade_date <= :d"
+                    ") AND circ_mv > :mv"
+                ), {"d": prev_date, "mv": LARGECAP_MV_THRESHOLD}).fetchall()
+
+                self._largecap_mv = {r[0]: float(r[1]) for r in mv_rows}
+                if not self._largecap_mv:
+                    logger.info("largecap: no stocks above 1000亿 threshold")
+                    return
+
+                prev_dash = f"{prev_date[:4]}-{prev_date[4:6]}-{prev_date[6:]}"
+                min_rows = conn.execute(sa_text(
+                    "SELECT m.ts_code, m.trade_time, m.close, m.vol "
+                    "FROM stock_min_kline m "
+                    "WHERE m.ts_code IN ("
+                    "  SELECT ts_code FROM daily_basic "
+                    "  WHERE trade_date = ("
+                    "    SELECT MAX(trade_date) FROM daily_basic WHERE trade_date <= :d"
+                    "  ) AND circ_mv > :mv"
+                    ") "
+                    "AND m.trade_time >= :ts0 AND m.trade_time <= :ts1 "
+                    "AND m.freq = '1min' "
+                    "ORDER BY m.ts_code, m.trade_time"
+                ), {
+                    "d": prev_date, "mv": LARGECAP_MV_THRESHOLD,
+                    "ts0": f"{prev_dash} 09:00:00", "ts1": f"{prev_dash} 16:00:00",
+                }).fetchall()
+
+            eng.dispose()
+
+            code_bars: dict[str, list] = defaultdict(list)
+            for r in min_rows:
+                code_bars[r[0]].append((r[1], float(r[2] or 0), float(r[3] or 0)))
+
+            self._yesterday_baseline = {}
+            for code, bars in code_bars.items():
+                cum_vol = 0.0
+                minute_data: dict[str, dict] = {}
+                for trade_time, close, vol in bars:
+                    cum_vol += vol
+                    minute_key = trade_time.strftime("%H:%M")
+                    minute_data[minute_key] = {"close": close, "cum_vol": cum_vol}
+                self._yesterday_baseline[code] = minute_data
+
+            logger.info(
+                "largecap baseline loaded: %d stocks (>1000亿), %d minute records from %s",
+                len(self._largecap_mv), len(min_rows), prev_date,
+            )
+        except Exception:
+            logger.warning("failed to load largecap baseline", exc_info=True)
+
+    def _check_largecap_alerts(self, snapshot: dict) -> None:
+        """Check large-cap stocks for volume-price surge vs yesterday same time."""
+        if not self._yesterday_baseline:
+            return
+
+        now = _time.time()
+        current_minute = _time.strftime("%H:%M")
+
+        for code in self._largecap_mv:
+            if code in self._triggered_largecap:
+                continue
+
+            snap = snapshot.get(code)
+            if not snap:
+                continue
+            baseline = self._yesterday_baseline.get(code)
+            if not baseline:
+                continue
+            yest = baseline.get(current_minute)
+            if not yest:
+                continue
+
+            price_now = snap.get("close", 0)
+            vol_now = snap.get("vol", 0)
+            price_yest = yest["close"]
+            vol_yest = yest["cum_vol"]
+
+            if price_yest <= 0 or vol_yest <= 0:
+                continue
+
+            if price_now > price_yest and vol_now > vol_yest * LARGECAP_VOL_RATIO_MIN:
+                alert = LargecapAlert(
+                    ts=now, ts_code=code,
+                    name=snap.get("name", code),
+                    price_now=price_now, price_yesterday=price_yest,
+                    vol_now=vol_now, vol_yesterday=vol_yest,
+                    vol_ratio=round(vol_now / vol_yest, 2),
+                    circ_mv=self._largecap_mv.get(code, 0),
+                )
+                self._persist_largecap_alert(alert)
+                self._triggered_largecap.add(code)
+                logger.info(
+                    "LARGECAP ALERT %s %s price %.2f>%.2f vol %.0f>%.0f (%.1fx)",
+                    code, snap.get("name", ""), price_now, price_yest,
+                    vol_now, vol_yest, alert.vol_ratio,
+                )
+
+    def _persist_largecap_alert(self, alert: LargecapAlert) -> None:
+        try:
+            r = _redis()
+            r.rpush(REDIS_KEY_LARGECAP, json.dumps(alert.to_dict(), ensure_ascii=False))
+            r.expire(REDIS_KEY_LARGECAP, 18 * 3600)
+        except Exception:
+            logger.warning("failed to persist largecap alert", exc_info=True)
+
+    def _load_largecap_alerts_from_redis(self) -> list[dict]:
+        try:
+            raw = _redis().lrange(REDIS_KEY_LARGECAP, 0, -1)
+            return [json.loads(item) for item in raw]
+        except Exception:
+            logger.warning("failed to load largecap alerts from Redis", exc_info=True)
             return []
 
     def on_tick(self, snapshot: dict, sector_rankings: list[dict]) -> None:
@@ -189,6 +370,9 @@ class MonitorEngine:
                     ", ".join(f"{s['name']}({s['delta']:+.2f})" for s in sec_deltas[:3]),
                 )
 
+        # Large-cap volume-price surge check
+        self._check_largecap_alerts(snapshot)
+
     def _find_tick_near(self, target_ts: float) -> TickRecord | None:
         """Binary-ish search for tick closest to target timestamp."""
         if not self._history:
@@ -248,6 +432,8 @@ class MonitorEngine:
         anomalies = self._load_anomalies_from_redis()
         anomalies.reverse()  # newest first
 
+        largecap_alerts = self._load_largecap_alerts_from_redis()
+
         return {
             "ts": now,
             "history_len": len(self._history),
@@ -255,6 +441,8 @@ class MonitorEngine:
             "sectors": sectors,
             "anomalies": anomalies,
             "anomaly_count": len(anomalies),
+            "largecap_alerts": largecap_alerts,
+            "largecap_alert_count": len(largecap_alerts),
         }
 
 
