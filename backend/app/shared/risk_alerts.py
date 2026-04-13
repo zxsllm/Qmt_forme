@@ -68,12 +68,14 @@ async def _forecast_alerts(session: AsyncSession) -> list[dict]:
     r = await session.execute(text("""
         SELECT f.ts_code, b.name, f.type, f.ann_date, f.end_date,
                f.p_change_min, f.p_change_max, f.net_profit_min, f.net_profit_max,
-               f.source, sa.url AS ann_url
+               f.source,
+               (SELECT sa.url FROM stock_anns sa
+                WHERE sa.ts_code = f.ts_code AND sa.ann_date = f.ann_date
+                  AND (sa.title LIKE '%%业绩预告%%' OR sa.title LIKE '%%业绩快报%%')
+                LIMIT 1
+               ) AS ann_url
         FROM forecast f
         JOIN stock_basic b ON f.ts_code = b.ts_code
-        LEFT JOIN stock_anns sa ON sa.ts_code = f.ts_code
-            AND sa.ann_date = f.ann_date
-            AND (sa.title LIKE '%%业绩预告%%' OR sa.title LIKE '%%业绩快报%%')
         WHERE f.ann_date >= :cutoff
         ORDER BY f.ann_date DESC
         LIMIT 100

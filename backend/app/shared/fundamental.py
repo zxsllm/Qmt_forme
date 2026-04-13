@@ -227,12 +227,13 @@ async def event_calendar(session: AsyncSession, start_date: str, end_date: str) 
                f.p_change_min, f.p_change_max,
                f.net_profit_min, f.net_profit_max, f.last_parent_net,
                f.summary, f.source,
-               sa.url AS ann_url
+               (SELECT sa.url FROM stock_anns sa
+                WHERE sa.ts_code = f.ts_code AND sa.ann_date = f.ann_date
+                  AND (sa.title LIKE '%%业绩预告%%' OR sa.title LIKE '%%业绩快报%%')
+                LIMIT 1
+               ) AS ann_url
         FROM forecast f
         JOIN stock_basic sb ON f.ts_code = sb.ts_code
-        LEFT JOIN stock_anns sa ON sa.ts_code = f.ts_code
-            AND sa.ann_date = f.ann_date
-            AND (sa.title LIKE '%%业绩预告%%' OR sa.title LIKE '%%业绩快报%%')
         WHERE f.ann_date BETWEEN :start AND :end
         ORDER BY f.ann_date DESC
         LIMIT 200
