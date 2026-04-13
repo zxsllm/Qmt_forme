@@ -77,6 +77,11 @@ async def _forecast_alerts(session: AsyncSession) -> list[dict]:
         FROM forecast f
         JOIN stock_basic b ON f.ts_code = b.ts_code
         WHERE f.ann_date >= :cutoff
+          AND NOT (f.source = 'anns_parsed'
+                   AND EXISTS (SELECT 1 FROM forecast f2
+                               WHERE f2.ts_code = f.ts_code
+                                 AND f2.source = 'tushare'
+                                 AND f2.ann_date >= :cutoff))
         ORDER BY f.ann_date DESC
         LIMIT 100
     """), {"cutoff": cutoff})
