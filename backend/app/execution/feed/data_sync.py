@@ -774,6 +774,7 @@ def sync_index_global(conn, svc: TushareService) -> int:
     INDEX_CODES = [
         "XIN9", "SPX", "DJI", "IXIC", "FTSE", "FCHI", "GDAXI",
         "N225", "KS11", "AS51", "SENSEX", "MXX",
+        "HSI", "HSTECH",
     ]
     start = (datetime.now() - timedelta(days=7)).strftime("%Y%m%d")
     end = datetime.now().strftime("%Y%m%d")

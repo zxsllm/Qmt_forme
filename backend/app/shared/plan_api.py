@@ -125,6 +125,7 @@ async def _get_prev_trade_date(session: AsyncSession, trade_date: str) -> str:
 _GLOBAL_INDEX_CODES = [
     "XIN9", "SPX", "DJI", "IXIC", "FTSE", "FCHI", "GDAXI",
     "N225", "KS11", "AS51", "SENSEX", "MXX",
+    "HSI", "HSTECH",
 ]
 
 _GLOBAL_INDEX_NAMES = {
@@ -132,6 +133,7 @@ _GLOBAL_INDEX_NAMES = {
     "IXIC": "纳斯达克", "FTSE": "富时100", "FCHI": "法国CAC40",
     "GDAXI": "德国DAX", "N225": "日经225", "KS11": "韩国KOSPI",
     "AS51": "澳洲标普200", "SENSEX": "印度SENSEX", "MXX": "墨西哥MXX",
+    "HSI": "恒生指数", "HSTECH": "恒生科技",
 }
 
 
