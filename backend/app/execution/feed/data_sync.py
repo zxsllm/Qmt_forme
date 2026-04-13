@@ -410,10 +410,21 @@ def sync_forecast_from_anns(conn, trade_date: str) -> int:
     if not rows:
         return 0
 
+    # 预加载已有 tushare 记录的 (ts_code, end_date) 集合，避免重复
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT ts_code, end_date FROM forecast WHERE source = 'tushare'"
+        )
+        tushare_covered = {(r[0], r[1]) for r in cur.fetchall()}
+
     inserted = 0
     for ts_code, ann_date, title in rows:
         end_date = _parse_end_date(title)
         if not end_date:
+            continue
+
+        # 该公司+报告期已有 tushare 结构化数据，跳过
+        if (ts_code, end_date) in tushare_covered:
             continue
 
         # 推断 type（标题含关键词则精确匹配，否则默认"预告"）
