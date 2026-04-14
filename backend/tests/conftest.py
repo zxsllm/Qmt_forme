@@ -1,8 +1,9 @@
 import os
 import sys
 
-import pytest_asyncio
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault(
@@ -12,20 +13,13 @@ os.environ.setdefault(
 
 from app.core.config import settings
 
-
-@pytest_asyncio.fixture(scope="session")
-async def test_engine():
-    eng = create_async_engine(settings.DATABASE_URL, echo=False, pool_size=3)
-    yield eng
-    await eng.dispose()
+# NullPool: no persistent connections, no cross-event-loop leaks.
+_engine = create_async_engine(settings.DATABASE_URL, poolclass=NullPool)
+_factory = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
 
 
-@pytest_asyncio.fixture(scope="session")
-async def session_factory(test_engine):
-    return async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
-
-
-@pytest_asyncio.fixture
-async def session(session_factory):
-    async with session_factory() as s:
-        yield s
+@pytest.fixture
+def db():
+    """Returns the session factory. Tests open/close sessions in their own
+    async context, so no async teardown crosses event loop boundaries."""
+    return _factory
