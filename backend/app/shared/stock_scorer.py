@@ -678,36 +678,18 @@ async def _score_news(
     elif net_positive <= -2:
         signals.append("news_negative")
 
-    # -- major announcements -------------------------------------------------
+    # -- major announcements (口径与 _prefetch_batch 一致：截至 trade_date 最近 10 条) --
     if ctx and "ann_data" in ctx:
         ann_rows = ctx["ann_data"].get(ts_code, [])
     else:
-        try:
-            td = datetime.strptime(trade_date, "%Y%m%d")
-            start_dt = (td - timedelta(days=4)).strftime("%Y-%m-%d") + " 00:00:00"
-        except ValueError:
-            return _clamp(50.0 + news_pts * 0.6), detail, signals
-
         ann_r = await session.execute(text("""
             SELECT ac.ann_type, ac.sentiment
             FROM anns_classified ac
             JOIN stock_anns a ON ac.anns_id = a.id
-            WHERE a.ts_code = :code
-              AND a.ann_date >= :start_date
-              AND a.ann_date <= :td
+            WHERE a.ts_code = :code AND a.ann_date <= :td
             ORDER BY a.ann_date DESC LIMIT 10
-        """), {"code": ts_code, "start_date": trade_date, "td": trade_date})
+        """), {"code": ts_code, "td": trade_date})
         ann_rows = ann_r.fetchall()
-
-        if not ann_rows:
-            ann_r2 = await session.execute(text("""
-                SELECT ac.ann_type, ac.sentiment
-                FROM anns_classified ac
-                JOIN stock_anns a ON ac.anns_id = a.id
-                WHERE a.ts_code = :code AND a.ann_date <= :td
-                ORDER BY a.ann_date DESC LIMIT 5
-            """), {"code": ts_code, "td": trade_date})
-            ann_rows = ann_r2.fetchall()
 
     major_pts = 0
     major_types = {"earnings_forecast", "contract", "restructure"}
