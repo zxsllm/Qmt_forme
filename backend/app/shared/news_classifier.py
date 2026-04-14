@@ -112,7 +112,7 @@ class AnnsClassResult:
             "anns_id": anns_id,
             "ann_type": self.ann_type,
             "sentiment": self.sentiment,
-            "keywords": json.dumps(self.keywords, ensure_ascii=False) if self.keywords else None,
+            "keywords": self.keywords or None,
         }
 
 

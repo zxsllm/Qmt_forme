@@ -158,9 +158,9 @@ async def _prefetch_batch(
             SELECT ts_code, end_date, roe, netprofit_yoy, or_yoy,
                    ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
             FROM fina_indicator
-            WHERE ts_code IN ({codes_csv})
+            WHERE ts_code IN ({codes_csv}) AND ann_date <= :td
         ) sub WHERE rn = 1
-    """))
+    """), {"td": trade_date})
     ctx["fina_data"] = {row[0]: row[1:] for row in fina_r.fetchall()}
 
     pe_r = await session.execute(text(f"""
@@ -536,9 +536,9 @@ async def _score_fundamental(
         fina_r = await session.execute(text("""
             SELECT end_date, roe, netprofit_yoy, or_yoy
             FROM fina_indicator
-            WHERE ts_code = :code
+            WHERE ts_code = :code AND ann_date <= :td
             ORDER BY end_date DESC LIMIT 1
-        """), {"code": ts_code})
+        """), {"code": ts_code, "td": trade_date})
         fina_row = fina_r.fetchone()
 
     roe = _clean_float(fina_row[1]) if fina_row else None
@@ -694,8 +694,9 @@ async def _score_news(
             JOIN stock_anns a ON ac.anns_id = a.id
             WHERE a.ts_code = :code
               AND a.ann_date >= :start_date
+              AND a.ann_date <= :td
             ORDER BY a.ann_date DESC LIMIT 10
-        """), {"code": ts_code, "start_date": trade_date[:8] if len(trade_date) >= 8 else trade_date})
+        """), {"code": ts_code, "start_date": trade_date, "td": trade_date})
         ann_rows = ann_r.fetchall()
 
         if not ann_rows:
@@ -703,9 +704,9 @@ async def _score_news(
                 SELECT ac.ann_type, ac.sentiment
                 FROM anns_classified ac
                 JOIN stock_anns a ON ac.anns_id = a.id
-                WHERE a.ts_code = :code
+                WHERE a.ts_code = :code AND a.ann_date <= :td
                 ORDER BY a.ann_date DESC LIMIT 5
-            """), {"code": ts_code})
+            """), {"code": ts_code, "td": trade_date})
             ann_rows = ann_r2.fetchall()
 
     major_pts = 0

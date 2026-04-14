@@ -833,7 +833,7 @@ class AnnsClassified(Base):
     anns_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     ann_type: Mapped[str] = mapped_column(String(32), index=True)
     sentiment: Mapped[str] = mapped_column(String(16), index=True, default="neutral")
-    keywords: Mapped[str | None] = mapped_column(Text)
+    keywords: Mapped[list | None] = mapped_column(JSONB)
     classified_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=text("NOW()")
     )

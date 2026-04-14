@@ -780,15 +780,14 @@ def sync_classify_news(conn) -> int:
                 r = clf.classify_anns(aid, title or "", dt_str or "")
                 d = r.to_db_dict(aid)
                 anns_batch.append((
-                    d.get("anns_id", aid), d.get("news_scope", ""), d.get("time_slot", ""),
-                    d.get("sentiment", ""), d.get("related_codes", ""),
-                    d.get("related_industries", ""), d.get("keywords", ""),
+                    d["anns_id"], d["ann_type"], d["sentiment"],
+                    Json(d["keywords"]) if d["keywords"] else None,
                 ))
             if anns_batch:
                 execute_values(
                     cur,
                     "INSERT INTO anns_classified "
-                    "(anns_id, news_scope, time_slot, sentiment, related_codes, related_industries, keywords) "
+                    "(anns_id, ann_type, sentiment, keywords) "
                     "VALUES %s ON CONFLICT (anns_id) DO NOTHING",
                     anns_batch,
                 )
