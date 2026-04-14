@@ -20,7 +20,7 @@ from io import StringIO
 from pathlib import Path
 
 import psycopg2
-from psycopg2.extras import execute_values
+from psycopg2.extras import execute_values, Json
 
 from app.research.data.tushare_service import TushareService
 
@@ -54,7 +54,11 @@ def _df_to_values(df) -> tuple[list[str], list[tuple]]:
 
 
 def _auto_widen_columns(conn, table: str, cols: list[str], df) -> None:
-    """Auto-expand VARCHAR columns that are too narrow for the data."""
+    """Detect VARCHAR columns that are too narrow — warn instead of auto-ALTER.
+
+    Previously executed ALTER TABLE at runtime; now only logs a warning
+    so schema changes go through Alembic migrations.
+    """
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -75,20 +79,20 @@ def _auto_widen_columns(conn, table: str, cols: list[str], df) -> None:
             actual_max = df[clean].dropna().astype(str).str.len().max()
             if actual_max and actual_max > max_len:
                 new_len = max(int(actual_max * 1.5), max_len * 2)
-                with conn.cursor() as cur:
-                    cur.execute(f'ALTER TABLE {table} ALTER COLUMN "{clean}" TYPE VARCHAR({new_len})')
-                conn.commit()
-                logger.info("auto-schema: widened %s.%s from %d to %d", table, clean, max_len, new_len)
+                logger.warning(
+                    "schema-drift: %s.%s needs VARCHAR(%d→%d), "
+                    "please add an Alembic migration",
+                    table, clean, max_len, new_len,
+                )
     except Exception:
-        conn.rollback()
-        logger.warning("auto-widen failed for %s", table, exc_info=True)
+        logger.warning("schema-check failed for %s", table, exc_info=True)
 
 
 def _auto_add_columns(conn, table: str, cols: list[str], df) -> None:
-    """Auto-detect missing columns and ALTER TABLE to add them.
+    """Detect missing columns — warn instead of auto-ALTER.
 
-    Maps pandas dtypes to PostgreSQL types and adds any columns that exist
-    in the DataFrame but not in the database table.
+    Previously executed ALTER TABLE ADD COLUMN at runtime; now only logs
+    a warning so schema changes go through Alembic migrations.
     """
     try:
         with conn.cursor() as cur:
@@ -98,7 +102,7 @@ def _auto_add_columns(conn, table: str, cols: list[str], df) -> None:
             )
             existing = {row[0] for row in cur.fetchall()}
 
-        missing = [c for c in cols if c.strip('"') not in existing]
+        missing = [c.strip('"') for c in cols if c.strip('"') not in existing]
         if not missing:
             return
 
@@ -108,19 +112,18 @@ def _auto_add_columns(conn, table: str, cols: list[str], df) -> None:
             "object": "TEXT",
             "bool": "BOOLEAN",
         }
-        with conn.cursor() as cur:
-            for col in missing:
-                clean_col = col.strip('"')
-                pg_type = "TEXT"
-                if clean_col in df.columns:
-                    pd_dtype = str(df[clean_col].dtype)
-                    pg_type = dtype_map.get(pd_dtype, "TEXT")
-                cur.execute(f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "{clean_col}" {pg_type}')
-                logger.info("auto-schema: added column %s.%s (%s)", table, clean_col, pg_type)
-            conn.commit()
+        for clean_col in missing:
+            pg_type = "TEXT"
+            if clean_col in df.columns:
+                pd_dtype = str(df[clean_col].dtype)
+                pg_type = dtype_map.get(pd_dtype, "TEXT")
+            logger.warning(
+                "schema-drift: %s missing column '%s' (%s), "
+                "please add an Alembic migration",
+                table, clean_col, pg_type,
+            )
     except Exception:
-        conn.rollback()
-        logger.warning("auto-schema failed for %s", table, exc_info=True)
+        logger.warning("schema-check failed for %s", table, exc_info=True)
 
 
 def _get_trade_dates_desc(conn, ref_date: str, lookback: int = 3) -> list[str]:
@@ -751,8 +754,10 @@ def sync_classify_news(conn) -> int:
                 d = r.to_db_dict(nid)
                 news_batch.append((
                     d["news_id"], d["news_scope"], d["time_slot"],
-                    d["sentiment"], d["related_codes"],
-                    d["related_industries"], d["keywords"],
+                    d["sentiment"],
+                    Json(d["related_codes"]) if d["related_codes"] else None,
+                    Json(d["related_industries"]) if d["related_industries"] else None,
+                    Json(d["keywords"]) if d["keywords"] else None,
                 ))
             if news_batch:
                 execute_values(

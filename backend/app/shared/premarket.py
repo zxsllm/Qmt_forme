@@ -136,17 +136,13 @@ async def generate_premarket_plan(session: AsyncSession, today: str) -> dict:
     """), {"start": yesterday[:4] + '-' + yesterday[4:6] + '-' + yesterday[6:] + ' 15:00:00'})
 
     news_stocks: dict[str, tuple[str, str]] = {}
-    import json
     for row in news_catalyst_r.fetchall():
-        try:
-            codes = json.loads(row[0]) if row[0] else []
-            content = (row[1] or "").strip()
-            dt_str = str(row[2])[:16] if row[2] else ""
-            for code in codes[:3]:
-                if code not in news_stocks:
-                    news_stocks[code] = (content, dt_str)
-        except (json.JSONDecodeError, TypeError):
-            pass
+        codes = row[0] if isinstance(row[0], list) else []
+        content = (row[1] or "").strip()
+        dt_str = str(row[2])[:16] if row[2] else ""
+        for code in codes[:3]:
+            if code not in news_stocks:
+                news_stocks[code] = (content, dt_str)
 
     news_watchlist = []
     for code, (content, dt_str) in list(news_stocks.items())[:15]:
@@ -193,24 +189,21 @@ async def generate_premarket_plan(session: AsyncSession, today: str) -> dict:
     """), {"start": yesterday[:4] + '-' + yesterday[4:6] + '-' + yesterday[6:] + ' 15:00:00'})
 
     for row in neg_news_r.fetchall():
-        try:
-            codes = json.loads(row[0]) if row[0] else []
-            content = (row[1] or "").strip()
-            dt_str = str(row[2])[:16] if row[2] else ""
-            for code in codes[:2]:
-                sb_r2 = await session.execute(text(
-                    "SELECT name FROM stock_basic WHERE ts_code = :c"
-                ), {"c": code})
-                sb_row2 = sb_r2.fetchone()
-                result["risk_alerts"].append({
-                    "ts_code": code,
-                    "name": sb_row2[0] if sb_row2 else code,
-                    "type": "利空消息",
-                    "detail": content,
-                    "time": dt_str,
-                })
-        except (json.JSONDecodeError, TypeError):
-            pass
+        codes = row[0] if isinstance(row[0], list) else []
+        content = (row[1] or "").strip()
+        dt_str = str(row[2])[:16] if row[2] else ""
+        for code in codes[:2]:
+            sb_r2 = await session.execute(text(
+                "SELECT name FROM stock_basic WHERE ts_code = :c"
+            ), {"c": code})
+            sb_row2 = sb_r2.fetchone()
+            result["risk_alerts"].append({
+                "ts_code": code,
+                "name": sb_row2[0] if sb_row2 else code,
+                "type": "利空消息",
+                "detail": content,
+                "time": dt_str,
+            })
 
     _clean(result["risk_alerts"])
     return result

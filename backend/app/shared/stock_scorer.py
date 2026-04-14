@@ -1,8 +1,12 @@
 """StockScorer — 信号聚合评分引擎.
 
 Integrates four dimensions (tech / sentiment / fundamental / news)
-into a single sortable composite score.  Uses SQL pre-filtering to
-avoid iterating the full 5 000+ stock universe.
+into a single sortable composite score.  Uses SQL pre-filtering and
+batch data pre-fetch to minimize DB round-trips.
+
+Single-stock mode:  each scorer queries individually (~14 queries).
+Batch mode (rank_stocks):  _prefetch_batch() loads all data up-front
+  (~13 queries total), then scorers read from the ctx dict.
 
 Endpoint:
   GET /api/v1/signals/ranked?trade_date=20260411&limit=50&min_score=60
@@ -10,6 +14,7 @@ Endpoint:
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from datetime import datetime, timedelta
@@ -40,27 +45,227 @@ def _clamp(v: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, v))
 
 
+# ── Batch pre-fetch ──────────────────────────────────────────────────────
+
+async def _prefetch_batch(
+    session: AsyncSession, trade_date: str, codes: list[str],
+) -> dict:
+    """Pre-fetch all scoring data for a batch of stocks.
+
+    Reduces ~14 queries/stock × N stocks down to ~13 total queries.
+    Returns a ctx dict consumed by the _score_* functions.
+    """
+    ctx: dict = {}
+    codes_csv = ",".join(f"'{c}'" for c in codes)
+    codes_set = set(codes)
+
+    # ── Market-wide (shared for all stocks) ──────────────────────────────
+
+    board_r = await session.execute(text("""
+        SELECT limit_type, COUNT(*) FROM limit_list_ths
+        WHERE trade_date = :td GROUP BY limit_type
+    """), {"td": trade_date})
+    counts = {row[0]: row[1] for row in board_r.fetchall()}
+    up_count = counts.get("涨停池", 0)
+    down_count = counts.get("跌停池", 0)
+    broken_count = counts.get("炸板池", 0)
+    total = up_count + down_count + broken_count
+    seal_rate = (up_count / (up_count + broken_count) * 100) if (up_count + broken_count) > 0 else 0
+
+    step_r = await session.execute(text("""
+        SELECT MAX(nums) FROM limit_step WHERE trade_date = :td
+    """), {"td": trade_date})
+    max_board = step_r.scalar() or 0
+
+    up_ratio = up_count / total * 100 if total > 0 else 0
+    if up_ratio >= 60 and seal_rate >= 70 and max_board >= 5:
+        temperature = "极热"
+    elif up_ratio >= 45 and seal_rate >= 55:
+        temperature = "偏热"
+    elif down_count > up_count * 1.5:
+        temperature = "冰点"
+    elif down_count > up_count:
+        temperature = "偏冷"
+    else:
+        temperature = "中性"
+
+    ctx["market"] = {
+        "temperature": temperature,
+        "limit_up": up_count,
+        "limit_down": down_count,
+        "broken": broken_count,
+        "seal_rate": round(seal_rate, 1),
+        "max_board": max_board,
+    }
+
+    sector_r = await session.execute(text("""
+        SELECT sb.industry, COUNT(*) as cnt
+        FROM limit_list_ths ll
+        JOIN stock_basic sb ON ll.ts_code = sb.ts_code
+        WHERE ll.trade_date = :td AND ll.limit_type = '涨停池'
+        GROUP BY sb.industry ORDER BY cnt DESC LIMIT 5
+    """), {"td": trade_date})
+    ctx["hot_sectors"] = [row[0] for row in sector_r.fetchall() if row[0]]
+
+    limit_set_r = await session.execute(text("""
+        SELECT ts_code FROM limit_list_ths
+        WHERE trade_date = :td AND limit_type = '涨停池'
+    """), {"td": trade_date})
+    ctx["on_limit_codes"] = {row[0] for row in limit_set_r.fetchall()}
+
+    lhb_set_r = await session.execute(text("""
+        SELECT DISTINCT ts_code FROM hm_detail WHERE trade_date = :td
+    """), {"td": trade_date})
+    ctx["on_lhb_codes"] = {row[0] for row in lhb_set_r.fetchall()}
+
+    # ── Per-stock batch queries ──────────────────────────────────────────
+
+    ind_r = await session.execute(text(f"""
+        SELECT ts_code, industry FROM stock_basic WHERE ts_code IN ({codes_csv})
+    """))
+    ctx["industry_map"] = {row[0]: row[1] for row in ind_r.fetchall()}
+
+    limit_r = await session.execute(text(f"""
+        SELECT ts_code, trade_date, limit_type FROM (
+            SELECT ts_code, trade_date, limit_type,
+                   ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) as rn
+            FROM limit_list_ths
+            WHERE ts_code IN ({codes_csv}) AND trade_date <= :td
+        ) sub WHERE rn <= 15
+        ORDER BY ts_code, trade_date DESC
+    """), {"td": trade_date})
+    limit_hist: dict[str, list] = {}
+    for row in limit_r.fetchall():
+        limit_hist.setdefault(row[0], []).append((row[1], row[2]))
+    ctx["limit_history"] = limit_hist
+
+    bars_r = await session.execute(text(f"""
+        SELECT ts_code, trade_date, open, high, low, close, pre_close, vol, pct_chg FROM (
+            SELECT ts_code, trade_date, open, high, low, close, pre_close, vol, pct_chg,
+                   ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) as rn
+            FROM stock_daily
+            WHERE ts_code IN ({codes_csv}) AND trade_date <= :td
+        ) sub WHERE rn <= 60
+        ORDER BY ts_code, trade_date DESC
+    """), {"td": trade_date})
+    bars_dict: dict[str, list] = {}
+    for row in bars_r.fetchall():
+        bars_dict.setdefault(row[0], []).append(row[1:])
+    ctx["daily_bars"] = bars_dict
+
+    fina_r = await session.execute(text(f"""
+        SELECT ts_code, end_date, roe, netprofit_yoy, or_yoy FROM (
+            SELECT ts_code, end_date, roe, netprofit_yoy, or_yoy,
+                   ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
+            FROM fina_indicator
+            WHERE ts_code IN ({codes_csv})
+        ) sub WHERE rn = 1
+    """))
+    ctx["fina_data"] = {row[0]: row[1:] for row in fina_r.fetchall()}
+
+    pe_r = await session.execute(text(f"""
+        SELECT ts_code, pe_ttm FROM (
+            SELECT ts_code, pe_ttm,
+                   ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) as rn
+            FROM daily_basic
+            WHERE ts_code IN ({codes_csv}) AND trade_date <= :td AND pe_ttm > 0
+        ) sub WHERE rn = 1
+    """), {"td": trade_date})
+    ctx["pe_own"] = {row[0]: row[1] for row in pe_r.fetchall()}
+
+    industries = {v for v in ctx["industry_map"].values() if v}
+    if industries:
+        ind_csv = ",".join(f"'{i}'" for i in industries)
+        ipe_r = await session.execute(text(f"""
+            SELECT sb.industry, db.pe_ttm
+            FROM daily_basic db
+            JOIN stock_basic sb ON db.ts_code = sb.ts_code
+            WHERE sb.industry IN ({ind_csv}) AND sb.list_status = 'L'
+              AND db.trade_date = (SELECT MAX(trade_date) FROM daily_basic WHERE trade_date <= :td)
+              AND db.pe_ttm > 0 AND db.pe_ttm IS NOT NULL
+            ORDER BY sb.industry, db.pe_ttm
+        """), {"td": trade_date})
+        ind_pe: dict[str, list[float]] = {}
+        for row in ipe_r.fetchall():
+            if row[1] and not math.isnan(row[1]):
+                ind_pe.setdefault(row[0], []).append(row[1])
+        ctx["industry_pe"] = ind_pe
+    else:
+        ctx["industry_pe"] = {}
+
+    # News + announcements
+    try:
+        td = datetime.strptime(trade_date, "%Y%m%d")
+        start_dt = (td - timedelta(days=4)).strftime("%Y-%m-%d") + " 00:00:00"
+        end_dt = td.strftime("%Y-%m-%d") + " 23:59:59"
+
+        news_r = await session.execute(text("""
+            SELECT nc.related_codes, nc.sentiment
+            FROM news_classified nc
+            JOIN stock_news n ON nc.news_id = n.id
+            WHERE n.datetime BETWEEN :start AND :end
+        """), {"start": start_dt, "end": end_dt})
+        news_by_code: dict[str, dict[str, int]] = {}
+        for row in news_r.fetchall():
+            related_str = row[0] or ""
+            sentiment = row[1] or ""
+            try:
+                related_list = json.loads(related_str) if related_str.startswith("[") else []
+            except (json.JSONDecodeError, TypeError):
+                related_list = []
+            matched = [c for c in related_list if c in codes_set] if related_list else [c for c in codes if c in related_str]
+            for code in matched:
+                d = news_by_code.setdefault(code, {})
+                d[sentiment] = d.get(sentiment, 0) + 1
+        ctx["news_sentiment"] = news_by_code
+
+        ann_r = await session.execute(text(f"""
+            SELECT sub.ts_code, ac.ann_type, ac.sentiment FROM (
+                SELECT a.id, a.ts_code,
+                       ROW_NUMBER() OVER (PARTITION BY a.ts_code ORDER BY a.ann_date DESC) as rn
+                FROM stock_anns a
+                WHERE a.ts_code IN ({codes_csv})
+            ) sub
+            JOIN anns_classified ac ON ac.anns_id = sub.id
+            WHERE sub.rn <= 10
+        """))
+        ann_dict: dict[str, list] = {}
+        for row in ann_r.fetchall():
+            ann_dict.setdefault(row[0], []).append((row[1], row[2]))
+        ctx["ann_data"] = ann_dict
+    except Exception:
+        logger.debug("batch news/ann prefetch failed", exc_info=True)
+        ctx["news_sentiment"] = {}
+        ctx["ann_data"] = {}
+
+    return ctx
+
+
 # ── Dimension scorers ────────────────────────────────────────────────────
 
-async def _score_tech(session: AsyncSession, ts_code: str, trade_date: str) -> tuple[float, dict, list[str]]:
-    """Technical dimension score (0-100).
-
-    Reuses logic from tech_signal.py without importing heavy functions
-    that each issue their own SQL; instead we batch-fetch what we need.
-    """
-    score = 50.0  # neutral baseline
+async def _score_tech(
+    session: AsyncSession, ts_code: str, trade_date: str,
+    ctx: dict | None = None,
+) -> tuple[float, dict, list[str]]:
+    """Technical dimension score (0-100)."""
+    score = 50.0
     detail: dict = {}
     signals: list[str] = []
 
     # -- consecutive limit-up ------------------------------------------------
-    r = await session.execute(text("""
-        SELECT trade_date, limit_type
-        FROM limit_list_ths
-        WHERE ts_code = :code AND trade_date <= :td
-        ORDER BY trade_date DESC LIMIT 15
-    """), {"code": ts_code, "td": trade_date})
+    if ctx and "limit_history" in ctx:
+        limit_rows = ctx["limit_history"].get(ts_code, [])
+    else:
+        r = await session.execute(text("""
+            SELECT trade_date, limit_type
+            FROM limit_list_ths
+            WHERE ts_code = :code AND trade_date <= :td
+            ORDER BY trade_date DESC LIMIT 15
+        """), {"code": ts_code, "td": trade_date})
+        limit_rows = r.fetchall()
+
     streak = 0
-    for row in r.fetchall():
+    for row in limit_rows:
         if row[1] == "涨停池":
             streak += 1
         else:
@@ -71,13 +276,17 @@ async def _score_tech(session: AsyncSession, ts_code: str, trade_date: str) -> t
         signals.append("limit_board")
 
     # -- volume anomaly + gap + indicator snapshot from recent bars ----------
-    r = await session.execute(text("""
-        SELECT trade_date, open, high, low, close, pre_close, vol, pct_chg
-        FROM stock_daily
-        WHERE ts_code = :code AND trade_date <= :td
-        ORDER BY trade_date DESC LIMIT 60
-    """), {"code": ts_code, "td": trade_date})
-    bars = r.fetchall()
+    if ctx and "daily_bars" in ctx:
+        bars = ctx["daily_bars"].get(ts_code, [])
+    else:
+        r = await session.execute(text("""
+            SELECT trade_date, open, high, low, close, pre_close, vol, pct_chg
+            FROM stock_daily
+            WHERE ts_code = :code AND trade_date <= :td
+            ORDER BY trade_date DESC LIMIT 60
+        """), {"code": ts_code, "td": trade_date})
+        bars = r.fetchall()
+
     if len(bars) < 5:
         return _clamp(score), detail, signals
 
@@ -118,7 +327,7 @@ async def _score_tech(session: AsyncSession, ts_code: str, trade_date: str) -> t
 
     # support / resistance proximity
     sr_pts = 0.0
-    pos_pct = 0.5  # default: mid-range
+    pos_pct = 0.5
     closes = [_clean_float(b[4]) for b in bars if _clean_float(b[4])]
     if closes:
         current_close = closes[0]
@@ -131,12 +340,12 @@ async def _score_tech(session: AsyncSession, ts_code: str, trade_date: str) -> t
             if rng > 0:
                 pos_pct = (current_close - period_low) / rng
                 if pos_pct < 0.2:
-                    sr_pts = 20  # near support
+                    sr_pts = 20
                 elif pos_pct > 0.8:
-                    sr_pts = -20  # near resistance
+                    sr_pts = -20
     detail["position_pct"] = round(pos_pct * 100, 1)
 
-    # RSI / MACD quick calc from close series (use indicators module)
+    # RSI / MACD quick calc
     rsi_pts = 0.0
     macd_pts = 0.0
     try:
@@ -176,57 +385,62 @@ async def _score_tech(session: AsyncSession, ts_code: str, trade_date: str) -> t
     except Exception:
         logger.debug("indicator calc failed for %s", ts_code, exc_info=True)
 
-    # Weighted combination of sub-scores
-    # limit_pts already 0-100; others are bonus/penalty on base 50
     score = 50.0 + (limit_pts - 50) * 0.3 + vol_pts * 0.25 + gap_pts * 0.15 + sr_pts * 0.15 + rsi_pts * 0.1 + macd_pts * 0.05
     return _clamp(score), detail, signals
 
 
-async def _score_sentiment(session: AsyncSession, ts_code: str, trade_date: str) -> tuple[float, dict, list[str]]:
-    """Sentiment dimension score (0-100).
-
-    Reuses market_temperature logic inline, checks limit/dragon-tiger boards.
-    """
+async def _score_sentiment(
+    session: AsyncSession, ts_code: str, trade_date: str,
+    ctx: dict | None = None,
+) -> tuple[float, dict, list[str]]:
+    """Sentiment dimension score (0-100)."""
     score = 50.0
     detail: dict = {}
     signals: list[str] = []
 
     # -- market temperature --------------------------------------------------
-    board_r = await session.execute(text("""
-        SELECT limit_type, COUNT(*) FROM limit_list_ths
-        WHERE trade_date = :td GROUP BY limit_type
-    """), {"td": trade_date})
-    counts: dict[str, int] = {}
-    for row in board_r.fetchall():
-        counts[row[0]] = row[1]
-
-    up_count = counts.get("涨停池", 0)
-    down_count = counts.get("跌停池", 0)
-    broken_count = counts.get("炸板池", 0)
-    total = up_count + down_count + broken_count
-    seal_rate = (up_count / (up_count + broken_count) * 100) if (up_count + broken_count) > 0 else 0
-
-    step_r = await session.execute(text("""
-        SELECT MAX(nums) FROM limit_step WHERE trade_date = :td
-    """), {"td": trade_date})
-    max_board = step_r.scalar() or 0
-
-    up_ratio = up_count / total * 100 if total > 0 else 0
-    if up_ratio >= 60 and seal_rate >= 70 and max_board >= 5:
-        temperature = "极热"
-    elif up_ratio >= 45 and seal_rate >= 55:
-        temperature = "偏热"
-    elif down_count > up_count * 1.5:
-        temperature = "冰点"
-    elif down_count > up_count:
-        temperature = "偏冷"
+    if ctx and "market" in ctx:
+        mkt = ctx["market"]
+        temperature = mkt["temperature"]
+        up_count = mkt["limit_up"]
+        down_count = mkt["limit_down"]
+        seal_rate = mkt["seal_rate"]
     else:
-        temperature = "中性"
+        board_r = await session.execute(text("""
+            SELECT limit_type, COUNT(*) FROM limit_list_ths
+            WHERE trade_date = :td GROUP BY limit_type
+        """), {"td": trade_date})
+        counts: dict[str, int] = {}
+        for row in board_r.fetchall():
+            counts[row[0]] = row[1]
+        up_count = counts.get("涨停池", 0)
+        down_count = counts.get("跌停池", 0)
+        broken_count = counts.get("炸板池", 0)
+        total = up_count + down_count + broken_count
+        seal_rate = (up_count / (up_count + broken_count) * 100) if (up_count + broken_count) > 0 else 0
+
+        step_r = await session.execute(text("""
+            SELECT MAX(nums) FROM limit_step WHERE trade_date = :td
+        """), {"td": trade_date})
+        max_board = step_r.scalar() or 0
+
+        up_ratio = up_count / total * 100 if total > 0 else 0
+        if up_ratio >= 60 and seal_rate >= 70 and max_board >= 5:
+            temperature = "极热"
+        elif up_ratio >= 45 and seal_rate >= 55:
+            temperature = "偏热"
+        elif down_count > up_count * 1.5:
+            temperature = "冰点"
+        elif down_count > up_count:
+            temperature = "偏冷"
+        else:
+            temperature = "中性"
+        seal_rate = round(seal_rate, 1)
 
     detail["temperature"] = temperature
     detail["limit_up"] = up_count
     detail["limit_down"] = down_count
-    detail["seal_rate"] = round(seal_rate, 1)
+    detail["seal_rate"] = seal_rate
 
     temp_pts = 0.0
     if temperature in ("极热",):
@@ -239,45 +453,55 @@ async def _score_sentiment(session: AsyncSession, ts_code: str, trade_date: str)
         temp_pts = -15
 
     # -- is stock on limit board today? -------------------------------------
-    on_limit_r = await session.execute(text("""
-        SELECT 1 FROM limit_list_ths
-        WHERE ts_code = :code AND trade_date = :td AND limit_type = '涨停池'
-        LIMIT 1
-    """), {"code": ts_code, "td": trade_date})
-    on_limit = on_limit_r.fetchone() is not None
+    if ctx and "on_limit_codes" in ctx:
+        on_limit = ts_code in ctx["on_limit_codes"]
+    else:
+        on_limit_r = await session.execute(text("""
+            SELECT 1 FROM limit_list_ths
+            WHERE ts_code = :code AND trade_date = :td AND limit_type = '涨停池'
+            LIMIT 1
+        """), {"code": ts_code, "td": trade_date})
+        on_limit = on_limit_r.fetchone() is not None
     limit_pts = 40 if on_limit else 0
     if on_limit:
         signals.append("limit_board")
     detail["on_limit_board"] = on_limit
 
     # -- is stock on dragon-tiger board? ------------------------------------
-    lhb_r = await session.execute(text("""
-        SELECT 1 FROM hm_detail
-        WHERE ts_code = :code AND trade_date = :td
-        LIMIT 1
-    """), {"code": ts_code, "td": trade_date})
-    on_lhb = lhb_r.fetchone() is not None
+    if ctx and "on_lhb_codes" in ctx:
+        on_lhb = ts_code in ctx["on_lhb_codes"]
+    else:
+        lhb_r = await session.execute(text("""
+            SELECT 1 FROM hm_detail
+            WHERE ts_code = :code AND trade_date = :td
+            LIMIT 1
+        """), {"code": ts_code, "td": trade_date})
+        on_lhb = lhb_r.fetchone() is not None
     lhb_pts = 30 if on_lhb else 0
     if on_lhb:
         signals.append("dragon_tiger")
     detail["on_dragon_tiger"] = on_lhb
 
     # -- is stock's sector hot today? (top-5 by limit-up count) -------------
-    sector_r = await session.execute(text("""
-        SELECT sb.industry, COUNT(*) as cnt
-        FROM limit_list_ths ll
-        JOIN stock_basic sb ON ll.ts_code = sb.ts_code
-        WHERE ll.trade_date = :td AND ll.limit_type = '涨停池'
-        GROUP BY sb.industry
-        ORDER BY cnt DESC LIMIT 5
-    """), {"td": trade_date})
-    hot_sectors = [row[0] for row in sector_r.fetchall() if row[0]]
+    if ctx and "hot_sectors" in ctx and "industry_map" in ctx:
+        hot_sectors = ctx["hot_sectors"]
+        stock_industry = ctx["industry_map"].get(ts_code)
+    else:
+        sector_r = await session.execute(text("""
+            SELECT sb.industry, COUNT(*) as cnt
+            FROM limit_list_ths ll
+            JOIN stock_basic sb ON ll.ts_code = sb.ts_code
+            WHERE ll.trade_date = :td AND ll.limit_type = '涨停池'
+            GROUP BY sb.industry
+            ORDER BY cnt DESC LIMIT 5
+        """), {"td": trade_date})
+        hot_sectors = [row[0] for row in sector_r.fetchall() if row[0]]
 
-    stock_ind_r = await session.execute(text("""
-        SELECT industry FROM stock_basic WHERE ts_code = :code
-    """), {"code": ts_code})
-    stock_ind_row = stock_ind_r.fetchone()
-    stock_industry = stock_ind_row[0] if stock_ind_row else None
+        stock_ind_r = await session.execute(text("""
+            SELECT industry FROM stock_basic WHERE ts_code = :code
+        """), {"code": ts_code})
+        stock_ind_row = stock_ind_r.fetchone()
+        stock_industry = stock_ind_row[0] if stock_ind_row else None
 
     sector_pts = 0
     if stock_industry and stock_industry in hot_sectors:
@@ -290,23 +514,26 @@ async def _score_sentiment(session: AsyncSession, ts_code: str, trade_date: str)
     return _clamp(score), detail, signals
 
 
-async def _score_fundamental(session: AsyncSession, ts_code: str, trade_date: str) -> tuple[float, dict, list[str]]:
-    """Fundamental dimension score (0-100).
-
-    Uses fina_indicator + daily_basic for PE/ROE/growth.
-    """
+async def _score_fundamental(
+    session: AsyncSession, ts_code: str, trade_date: str,
+    ctx: dict | None = None,
+) -> tuple[float, dict, list[str]]:
+    """Fundamental dimension score (0-100)."""
     score = 50.0
     detail: dict = {}
     signals: list[str] = []
 
     # -- latest financials --------------------------------------------------
-    fina_r = await session.execute(text("""
-        SELECT end_date, roe, netprofit_yoy, or_yoy
-        FROM fina_indicator
-        WHERE ts_code = :code
-        ORDER BY end_date DESC LIMIT 1
-    """), {"code": ts_code})
-    fina_row = fina_r.fetchone()
+    if ctx and "fina_data" in ctx:
+        fina_row = ctx["fina_data"].get(ts_code)
+    else:
+        fina_r = await session.execute(text("""
+            SELECT end_date, roe, netprofit_yoy, or_yoy
+            FROM fina_indicator
+            WHERE ts_code = :code
+            ORDER BY end_date DESC LIMIT 1
+        """), {"code": ts_code})
+        fina_row = fina_r.fetchone()
 
     roe = _clean_float(fina_row[1]) if fina_row else None
     np_yoy = _clean_float(fina_row[2]) if fina_row else None
@@ -344,35 +571,41 @@ async def _score_fundamental(session: AsyncSession, ts_code: str, trade_date: st
 
     # -- PE_TTM percentile within industry ----------------------------------
     pe_pts = 0.0
-    # First get the stock's industry
-    ind_r = await session.execute(text("""
-        SELECT industry FROM stock_basic WHERE ts_code = :code
-    """), {"code": ts_code})
-    ind_row = ind_r.fetchone()
-    industry = ind_row[0] if ind_row else None
+    if ctx and "industry_map" in ctx:
+        industry = ctx["industry_map"].get(ts_code)
+    else:
+        ind_r = await session.execute(text("""
+            SELECT industry FROM stock_basic WHERE ts_code = :code
+        """), {"code": ts_code})
+        ind_row = ind_r.fetchone()
+        industry = ind_row[0] if ind_row else None
 
     if industry:
-        pe_r = await session.execute(text("""
-            SELECT db.pe_ttm
-            FROM daily_basic db
-            JOIN stock_basic sb ON db.ts_code = sb.ts_code
-            WHERE sb.industry = :ind AND sb.list_status = 'L'
-              AND db.trade_date = (
-                  SELECT MAX(trade_date) FROM daily_basic WHERE trade_date <= :td
-              )
-              AND db.pe_ttm > 0 AND db.pe_ttm IS NOT NULL
-            ORDER BY db.pe_ttm
-        """), {"ind": industry, "td": trade_date})
-        all_pe = [row[0] for row in pe_r.fetchall() if row[0] and not math.isnan(row[0])]
+        if ctx and "industry_pe" in ctx and "pe_own" in ctx:
+            all_pe = ctx["industry_pe"].get(industry, [])
+            own_pe = _clean_float(ctx["pe_own"].get(ts_code))
+        else:
+            pe_r = await session.execute(text("""
+                SELECT db.pe_ttm
+                FROM daily_basic db
+                JOIN stock_basic sb ON db.ts_code = sb.ts_code
+                WHERE sb.industry = :ind AND sb.list_status = 'L'
+                  AND db.trade_date = (
+                      SELECT MAX(trade_date) FROM daily_basic WHERE trade_date <= :td
+                  )
+                  AND db.pe_ttm > 0 AND db.pe_ttm IS NOT NULL
+                ORDER BY db.pe_ttm
+            """), {"ind": industry, "td": trade_date})
+            all_pe = [row[0] for row in pe_r.fetchall() if row[0] and not math.isnan(row[0])]
 
-        # Get this stock's PE
-        own_pe_r = await session.execute(text("""
-            SELECT pe_ttm FROM daily_basic
-            WHERE ts_code = :code AND trade_date <= :td AND pe_ttm > 0
-            ORDER BY trade_date DESC LIMIT 1
-        """), {"code": ts_code, "td": trade_date})
-        own_pe_row = own_pe_r.fetchone()
-        own_pe = _clean_float(own_pe_row[0]) if own_pe_row else None
+            own_pe_r = await session.execute(text("""
+                SELECT pe_ttm FROM daily_basic
+                WHERE ts_code = :code AND trade_date <= :td AND pe_ttm > 0
+                ORDER BY trade_date DESC LIMIT 1
+            """), {"code": ts_code, "td": trade_date})
+            own_pe_row = own_pe_r.fetchone()
+            own_pe = _clean_float(own_pe_row[0]) if own_pe_row else None
+
         detail["pe_ttm"] = own_pe
 
         if own_pe and all_pe:
@@ -389,40 +622,44 @@ async def _score_fundamental(session: AsyncSession, ts_code: str, trade_date: st
     return _clamp(score), detail, signals
 
 
-async def _score_news(session: AsyncSession, ts_code: str, trade_date: str) -> tuple[float, dict, list[str]]:
-    """News dimension score (0-100).
-
-    Uses news_classified for recent 3-day sentiment and announcements.
-    """
+async def _score_news(
+    session: AsyncSession, ts_code: str, trade_date: str,
+    ctx: dict | None = None,
+) -> tuple[float, dict, list[str]]:
+    """News dimension score (0-100)."""
     score = 50.0
     detail: dict = {}
     signals: list[str] = []
 
-    # Compute date range: trade_date minus ~3 calendar days (safe approximation)
-    try:
-        td = datetime.strptime(trade_date, "%Y%m%d")
-        start_dt = (td - timedelta(days=4)).strftime("%Y-%m-%d") + " 00:00:00"
-        end_dt = td.strftime("%Y-%m-%d") + " 23:59:59"
-    except ValueError:
-        return score, detail, signals
-
     # -- recent news sentiment for this stock --------------------------------
-    news_r = await session.execute(text("""
-        SELECT nc.sentiment, COUNT(*) as cnt
-        FROM news_classified nc
-        JOIN stock_news n ON nc.news_id = n.id
-        WHERE nc.related_codes LIKE :code_pat
-          AND n.datetime BETWEEN :start AND :end
-        GROUP BY nc.sentiment
-    """), {"code_pat": f"%{ts_code}%", "start": start_dt, "end": end_dt})
+    if ctx and "news_sentiment" in ctx:
+        sent_map = ctx["news_sentiment"].get(ts_code, {})
+        pos_count = sent_map.get("positive", 0)
+        neg_count = sent_map.get("negative", 0)
+    else:
+        try:
+            td = datetime.strptime(trade_date, "%Y%m%d")
+            start_dt = (td - timedelta(days=4)).strftime("%Y-%m-%d") + " 00:00:00"
+            end_dt = td.strftime("%Y-%m-%d") + " 23:59:59"
+        except ValueError:
+            return score, detail, signals
 
-    pos_count = 0
-    neg_count = 0
-    for row in news_r.fetchall():
-        if row[0] == "positive":
-            pos_count = row[1]
-        elif row[0] == "negative":
-            neg_count = row[1]
+        news_r = await session.execute(text("""
+            SELECT nc.sentiment, COUNT(*) as cnt
+            FROM news_classified nc
+            JOIN stock_news n ON nc.news_id = n.id
+            WHERE nc.related_codes @> :code_json
+              AND n.datetime BETWEEN :start AND :end
+            GROUP BY nc.sentiment
+        """), {"code_json": f'["{ts_code}"]', "start": start_dt, "end": end_dt})
+
+        pos_count = 0
+        neg_count = 0
+        for row in news_r.fetchall():
+            if row[0] == "positive":
+                pos_count = row[1]
+            elif row[0] == "negative":
+                neg_count = row[1]
 
     net_positive = pos_count - neg_count
     news_pts = min(net_positive * 15, 60) if net_positive > 0 else max(net_positive * 15, -60)
@@ -435,27 +672,35 @@ async def _score_news(session: AsyncSession, ts_code: str, trade_date: str) -> t
     elif net_positive <= -2:
         signals.append("news_negative")
 
-    # -- major announcements (业绩预增/中标/战略合作) --------------------------
-    ann_r = await session.execute(text("""
-        SELECT ac.ann_type, ac.sentiment
-        FROM anns_classified ac
-        JOIN stock_anns a ON ac.anns_id = a.id
-        WHERE a.ts_code = :code
-          AND a.ann_date >= :start_date
-        ORDER BY a.ann_date DESC LIMIT 10
-    """), {"code": ts_code, "start_date": trade_date[:8] if len(trade_date) >= 8 else trade_date})
+    # -- major announcements -------------------------------------------------
+    if ctx and "ann_data" in ctx:
+        ann_rows = ctx["ann_data"].get(ts_code, [])
+    else:
+        try:
+            td = datetime.strptime(trade_date, "%Y%m%d")
+            start_dt = (td - timedelta(days=4)).strftime("%Y-%m-%d") + " 00:00:00"
+        except ValueError:
+            return _clamp(50.0 + news_pts * 0.6), detail, signals
 
-    # Fallback: check with wider date range if no results
-    ann_rows = ann_r.fetchall()
-    if not ann_rows:
-        ann_r2 = await session.execute(text("""
+        ann_r = await session.execute(text("""
             SELECT ac.ann_type, ac.sentiment
             FROM anns_classified ac
             JOIN stock_anns a ON ac.anns_id = a.id
             WHERE a.ts_code = :code
-            ORDER BY a.ann_date DESC LIMIT 5
-        """), {"code": ts_code})
-        ann_rows = ann_r2.fetchall()
+              AND a.ann_date >= :start_date
+            ORDER BY a.ann_date DESC LIMIT 10
+        """), {"code": ts_code, "start_date": trade_date[:8] if len(trade_date) >= 8 else trade_date})
+        ann_rows = ann_r.fetchall()
+
+        if not ann_rows:
+            ann_r2 = await session.execute(text("""
+                SELECT ac.ann_type, ac.sentiment
+                FROM anns_classified ac
+                JOIN stock_anns a ON ac.anns_id = a.id
+                WHERE a.ts_code = :code
+                ORDER BY a.ann_date DESC LIMIT 5
+            """), {"code": ts_code})
+            ann_rows = ann_r2.fetchall()
 
     major_pts = 0
     major_types = {"earnings_forecast", "contract", "restructure"}
@@ -474,7 +719,6 @@ async def _score_news(session: AsyncSession, ts_code: str, trade_date: str) -> t
 
 # ── Core scoring class ────────────────────────────────────────────────────
 
-# Weight config
 WEIGHTS = {
     "tech": 0.30,
     "sentiment": 0.25,
@@ -488,12 +732,13 @@ async def score_stock(
     ts_code: str,
     trade_date: str,
     name: str = "",
+    ctx: dict | None = None,
 ) -> dict:
     """Compute composite score for a single stock."""
-    tech_score, tech_detail, tech_signals = await _score_tech(session, ts_code, trade_date)
-    sent_score, sent_detail, sent_signals = await _score_sentiment(session, ts_code, trade_date)
-    fund_score, fund_detail, fund_signals = await _score_fundamental(session, ts_code, trade_date)
-    news_score, news_detail, news_signals = await _score_news(session, ts_code, trade_date)
+    tech_score, tech_detail, tech_signals = await _score_tech(session, ts_code, trade_date, ctx)
+    sent_score, sent_detail, sent_signals = await _score_sentiment(session, ts_code, trade_date, ctx)
+    fund_score, fund_detail, fund_signals = await _score_fundamental(session, ts_code, trade_date, ctx)
+    news_score, news_detail, news_signals = await _score_news(session, ts_code, trade_date, ctx)
 
     total = (
         tech_score * WEIGHTS["tech"]
@@ -528,10 +773,7 @@ async def rank_stocks(
 ) -> dict:
     """Score and rank pre-filtered stocks for a given trade date.
 
-    Pre-filter via SQL:
-      - 当日有交易 (stock_daily 存在)
-      - 非停牌、非ST (除非在涨停池)
-      - 换手率 > 1% 或 成交额 > 5000万
+    Pre-filter via SQL then batch-score using pre-fetched data.
     """
     # Step 1: SQL pre-filter — returns ~500-1000 candidates
     candidates_r = await session.execute(text("""
@@ -564,30 +806,32 @@ async def rank_stocks(
             "market_overview": {"temperature": "无数据", "avg_score": 0, "high_score_count": 0},
         }
 
-    # Step 2: Score each candidate
+    # Step 2: Batch pre-fetch all scoring data
+    codes = [row[0] for row in candidates]
+    ctx = await _prefetch_batch(session, trade_date, codes)
+    logger.info("rank_stocks: batch prefetch done for %d candidates", len(codes))
+
+    # Step 3: Score each candidate (uses cached data, no extra DB queries)
     scored: list[dict] = []
     for ts_code, name in candidates:
         try:
-            result = await score_stock(session, ts_code, trade_date, name or "")
+            result = await score_stock(session, ts_code, trade_date, name or "", ctx)
             if result["total_score"] >= min_score:
                 scored.append(result)
         except Exception:
             logger.debug("scoring failed for %s", ts_code, exc_info=True)
             continue
 
-    # Step 3: Sort by total_score descending, take top N
+    # Step 4: Sort by total_score descending, take top N
     scored.sort(key=lambda x: x["total_score"], reverse=True)
     top = scored[:limit]
 
-    # Step 4: Market overview
+    # Step 5: Market overview
     all_scores = [s["total_score"] for s in scored]
     avg_score = round(sum(all_scores) / len(all_scores), 1) if all_scores else 0
     high_count = sum(1 for s in all_scores if s >= 70)
 
-    # Temperature from sentiment detail (use first stock's cached data, or re-query)
-    temperature = "中性"
-    if top and "sentiment_detail" in top[0]:
-        temperature = top[0]["sentiment_detail"].get("temperature", "中性")
+    temperature = ctx["market"]["temperature"] if ctx and "market" in ctx else "中性"
 
     return {
         "trade_date": trade_date,

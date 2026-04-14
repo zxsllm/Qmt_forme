@@ -223,13 +223,9 @@ async def _get_intraday_news(session: AsyncSession, trade_date: str) -> list[dic
         LIMIT 30
     """), {"start": start, "end": end})
 
-    import json as _json
     results = []
     for row in r.fetchall():
-        try:
-            codes = _json.loads(row[0]) if row[0] else []
-        except (ValueError, TypeError):
-            codes = []
+        codes = row[0] if isinstance(row[0], list) else []
         results.append({
             "codes": codes[:5],
             "sentiment": row[1],

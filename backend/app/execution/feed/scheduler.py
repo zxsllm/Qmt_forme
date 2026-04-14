@@ -850,15 +850,17 @@ class MarketDataScheduler:
                                 "WHERE nc.news_id IS NULL ORDER BY n.id"
                             )
                             unclassified = cur2.fetchall()
-                            from psycopg2.extras import execute_values
+                            from psycopg2.extras import execute_values, Json
                             batch = []
                             for nid, content, dt_str in unclassified:
                                 r = clf.classify_news(nid, content or "", dt_str or "")
                                 d = r.to_db_dict(nid)
                                 batch.append((
                                     d["news_id"], d["news_scope"], d["time_slot"],
-                                    d["sentiment"], d["related_codes"],
-                                    d["related_industries"], d["keywords"],
+                                    d["sentiment"],
+                                    Json(d["related_codes"]) if d["related_codes"] else None,
+                                    Json(d["related_industries"]) if d["related_industries"] else None,
+                                    Json(d["keywords"]) if d["keywords"] else None,
                                 ))
                             if batch:
                                 execute_values(

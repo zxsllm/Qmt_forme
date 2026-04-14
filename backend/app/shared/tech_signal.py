@@ -44,7 +44,7 @@ async def consecutive_limit_count(session: AsyncSession, ts_code: str, trade_dat
 
     streak = 0
     for row in r.fetchall():
-        if row[1] == "U":
+        if row[1] == "涨停池":
             streak += 1
         else:
             break
@@ -260,9 +260,9 @@ async def risk_check(session: AsyncSession, ts_code: str, trade_date: str = "") 
     streak = 0
     just_broken = False
     for lr in limit_rows:
-        if lr[1] == "U":
+        if lr[1] == "涨停池":
             streak += 1
-        elif lr[1] == "Z" and streak == 0:
+        elif lr[1] == "炸板池" and streak == 0:
             just_broken = True
             break
         else:

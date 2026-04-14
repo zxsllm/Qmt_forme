@@ -141,29 +141,30 @@ async def _get_global_indices(session: AsyncSession, trade_date: str) -> list[di
     """Fetch latest global index bars from index_global (before trade_date).
 
     Returns one row per index with close, pct_chg, etc.
+    Uses a single query instead of per-index queries.
     """
-    results = []
-    for code in _GLOBAL_INDEX_CODES:
-        r = await session.execute(text("""
-            SELECT ts_code, trade_date, close, pct_chg, pre_close, open, high, low
+    codes_csv = ",".join(f"'{c}'" for c in _GLOBAL_INDEX_CODES)
+    r = await session.execute(text(f"""
+        SELECT ts_code, trade_date, close, pct_chg, pre_close, open, high, low FROM (
+            SELECT ts_code, trade_date, close, pct_chg, pre_close, open, high, low,
+                   ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) as rn
             FROM index_global
-            WHERE ts_code = :code AND trade_date < :td
-            ORDER BY trade_date DESC
-            LIMIT 1
-        """), {"code": code, "td": trade_date})
-        row = r.fetchone()
-        if row:
-            results.append({
-                "ts_code": row[0],
-                "name": _GLOBAL_INDEX_NAMES.get(row[0], row[0]),
-                "trade_date": row[1],
-                "close": _clean_float(row[2]),
-                "pct_chg": _clean_float(row[3]),
-                "pre_close": _clean_float(row[4]),
-                "open": _clean_float(row[5]),
-                "high": _clean_float(row[6]),
-                "low": _clean_float(row[7]),
-            })
+            WHERE ts_code IN ({codes_csv}) AND trade_date < :td
+        ) sub WHERE rn = 1
+    """), {"td": trade_date})
+    results = []
+    for row in r.fetchall():
+        results.append({
+            "ts_code": row[0],
+            "name": _GLOBAL_INDEX_NAMES.get(row[0], row[0]),
+            "trade_date": row[1],
+            "close": _clean_float(row[2]),
+            "pct_chg": _clean_float(row[3]),
+            "pre_close": _clean_float(row[4]),
+            "open": _clean_float(row[5]),
+            "high": _clean_float(row[6]),
+            "low": _clean_float(row[7]),
+        })
     return results
 
 
@@ -266,45 +267,75 @@ async def _get_price_anchors(
 
     每只股票返回: close, ma5, ma10, ma20, ma60, support/resistance,
     up_limit, down_limit, period_high, period_low。
+    批量查询替代逐股 N+1。
     """
-    from app.shared.tech_signal import support_resistance
+    if not ts_codes:
+        return []
+    codes_csv = ",".join(f"'{c}'" for c in ts_codes)
 
-    loader = DataLoader(session)
+    # 批量加载 60 日 K 线（一次查询替代 N×2 次）
+    bars_r = await session.execute(text(f"""
+        SELECT ts_code, trade_date, high, low, close, vol FROM (
+            SELECT ts_code, trade_date, high, low, close, vol,
+                   ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) as rn
+            FROM stock_daily
+            WHERE ts_code IN ({codes_csv})
+        ) sub WHERE rn <= 60
+        ORDER BY ts_code, trade_date DESC
+    """))
+    bars_by_code: dict[str, list] = {}
+    for row in bars_r.fetchall():
+        bars_by_code.setdefault(row[0], []).append(row[1:])  # (date, high, low, close, vol)
+
+    # 批量加载涨跌停价（一次查询替代 N 次）
+    limit_r = await session.execute(text(f"""
+        SELECT ts_code, up_limit, down_limit FROM stock_limit
+        WHERE ts_code IN ({codes_csv}) AND trade_date = :td
+    """), {"td": trade_date})
+    limit_map = {row[0]: (row[1], row[2]) for row in limit_r.fetchall()}
+
     anchors = []
     for code in ts_codes:
-        sr = await support_resistance(session, code, days=60)
-        sr_data = sr.get("data") or {}
+        rows = bars_by_code.get(code, [])
+        if not rows:
+            anchors.append({"ts_code": code})
+            continue
 
-        # 涨跌停价
-        limit_info = await loader.stk_limit(code, trade_date)
-        up_limit = limit_info["up_limit"] if limit_info else None
-        down_limit = limit_info["down_limit"] if limit_info else None
+        # 从 bars 计算 S/R + MA（内联 support_resistance 逻辑）
+        highs = [(_clean_float(r[1]), r[0]) for r in rows if _clean_float(r[1])]
+        lows = [(_clean_float(r[2]), r[0]) for r in rows if _clean_float(r[2])]
+        closes = [_clean_float(r[3]) for r in rows if _clean_float(r[3])]
 
-        # 补算 ma60（support_resistance 只算到 ma20），不足60条时降级到 ma30
+        current_close = closes[0] if closes else None
+        period_high = max(highs, key=lambda x: x[0]) if highs else None
+        period_low = min(lows, key=lambda x: x[0]) if lows else None
+
+        resistance = sorted(set(h[0] for h in highs if current_close and h[0] > current_close))[:3] if current_close else []
+        support = sorted(set(l[0] for l in lows if current_close and l[0] < current_close), reverse=True)[:3] if current_close else []
+
+        ma5 = round(sum(closes[:5]) / min(5, len(closes)), 2) if closes else None
+        ma10 = round(sum(closes[:10]) / min(10, len(closes)), 2) if len(closes) >= 5 else None
+        ma20 = round(sum(closes[:20]) / min(20, len(closes)), 2) if len(closes) >= 10 else None
         ma60 = None
-        r = await session.execute(text("""
-            SELECT close FROM stock_daily
-            WHERE ts_code = :code ORDER BY trade_date DESC LIMIT 60
-        """), {"code": code})
-        closes = [row[0] for row in r.fetchall() if row[0] is not None]
         if len(closes) >= 60:
             ma60 = round(sum(closes[:60]) / 60, 2)
         elif len(closes) >= 30:
             ma60 = round(sum(closes[:30]) / 30, 2)
 
+        lim = limit_map.get(code)
         anchors.append({
             "ts_code": code,
-            "close": sr_data.get("current_close"),
-            "ma5": sr_data.get("ma5"),
-            "ma10": sr_data.get("ma10"),
-            "ma20": sr_data.get("ma20"),
+            "close": current_close,
+            "ma5": ma5,
+            "ma10": ma10,
+            "ma20": ma20,
             "ma60": ma60,
-            "support_levels": sr_data.get("support", []),
-            "resistance_levels": sr_data.get("resistance", []),
-            "up_limit": _clean_float(up_limit),
-            "down_limit": _clean_float(down_limit),
-            "period_high": sr_data.get("period_high"),
-            "period_low": sr_data.get("period_low"),
+            "support_levels": support,
+            "resistance_levels": resistance,
+            "up_limit": _clean_float(lim[0]) if lim else None,
+            "down_limit": _clean_float(lim[1]) if lim else None,
+            "period_high": {"price": period_high[0], "date": period_high[1]} if period_high else None,
+            "period_low": {"price": period_low[0], "date": period_low[1]} if period_low else None,
         })
     return anchors
 

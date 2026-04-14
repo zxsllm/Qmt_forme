@@ -95,9 +95,9 @@ class NewsClassResult:
             "news_scope": self.news_scope,
             "time_slot": self.time_slot,
             "sentiment": self.sentiment,
-            "related_codes": json.dumps(self.related_codes, ensure_ascii=False) if self.related_codes else None,
-            "related_industries": json.dumps(self.related_industries, ensure_ascii=False) if self.related_industries else None,
-            "keywords": json.dumps(self.keywords, ensure_ascii=False) if self.keywords else None,
+            "related_codes": self.related_codes or None,
+            "related_industries": self.related_industries or None,
+            "keywords": self.keywords or None,
         }
 
 

@@ -2,7 +2,7 @@ from datetime import datetime
 from uuid import uuid4
 
 from sqlalchemy import DateTime, Float, Integer, String, Text, UniqueConstraint, text
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.shared.models.base import Base
@@ -818,9 +818,9 @@ class NewsClassified(Base):
     news_scope: Mapped[str] = mapped_column(String(16), index=True)
     time_slot: Mapped[str] = mapped_column(String(16), index=True)
     sentiment: Mapped[str] = mapped_column(String(16), index=True, default="neutral")
-    related_codes: Mapped[str | None] = mapped_column(Text)
-    related_industries: Mapped[str | None] = mapped_column(Text)
-    keywords: Mapped[str | None] = mapped_column(Text)
+    related_codes: Mapped[list | None] = mapped_column(JSONB)
+    related_industries: Mapped[list | None] = mapped_column(JSONB)
+    keywords: Mapped[list | None] = mapped_column(JSONB)
     classified_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=text("NOW()")
     )

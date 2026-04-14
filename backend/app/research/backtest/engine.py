@@ -202,7 +202,10 @@ class BacktestEngine:
     async def _resolve_universe(self, dl: DataLoader, config: BacktestConfig) -> list[str]:
         if config.universe:
             return config.universe
-        df = await dl.stock_list("L")
+        # 时点股票池：包含退市股，避免幸存者偏差
+        df_l = await dl.stock_list("L")
+        df_d = await dl.stock_list("D")
+        df = pd.concat([df_l, df_d], ignore_index=True)
         return df["ts_code"].tolist()
 
     async def _load_daily_data(

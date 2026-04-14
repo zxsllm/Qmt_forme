@@ -224,7 +224,7 @@ async def continuation_analysis(session: AsyncSession, ts_code: str) -> dict:
 
     current_streak = 0
     for h in history:
-        if h["limit_type"] == "U":
+        if h["limit_type"] == "涨停池":
             current_streak += 1
         else:
             break
@@ -232,7 +232,7 @@ async def continuation_analysis(session: AsyncSession, ts_code: str) -> dict:
     all_streaks: list[int] = []
     streak = 0
     for h in reversed(history):
-        if h["limit_type"] == "U":
+        if h["limit_type"] == "涨停池":
             streak += 1
         else:
             if streak > 0:
@@ -243,8 +243,8 @@ async def continuation_analysis(session: AsyncSession, ts_code: str) -> dict:
 
     max_streak = max(all_streaks) if all_streaks else 0
 
-    broken_days = sum(1 for h in history if h["limit_type"] == "Z")
-    up_days = sum(1 for h in history if h["limit_type"] == "U")
+    broken_days = sum(1 for h in history if h["limit_type"] == "炸板池")
+    up_days = sum(1 for h in history if h["limit_type"] == "涨停池")
     broken_rate = (broken_days / (up_days + broken_days) * 100) if (up_days + broken_days) > 0 else 0
 
     step_r = await session.execute(text("""
