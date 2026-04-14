@@ -18,6 +18,7 @@ import {
   type PlanDataResp,
   type ReviewDataResp,
   type SignalRankedItem,
+  type WatchlistItem,
 } from '../services/api';
 import Panel from '../components/Panel';
 
@@ -41,10 +42,6 @@ const INDEX_NAMES: Record<string, string> = {
 
 const TEMP_COLOR: Record<string, string> = {
   '极热': '#ef4444', '偏热': '#f97316', '中性': '#6bc7ff', '偏冷': '#22c55e', '冰点': '#16a34a',
-};
-
-const TEMP_EMOJI: Record<string, string> = {
-  '极热': 'H5', '偏热': 'H3', '中性': 'M', '偏冷': 'C3', '冰点': 'C5',
 };
 
 const DIRECTION_COLOR: Record<string, string> = {
@@ -124,12 +121,12 @@ function ActionBanner({
   const direction = yp?.predicted_direction ?? sc?.direction ?? null;
   const confidence = yp?.confidence_score ?? sc?.confidence ?? null;
 
-  // Build action sentence
-  const watchStocks = useMemo(() => {
+  // Build action sentence — 只用核心观察池
+  const watchStocksTop = useMemo<WatchlistItem[]>(() => {
     const pm = planData?.premarket;
     if (!pm) return [];
-    const list = pm.watchlist ?? pm.dragon_stocks ?? [];
-    return Array.isArray(list) ? list : [];
+    const top = pm.watchlist_top ?? [];
+    return Array.isArray(top) ? top : [];
   }, [planData]);
 
   const actionText = useMemo(() => {
@@ -150,11 +147,11 @@ function ActionBanner({
       };
       parts.push(tempMap[temperature] ?? '');
     }
-    if (watchStocks.length > 0) {
-      parts.push(`关注 ${watchStocks.length} 只标的`);
+    if (watchStocksTop.length > 0) {
+      parts.push(`核心关注 ${watchStocksTop.length} 只`);
     }
     return parts.filter(Boolean).join(' | ');
-  }, [direction, temperature, watchStocks.length]);
+  }, [direction, temperature, watchStocksTop.length]);
 
   const directionIcon = direction === '看多' || direction === '偏多'
     ? <CaretUpOutlined style={{ color: '#22c55e' }} />
@@ -195,11 +192,18 @@ function ActionBanner({
         }}>
           {actionText || '数据加载中...'}
         </span>
-        <span style={{ fontSize: 12, color: '#556575' }}>
-          {tradeDate.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3')}
-          {planData?.resolved_trade_date && planData.resolved_trade_date !== tradeDate && (
-            <span style={{ color: '#ffbf75', marginLeft: 6 }}>
-              (数据日期: {planData.resolved_trade_date.replace(/(\d{4})(\d{2})(\d{2})/, '$2-$3')})
+        <span style={{ fontSize: 11, color: '#556575', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 1 }}>
+          <span>
+            选择: {tradeDate.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3')}
+            {planData?.resolved_trade_date && planData.resolved_trade_date !== tradeDate && (
+              <span style={{ color: '#ffbf75', marginLeft: 4 }}>
+                → 计划 {planData.resolved_trade_date.replace(/(\d{4})(\d{2})(\d{2})/, '$2-$3')}
+              </span>
+            )}
+          </span>
+          {reviewData?.resolved_trade_date && reviewData.resolved_trade_date !== (planData?.resolved_trade_date ?? tradeDate) && (
+            <span style={{ color: '#93a9bc' }}>
+              复盘 {reviewData.resolved_trade_date.replace(/(\d{4})(\d{2})(\d{2})/, '$2-$3')}
             </span>
           )}
         </span>
@@ -207,12 +211,14 @@ function ActionBanner({
 
       {/* Row 2: Temperature + indices + stats */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 20, flexWrap: 'wrap' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <FireOutlined style={{ color: TEMP_COLOR[temperature ?? ''] ?? '#6bc7ff', fontSize: 14 }} />
-          <span style={{ fontSize: 13, fontWeight: 600, color: TEMP_COLOR[temperature ?? ''] ?? '#6bc7ff' }}>
-            {temperature ?? '--'}
-          </span>
-        </div>
+        <Tooltip title={`温度来源: ${tempData?.temperature ? '复盘实时数据' : planData?.yesterday_review?.temperature ? '昨日复盘记录' : '无数据'}`}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <FireOutlined style={{ color: TEMP_COLOR[temperature ?? ''] ?? '#6bc7ff', fontSize: 14 }} />
+            <span style={{ fontSize: 13, fontWeight: 600, color: TEMP_COLOR[temperature ?? ''] ?? '#6bc7ff' }}>
+              {temperature ?? '--'}
+            </span>
+          </div>
+        </Tooltip>
 
         {hasRt && (
           <span style={{ fontSize: 10, color: '#22c55e', border: '1px solid rgba(34,197,94,0.3)', borderRadius: 6, padding: '0 4px' }}>
@@ -256,12 +262,17 @@ function ActionBanner({
 // WatchlistCards — visual stock cards with entry/exit levels
 // ═══════════════════════════════════════════════════════════════
 function WatchlistCards({ planData }: { planData: PlanDataResp | undefined; }) {
-  const watchStocks = useMemo(() => {
+  const [showAll, setShowAll] = useState(false);
+
+  const { topStocks, allStocks } = useMemo<{ topStocks: WatchlistItem[]; allStocks: WatchlistItem[] }>(() => {
     const pm = planData?.premarket;
-    if (!pm) return [];
-    const list = pm.watchlist ?? pm.dragon_stocks ?? [];
-    return Array.isArray(list) ? list : [];
+    if (!pm) return { topStocks: [], allStocks: [] };
+    const top: WatchlistItem[] = Array.isArray(pm.watchlist_top) ? pm.watchlist_top : [];
+    const all: WatchlistItem[] = Array.isArray(pm.watchlist) ? pm.watchlist : [];
+    return { topStocks: top.length > 0 ? top : all.slice(0, 8), allStocks: all };
   }, [planData]);
+
+  const watchStocks: WatchlistItem[] = showAll ? allStocks : topStocks;
 
   const priceAnchors = planData?.price_anchors ?? [];
   const anchorMap = useMemo(() => {
@@ -277,9 +288,17 @@ function WatchlistCards({ planData }: { planData: PlanDataResp | undefined; }) {
       title={
         <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <AimOutlined style={{ color: '#6bc7ff' }} />
-          今日观察标的
-          {watchStocks.length > 0 && (
-            <Badge count={watchStocks.length} style={{ backgroundColor: 'rgba(107,199,255,0.2)', color: '#6bc7ff', fontSize: 10, boxShadow: 'none' }} />
+          观察标的
+          <Tooltip title="数据来源: 连板梯队(按连板天数 DESC) + 盘后利好消息催化股，去重后按优先级截取核心 8 只。价格锚点基于近 60 个交易日 K 线计算支撑/阻力位和长均线。">
+            <QuestionCircleOutlined style={{ color: '#556575', fontSize: 12, cursor: 'pointer' }} />
+          </Tooltip>
+          {planData?.premarket?.yesterday && (
+            <span style={{ fontSize: 10, color: '#556575', fontWeight: 400 }}>
+              {String(planData.premarket.yesterday).replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3')}数据
+            </span>
+          )}
+          {allStocks.length > 0 && (
+            <Badge count={showAll ? allStocks.length : `${topStocks.length}/${allStocks.length}`} style={{ backgroundColor: 'rgba(107,199,255,0.2)', color: '#6bc7ff', fontSize: 10, boxShadow: 'none' }} />
           )}
         </span>
       }
@@ -334,9 +353,9 @@ function WatchlistCards({ planData }: { planData: PlanDataResp | undefined; }) {
                       </div>
                     ) : anchor.period_low != null ? (
                       <div>
-                        <div style={{ fontSize: 10, color: '#556575' }}>60日低</div>
+                        <div style={{ fontSize: 10, color: '#556575' }}>区间低</div>
                         <div style={{ fontSize: 13, fontWeight: 600, color: '#22c55e' }}>
-                          {typeof anchor.period_low === 'object' ? (anchor.period_low as {price:number}).price.toFixed(2) : Number(anchor.period_low).toFixed(2)}
+                          {anchor.period_low.price.toFixed(2)}
                         </div>
                       </div>
                     ) : null}
@@ -347,16 +366,16 @@ function WatchlistCards({ planData }: { planData: PlanDataResp | undefined; }) {
                       </div>
                     ) : anchor.period_high != null ? (
                       <div>
-                        <div style={{ fontSize: 10, color: '#556575' }}>60日高</div>
+                        <div style={{ fontSize: 10, color: '#556575' }}>区间高</div>
                         <div style={{ fontSize: 13, fontWeight: 600, color: '#ff6f91' }}>
-                          {typeof anchor.period_high === 'object' ? (anchor.period_high as {price:number}).price.toFixed(2) : Number(anchor.period_high).toFixed(2)}
+                          {anchor.period_high.price.toFixed(2)}
                         </div>
                       </div>
                     ) : null}
-                    {anchor.ma60 != null && (
+                    {anchor.ma_long != null && (
                       <div>
-                        <div style={{ fontSize: 10, color: '#556575' }}>{anchor.ma60 === anchor.close ? 'MA30' : 'MA60'}</div>
-                        <div style={{ fontSize: 13, fontWeight: 600, color: '#b48cff' }}>{anchor.ma60.toFixed(2)}</div>
+                        <div style={{ fontSize: 10, color: '#556575' }}>MA{anchor.ma_long_window ?? 60}</div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: '#b48cff' }}>{anchor.ma_long.toFixed(2)}</div>
                       </div>
                     )}
                     {anchor.up_limit != null && (
@@ -370,6 +389,16 @@ function WatchlistCards({ planData }: { planData: PlanDataResp | undefined; }) {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* Expand/Collapse toggle */}
+      {allStocks.length > topStocks.length && (
+        <div
+          style={{ fontSize: 11, color: '#6bc7ff', cursor: 'pointer', userSelect: 'none', textAlign: 'center', marginTop: 8 }}
+          onClick={() => setShowAll(!showAll)}
+        >
+          {showAll ? `▲ 收起 (显示核心 ${topStocks.length} 只)` : `▼ 展开全部 ${allStocks.length} 只`}
         </div>
       )}
 
@@ -387,42 +416,70 @@ function WatchlistCards({ planData }: { planData: PlanDataResp | undefined; }) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ReviewCard — yesterday's review as visual highlights
+// ReviewCard — selected date's review data
 // ═══════════════════════════════════════════════════════════════
-function ReviewCard({ planData }: { planData: PlanDataResp | undefined; }) {
-  const review = planData?.yesterday_review;
+function ReviewCard({ reviewData, planData }: { reviewData: ReviewDataResp | undefined; planData: PlanDataResp | undefined }) {
   const [expanded, setExpanded] = useState(false);
 
+  // 从 reviewData (选定日期) 映射核心指标
+  const shIndex = reviewData?.index_summary?.find(i => i.ts_code === '000001.SH');
+  const breadth = reviewData?.market_breadth;
+  const temperature = reviewData?.temperature?.data?.temperature
+    ?? planData?.yesterday_review?.temperature
+    ?? null;
+  const reviewDate = reviewData?.resolved_trade_date ?? reviewData?.trade_date ?? '';
+  const totalAmount = breadth?.total_amount_yi ?? planData?.yesterday_review?.total_amount ?? null;
+
+  // AI 叙事: 优先用 reviewData 当天已保存的，fallback 到 planData.yesterday_review
+  const saved = reviewData?.saved_narrative;
+  const yesterdayReview = planData?.yesterday_review;
+  const rawConclusion = saved?.strategy_conclusion ?? yesterdayReview?.strategy_conclusion ?? null;
+  const marketSummary = saved?.market_summary ?? yesterdayReview?.market_summary ?? null;
+  const narrativeFromYesterday = !saved?.strategy_conclusion && !saved?.market_summary && !!yesterdayReview;
+  const narrativeDate = narrativeFromYesterday ? (yesterdayReview?.trade_date ?? '') : '';
   const sc = useMemo(
-    () => parseStrategyConclusion(review?.strategy_conclusion),
-    [review?.strategy_conclusion],
+    () => parseStrategyConclusion(rawConclusion),
+    [rawConclusion],
   );
 
-  if (!review) return <EmptyCard text="复盘数据加载中..." />;
+  if (!reviewData && !yesterdayReview) return <EmptyCard text="复盘数据加载中..." />;
 
   return (
     <Panel
       title={
         <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <CheckCircleOutlined style={{ color: '#b48cff' }} />
-          昨日复盘
+          复盘
+          <Tooltip title="当日收盘后的市场总结。指标数据(指数、涨跌停、成交额)来自实时聚合；AI 策略结论和详细总结来自收盘后自动生成的 daily_review 报告。">
+            <QuestionCircleOutlined style={{ color: '#556575', fontSize: 12, cursor: 'pointer' }} />
+          </Tooltip>
+          {reviewDate && (
+            <span style={{ fontSize: 10, color: '#556575', fontWeight: 400 }}>
+              {reviewDate.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3')}
+            </span>
+          )}
         </span>
       }
       style={{ ...GLASS_CARD, flex: 1 }}
     >
       {/* Key metrics - visual grid */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(80px, 1fr))', gap: 8, marginBottom: 12 }}>
-        <MiniStat label="上证" value={fmtPct(review.sh_pct_chg)} color={pctColor(review.sh_pct_chg)} />
-        <MiniStat label="温度" value={review.temperature ?? '-'} color={TEMP_COLOR[review.temperature ?? ''] ?? '#6bc7ff'} />
-        <MiniStat label="成交额" value={review.total_amount ? `${(review.total_amount / 1e8).toFixed(0)}亿` : '-'} color="#6bc7ff" />
-        <MiniStat label="涨/跌" value={`${review.up_count ?? '-'}/${review.down_count ?? '-'}`} color="#93a9bc" />
-        <MiniStat label="涨停" value={`${review.limit_up_count ?? '-'}`} color="#ff6f91" />
-        <MiniStat label="跌停" value={`${review.limit_down_count ?? '-'}`} color="#22c55e" />
+        <MiniStat label="上证" value={fmtPct(shIndex?.pct_chg ?? null)} color={pctColor(shIndex?.pct_chg ?? null)} />
+        <MiniStat label="温度" value={temperature ?? '-'} color={TEMP_COLOR[temperature ?? ''] ?? '#6bc7ff'} />
+        <MiniStat label="成交额" value={totalAmount ? (totalAmount >= 10000 ? `${(totalAmount / 10000).toFixed(1)}万亿` : `${totalAmount.toFixed(0)}亿`) : '-'} color="#6bc7ff" />
+        <MiniStat label="涨/跌" value={`${breadth?.up_count ?? '-'}/${breadth?.down_count ?? '-'}`} color="#93a9bc" />
+        <MiniStat label="涨停" value={`${breadth?.limit_up ?? '-'}`} color="#ff6f91" />
+        <MiniStat label="跌停" value={`${breadth?.limit_down ?? '-'}`} color="#22c55e" />
       </div>
 
       {/* Strategy conclusion - compact */}
       {sc && (
         <div style={{ ...SUB_CARD, marginBottom: 10 }}>
+          {narrativeFromYesterday && narrativeDate && (
+            <div style={{ fontSize: 10, color: '#556575', marginBottom: 4 }}>
+              AI总结来自 {narrativeDate.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3')} 复盘
+            </div>
+          )}
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
             {sc.direction && (
               <span style={{
@@ -446,7 +503,7 @@ function ReviewCard({ planData }: { planData: PlanDataResp | undefined; }) {
       )}
 
       {/* Market summary - collapsed by default */}
-      {review.market_summary && (
+      {marketSummary && (
         <div>
           <div
             style={{ fontSize: 11, color: '#6bc7ff', cursor: 'pointer', userSelect: 'none' }}
@@ -456,7 +513,7 @@ function ReviewCard({ planData }: { planData: PlanDataResp | undefined; }) {
           </div>
           {expanded && (
             <div style={{ ...SUB_CARD, marginTop: 6, fontSize: 12, color: '#93a9bc', lineHeight: 1.6, whiteSpace: 'pre-wrap', maxHeight: 200, overflow: 'auto' }}>
-              {review.market_summary}
+              {marketSummary}
             </div>
           )}
         </div>
@@ -485,6 +542,9 @@ function PlanVerificationCard({ planData }: { planData: PlanDataResp | undefined
         <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <SafetyCertificateOutlined style={{ color: '#7ce1f2' }} />
           计划执行验证
+          <Tooltip title="对比历史早盘计划的预测方向(看多/震荡/看空)与实际涨跌结果，自动评分。准确率 = 正确次数 / 已验证总数。展示最近一条已验证记录和近期验证历史。">
+            <QuestionCircleOutlined style={{ color: '#556575', fontSize: 12, cursor: 'pointer' }} />
+          </Tooltip>
         </span>
       }
       style={{ ...GLASS_CARD, flex: 1 }}
@@ -517,9 +577,9 @@ function PlanVerificationCard({ planData }: { planData: PlanDataResp | undefined
       {lastVerified && (
         <div style={{ ...SUB_CARD }}>
           <div style={{ fontSize: 11, color: '#93a9bc', marginBottom: 6 }}>
-            昨日计划 vs 实际
+            最近已验证计划
             <span style={{ marginLeft: 6, fontSize: 10, color: '#556575' }}>
-              ({lastVerified.trade_date.replace(/(\d{4})(\d{2})(\d{2})/, '$2-$3')})
+              ({lastVerified.trade_date.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3')})
             </span>
           </div>
           <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
@@ -586,12 +646,13 @@ function PlanVerificationCard({ planData }: { planData: PlanDataResp | undefined
 // ═══════════════════════════════════════════════════════════════
 // SignalRankCard — signal leaderboard with score bars
 // ═══════════════════════════════════════════════════════════════
-function SignalRankCard({ tradeDate }: { tradeDate: string }) {
+function SignalRankCard({ tradeDate, resolvedTradeDate }: { tradeDate: string; resolvedTradeDate?: string }) {
+  const queryDate = resolvedTradeDate || tradeDate;
   const [selectedSignal, setSelectedSignal] = useState<SignalRankedItem | null>(null);
 
   const { data, isLoading, isError } = useQuery({
-    queryKey: ['signal-ranked', tradeDate],
-    queryFn: () => api.signalRanked(tradeDate, 20),
+    queryKey: ['signal-ranked', queryDate],
+    queryFn: () => api.signalRanked(queryDate, 20),
     staleTime: 120_000,
     retry: false,
     // graceful degradation if API not ready
@@ -603,7 +664,25 @@ function SignalRankCard({ tradeDate }: { tradeDate: string }) {
       title={
         <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <ThunderboltOutlined style={{ color: '#ffbf75' }} />
-          信号排行榜
+          信号排行
+          <Tooltip overlayStyle={{ maxWidth: 420 }} title={
+            <div>
+              <div>四维评分加权排名，总分 = 技术面×30% + 情绪面×25% + 基本面×25% + 消息面×20%</div>
+              <div style={{ marginTop: 6, fontSize: 11, opacity: 0.85 }}>
+                <b>技术面</b>: 连板天数、量比(20日均量)、跳空缺口、60日区间位置、RSI(14)、MACD金叉/死叉<br/>
+                <b>情绪面</b>: 市场温度、是否涨停板、是否上龙虎榜、所属板块是否热门<br/>
+                <b>基本面</b>: ROE、营收/净利同比增速、PE分位(行业内)<br/>
+                <b>消息面</b>: 正面/负面新闻净数、重大公告(业绩预告/合同/重组)
+              </div>
+            </div>
+          }>
+            <QuestionCircleOutlined style={{ color: '#556575', fontSize: 12, cursor: 'pointer' }} />
+          </Tooltip>
+          {(data?.resolved_trade_date || queryDate) && (
+            <span style={{ fontSize: 10, color: '#556575', fontWeight: 400 }}>
+              {(data?.resolved_trade_date || queryDate).replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3')}
+            </span>
+          )}
           {data?.scored_stocks != null && (
             <Badge count={data.scored_stocks.length} style={{ backgroundColor: 'rgba(107,199,255,0.2)', color: '#6bc7ff', fontSize: 10, boxShadow: 'none' }} />
           )}
@@ -751,7 +830,7 @@ function RadarChart({ dimensions }: { dimensions: { sentiment: number; technical
 // ═══════════════════════════════════════════════════════════════
 // SectorHeatCard — top/bottom sector ranking heatmap
 // ═══════════════════════════════════════════════════════════════
-function SectorHeatCard({ reviewData }: { reviewData: ReviewDataResp | undefined; }) {
+function SectorHeatCard({ reviewData, resolvedDate }: { reviewData: ReviewDataResp | undefined; resolvedDate?: string }) {
   const ranking = reviewData?.sector_ranking;
   const topSectors = ranking?.top?.slice(0, 5) ?? [];
   const bottomSectors = ranking?.bottom?.slice(0, 5) ?? [];
@@ -769,9 +848,17 @@ function SectorHeatCard({ reviewData }: { reviewData: ReviewDataResp | undefined
         <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <HeatMapOutlined style={{ color: '#ffbf75' }} />
           板块热度
+          <Tooltip title="申万行业指数按当日涨跌幅排序，展示领涨 5 个和领跌 5 个板块。柱长表示涨跌幅相对最大值的比例。">
+            <QuestionCircleOutlined style={{ color: '#556575', fontSize: 12, cursor: 'pointer' }} />
+          </Tooltip>
+          {(ranking?.trade_date || resolvedDate) && (
+            <span style={{ fontSize: 10, color: '#556575', fontWeight: 400 }}>
+              {(ranking?.trade_date || resolvedDate || '').replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3')}
+            </span>
+          )}
           {ranking && (
             <span style={{ fontSize: 10, color: '#556575', fontWeight: 400 }}>
-              共 {ranking.count} 板块
+              {ranking.count}板块
             </span>
           )}
         </span>
@@ -993,7 +1080,7 @@ function TimeSeqHelp() {
                 ['顶栏方向', '每天 08:00 自动生成的早盘计划，AI 给出今日方向预测（偏多/震荡/偏空）和置信度', '每日一次'],
                 ['温度/涨跌停', '收盘后从涨停池、跌停池、炸板池统计；盘中从实时行情快照估算', '盘中实时'],
                 ['指数涨跌', '上证/深成/创业板的收盘数据', '每日一次'],
-                ['观察标的', '早盘计划中 AI 推荐的 3-5 只重点关注股票', '每日一次'],
+                ['观察标的', '早盘计划中 AI 推荐的重点关注股票，默认展示核心 8 只，可展开全部', '每日一次'],
                 ['支撑/阻力', '根据过去 60 个交易日的最高价和最低价计算的关键价格位。MA60 是 60 日均线', '每日一次'],
                 ['昨日复盘', '前一个交易日收盘后 (16:00) 自动生成的复盘报告摘要，对应 reports/ 文件夹里的完整报告', '每日一次'],
                 ['信号排行', '综合技术面(30%)、情绪面(25%)、基本面(25%)、消息面(20%) 四个维度对当日活跃股打分排名', '每日一次'],
@@ -1170,13 +1257,13 @@ export default function CommandCenter() {
         {/* Left column (60%): Watchlist + Review */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minHeight: 0 }}>
           <WatchlistCards planData={planData} />
-          <ReviewCard planData={planData} />
+          <ReviewCard reviewData={reviewData} planData={planData} />
         </div>
 
         {/* Right column (40%): Signals + SectorHeat + PlanVerification */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minHeight: 0 }}>
-          <SignalRankCard tradeDate={tradeDate} />
-          <SectorHeatCard reviewData={reviewData} />
+          <SignalRankCard tradeDate={tradeDate} resolvedTradeDate={planData?.resolved_trade_date} />
+          <SectorHeatCard reviewData={reviewData} resolvedDate={reviewData?.resolved_trade_date} />
           <PlanVerificationCard planData={planData} />
         </div>
       </div>

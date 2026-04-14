@@ -316,11 +316,14 @@ async def _get_price_anchors(
         ma5 = round(sum(closes[:5]) / min(5, len(closes)), 2) if closes else None
         ma10 = round(sum(closes[:10]) / min(10, len(closes)), 2) if len(closes) >= 5 else None
         ma20 = round(sum(closes[:20]) / min(20, len(closes)), 2) if len(closes) >= 10 else None
-        ma60 = None
+        ma_long = None
+        ma_long_window = None
         if len(closes) >= 60:
-            ma60 = round(sum(closes[:60]) / 60, 2)
+            ma_long = round(sum(closes[:60]) / 60, 2)
+            ma_long_window = 60
         elif len(closes) >= 30:
-            ma60 = round(sum(closes[:30]) / 30, 2)
+            ma_long = round(sum(closes[:30]) / 30, 2)
+            ma_long_window = 30
 
         lim = limit_map.get(code)
         anchors.append({
@@ -329,7 +332,9 @@ async def _get_price_anchors(
             "ma5": ma5,
             "ma10": ma10,
             "ma20": ma20,
-            "ma60": ma60,
+            "ma_long": ma_long,
+            "ma_long_window": ma_long_window,
+            "ma60": ma_long,  # 兼容旧前端，后续废弃
             "support_levels": support,
             "resistance_levels": resistance,
             "up_limit": _clean_float(lim[0]) if lim else None,

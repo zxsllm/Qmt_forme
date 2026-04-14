@@ -166,7 +166,16 @@ async def get_ranked_stocks(
     if not trade_date:
         trade_date = datetime.now().strftime("%Y%m%d")
     async with async_session() as session:
-        return await rank_stocks(session, trade_date, limit, min_score)
+        # 非交易日回退到最近交易日，与 plan/review 端点行为一致
+        r = await session.execute(text(
+            "SELECT cal_date FROM trade_cal WHERE is_open='1' AND cal_date <= :d "
+            "ORDER BY cal_date DESC LIMIT 1"
+        ), {"d": trade_date})
+        row = r.fetchone()
+        resolved = row[0] if row else trade_date
+        result = await rank_stocks(session, resolved, limit, min_score)
+        result["resolved_trade_date"] = resolved
+        return result
 
 
 @scorer_router.get("/score/{ts_code}")

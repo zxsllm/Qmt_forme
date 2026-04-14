@@ -1091,6 +1091,18 @@ export interface RiskAlertsResponse {
 
 // ── Command Center types ────────────────────────────────────
 
+export interface WatchlistItem {
+  ts_code: string;
+  name: string;
+  reason?: string;
+  nums?: string;
+  tag?: string;
+  pct_chg?: number | null;
+  first_lu_time?: string | null;
+  status?: string | null;
+  time?: string;
+}
+
 export interface PlanDataResp {
   trade_date: string;
   prev_trade_date: string | null;
@@ -1129,17 +1141,21 @@ export interface PlanDataResp {
     [key: string]: unknown;
   }[];
   premarket: {
-    watchlist?: { ts_code: string; name: string; reason: string; nums?: string; tag?: string; pct_chg?: number | null }[];
-    dragon_stocks?: { ts_code: string; name: string; [key: string]: unknown }[];
-    risk_alerts?: { ts_code: string; name: string; type: string; detail: string }[];
+    today?: string;
+    yesterday?: string;
+    watchlist_top?: WatchlistItem[];
+    watchlist?: WatchlistItem[];
+    dragon_stocks?: WatchlistItem[];
+    risk_alerts?: { ts_code: string; name: string; type: string; detail: string; tag?: string | null }[];
     hot_sectors?: { name: string; [key: string]: unknown }[];
+    market_summary?: Record<string, unknown>;
     [key: string]: unknown;
   } | null;
   risk_alerts: RiskAlertsResponse | null;
   key_events: unknown;
   margin: unknown;
   valuation: unknown;
-  price_anchors: { ts_code: string; close: number | null; ma5: number | null; ma10: number | null; ma20: number | null; ma60: number | null; support_levels: number[]; resistance_levels: number[]; up_limit: number | null; down_limit: number | null; period_high: number | null; period_low: number | null; [key: string]: unknown }[];
+  price_anchors: { ts_code: string; close: number | null; ma5: number | null; ma10: number | null; ma20: number | null; ma_long: number | null; ma_long_window: number | null; ma60: number | null; support_levels: number[]; resistance_levels: number[]; up_limit: number | null; down_limit: number | null; period_high: { price: number; date: string } | null; period_low: { price: number; date: string } | null; [key: string]: unknown }[];
   retrospect: { stats: { total_count: number; correct_count: number; partial_count: number; wrong_count: number; accuracy_rate: number; avg_score: number | null; recent_bias: string | null } | null; recent_predictions: { trade_date: string; predicted_direction: string; predicted_temperature: string | null; actual_result: string | null; accuracy_score: number | null; retrospect_note: string | null }[] } | null;
   accuracy_history: { avg_accuracy: number | null; trend: string; recent_scores: number[] } | null;
   similar_days: { date: string; plan_summary: string; actual_result: string | null; accuracy_score: number | null; retrospect_note: string | null; similarity: number | null }[];
@@ -1161,6 +1177,7 @@ export interface PlanDataResp {
 
 export interface ReviewDataResp {
   trade_date: string;
+  resolved_trade_date?: string;
   index_summary: { ts_code: string; trade_date: string; close: number | null; pct_chg: number | null; vol: number | null; amount: number | null; pre_close: number | null; open: number | null; high: number | null; low: number | null; [key: string]: unknown }[];
   market_breadth: { trade_date: string; total: number; up_count: number; down_count: number; flat_count: number; limit_up: number; limit_down: number; avg_pct_chg: number | null; total_amount_yi: number | null } | null;
   temperature: MarketTemperatureResp | null;
@@ -1170,6 +1187,7 @@ export interface ReviewDataResp {
   margin: unknown;
   valuation: unknown;
   sector_ranking: { trade_date: string; top: { ts_code: string; name: string; pct_change: number | null; amount: number | null; [key: string]: unknown }[]; bottom: { ts_code: string; name: string; pct_change: number | null; amount: number | null; [key: string]: unknown }[]; count: number } | null;
+  saved_narrative?: { strategy_conclusion?: string | null; market_summary?: string | null; dominant_strategy?: string | null; sector_analysis?: string | null; sentiment_narrative?: string | null; risk_summary?: string | null } | null;
 }
 
 export interface PlanHistoryResp {
@@ -1202,6 +1220,7 @@ export interface SignalRankedItem {
 
 export interface SignalRankedResp {
   trade_date: string;
+  resolved_trade_date?: string;
   scored_stocks: SignalRankedItem[];
   market_overview: {
     temperature: string;

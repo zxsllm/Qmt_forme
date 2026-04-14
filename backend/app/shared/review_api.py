@@ -325,6 +325,25 @@ async def aggregate_review_data(session: AsyncSession, trade_date: str) -> dict:
     # 龙虎榜（当日），判断资金性质：机构 vs 游资
     dragon_tiger = await _get_dragon_tiger(session, trade_date)
 
+    # 查询当天已保存的 DailyReview AI 叙事字段（strategy_conclusion, market_summary 等）
+    saved_narrative: dict = {}
+    nr = await session.execute(text("""
+        SELECT strategy_conclusion, market_summary, dominant_strategy,
+               sector_analysis, sentiment_narrative, risk_summary
+        FROM daily_review
+        WHERE trade_date = :td
+    """), {"td": trade_date})
+    nrow = nr.fetchone()
+    if nrow:
+        saved_narrative = {
+            "strategy_conclusion": nrow[0],
+            "market_summary": nrow[1],
+            "dominant_strategy": nrow[2],
+            "sector_analysis": nrow[3],
+            "sentiment_narrative": nrow[4],
+            "risk_summary": nrow[5],
+        }
+
     return {
         "trade_date": trade_date,
         "index_summary": index_summary,
@@ -338,6 +357,7 @@ async def aggregate_review_data(session: AsyncSession, trade_date: str) -> dict:
         "sector_ranking": sectors,
         "intraday_news": intraday_news,
         "dragon_tiger": dragon_tiger,
+        "saved_narrative": saved_narrative,
     }
 
 

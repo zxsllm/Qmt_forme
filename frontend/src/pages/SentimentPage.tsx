@@ -311,8 +311,8 @@ function HotMoneyTab({ tradeDate }: { tradeDate: string }) {
 // ─── Pre-market Three Columns ──────────────────────────────────
 
 function PremarketThreeColumns({ watchlist, riskAlerts }: {
-  watchlist: { ts_code: string; name: string; reason?: string; nums?: number; tag?: string; time?: string }[];
-  riskAlerts: { ts_code: string; name: string; type: string; detail: string; tag?: string; time?: string }[];
+  watchlist: { ts_code: string; name: string; reason?: string; nums?: string | number; tag?: string | null; time?: string }[];
+  riskAlerts: { ts_code: string; name: string; type: string; detail: string; tag?: string | null; time?: string }[];
 }) {
   const [modalItem, setModalItem] = useState<{ title: string; content: string } | null>(null);
 
@@ -343,7 +343,7 @@ function PremarketThreeColumns({ watchlist, riskAlerts }: {
                   <List.Item>
                     <List.Item.Meta
                       title={<span>{item.ts_code} <span style={{ color: '#d1d5db' }}>{item.name}</span>
-                        {item.nums && <Tag color="orange" style={{ marginLeft: 6 }}>连板{item.nums}</Tag>}
+                        {'nums' in item && item.nums && <Tag color="orange" style={{ marginLeft: 6 }}>连板{item.nums}</Tag>}
                       </span>}
                       description={
                         <span style={descStyle} onClick={() => setModalItem({ title: `${item.ts_code} ${item.name}`, content: item.reason || '' })}>

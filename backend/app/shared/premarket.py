@@ -157,7 +157,29 @@ async def generate_premarket_plan(session: AsyncSession, today: str) -> dict:
             "time": dt_str,
         })
 
-    result["watchlist"] = continued_boards + news_watchlist
+    # ── 去重 + 优先级排序 ──
+    # 连板股在 news_watchlist 中可能重复出现(既连板又有利好消息)
+    seen_codes: set[str] = set()
+    deduped: list[dict] = []
+    # 先加连板股(已按 nums DESC 排序)，再加纯消息股
+    for item in continued_boards:
+        code = item.get("ts_code", "")
+        if code and code not in seen_codes:
+            seen_codes.add(code)
+            # 检查是否同时有消息催化，合并 reason
+            news_hit = news_stocks.get(code)
+            if news_hit:
+                item["reason"] = (item.get("reason", "") or "") + f" + 利好催化"
+            deduped.append(item)
+    for item in news_watchlist:
+        code = item.get("ts_code", "")
+        if code and code not in seen_codes:
+            seen_codes.add(code)
+            deduped.append(item)
+
+    # 分层: top 为核心观察 (最多8只)，全量保留向后兼容
+    result["watchlist_top"] = deduped[:8]
+    result["watchlist"] = deduped
 
     # ── 3. Risk alerts ───────────────────────────────────────────
 
