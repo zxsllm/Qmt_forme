@@ -470,7 +470,14 @@ function ReviewCard({ planData }: { planData: PlanDataResp | undefined; }) {
 // ═══════════════════════════════════════════════════════════════
 function PlanVerificationCard({ planData }: { planData: PlanDataResp | undefined; }) {
   const retrospect = planData?.retrospect;
-  const yesterdayPlan = planData?.yesterday_plan;
+  // 用最近一条已验证的计划（而非当日未验证的 yesterday_plan）
+  const lastVerified = retrospect?.recent_predictions?.[0];
+
+  const resultColor = (result: string | null | undefined) => {
+    if (result === '正确') return '#22c55e';
+    if (result === '部分正确') return '#ffbf75';
+    return '#ff6f91';
+  };
 
   return (
     <Panel
@@ -506,15 +513,20 @@ function PlanVerificationCard({ planData }: { planData: PlanDataResp | undefined
         <div style={{ color: '#556575', fontSize: 12, marginBottom: 14 }}>暂无回溯数据</div>
       )}
 
-      {/* Yesterday plan vs actual */}
-      {yesterdayPlan && (
+      {/* Yesterday plan vs actual — 使用最近已验证的计划 */}
+      {lastVerified && (
         <div style={{ ...SUB_CARD }}>
-          <div style={{ fontSize: 11, color: '#93a9bc', marginBottom: 6 }}>昨日计划 vs 实际</div>
+          <div style={{ fontSize: 11, color: '#93a9bc', marginBottom: 6 }}>
+            昨日计划 vs 实际
+            <span style={{ marginLeft: 6, fontSize: 10, color: '#556575' }}>
+              ({lastVerified.trade_date.replace(/(\d{4})(\d{2})(\d{2})/, '$2-$3')})
+            </span>
+          </div>
           <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
             <div>
               <span style={{ fontSize: 10, color: '#556575' }}>预测方向</span>
               <div style={{ fontSize: 13, fontWeight: 600, color: '#6bc7ff' }}>
-                {yesterdayPlan.predicted_direction ?? '-'}
+                {lastVerified.predicted_direction ?? '-'}
               </div>
             </div>
             <div>
@@ -522,39 +534,39 @@ function PlanVerificationCard({ planData }: { planData: PlanDataResp | undefined
               <div style={{
                 fontSize: 13,
                 fontWeight: 600,
-                color: yesterdayPlan.actual_result === yesterdayPlan.predicted_direction ? '#22c55e' : '#ff6f91',
+                color: resultColor(lastVerified.actual_result),
               }}>
-                {yesterdayPlan.actual_result ?? '待验证'}
+                {lastVerified.actual_result ?? '待验证'}
               </div>
             </div>
             <div>
               <span style={{ fontSize: 10, color: '#556575' }}>评分</span>
               <div style={{ fontSize: 13, fontWeight: 600, color: '#ffbf75' }}>
-                {yesterdayPlan.accuracy_score != null ? `${yesterdayPlan.accuracy_score.toFixed(0)}分` : '-'}
+                {lastVerified.accuracy_score != null ? `${lastVerified.accuracy_score.toFixed(0)}分` : '-'}
               </div>
             </div>
           </div>
-          {yesterdayPlan.retrospect_note && (
+          {lastVerified.retrospect_note && (
             <div style={{ marginTop: 8, fontSize: 11, color: '#93a9bc', lineHeight: 1.5 }}>
-              {yesterdayPlan.retrospect_note}
+              {lastVerified.retrospect_note}
             </div>
           )}
         </div>
       )}
 
-      {/* Recent retrospect history */}
-      {retrospect?.recent_predictions && retrospect.recent_predictions.length > 0 && (
+      {/* Recent retrospect history — 跳过第一条(已在上方展示) */}
+      {retrospect?.recent_predictions && retrospect.recent_predictions.length > 1 && (
         <div style={{ marginTop: 12 }}>
           <div style={{ fontSize: 11, color: '#556575', marginBottom: 6 }}>近期验证记录</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {retrospect.recent_predictions.slice(0, 5).map(r => (
+            {retrospect.recent_predictions.slice(1, 6).map(r => (
               <div key={r.trade_date} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11 }}>
                 <span style={{ color: '#556575', width: 72 }}>
                   {r.trade_date.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3')}
                 </span>
                 <span style={{ color: '#93a9bc', width: 40 }}>{r.predicted_direction}</span>
                 <span style={{
-                  color: r.actual_result === r.predicted_direction ? '#22c55e' : '#ff6f91',
+                  color: resultColor(r.actual_result),
                   width: 40,
                 }}>
                   {r.actual_result}

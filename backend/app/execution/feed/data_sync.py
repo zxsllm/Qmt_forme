@@ -160,12 +160,17 @@ def sync_stock_basic(conn, svc: TushareService) -> int:
     df = pd.concat([df_l, df_d], ignore_index=True)
     if df.empty:
         return 0
+    # 安全检查：活跃股票(L)不能少于 3000，防止 Tushare 返回残缺数据时 TRUNCATE 毁掉全表
+    l_count = len(df_l) if df_l is not None else 0
+    if l_count < 3000:
+        logger.warning("sync_stock_basic: Tushare 返回 L 股票仅 %d 条（预期 5000+），跳过以保护数据", l_count)
+        return 0
     cols, vals = _df_to_values(df)
     with conn.cursor() as cur:
         cur.execute("TRUNCATE TABLE stock_basic")
         execute_values(cur, f"INSERT INTO stock_basic ({','.join(cols)}) VALUES %s", vals)
     conn.commit()
-    logger.info("sync: stock_basic refreshed %d rows", len(df))
+    logger.info("sync: stock_basic refreshed %d rows (L=%d, D=%d)", len(df), l_count, len(df_d) if df_d is not None else 0)
     return len(df)
 
 

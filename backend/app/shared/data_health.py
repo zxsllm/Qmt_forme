@@ -202,7 +202,12 @@ def _diagnose(table: str, actual: str, expected: str, phase: str, is_trade_day: 
         return {"reason": "not_synced", "detail": "本次启动后未触发同步", "action": "自动重新同步", "repairable": True}
 
     if effective.status == SyncStatus.SUCCESS and effective.rows_synced == 0:
-        return {"reason": "tushare_empty", "detail": "同步已执行但Tushare未返回数据（可能尚未发布）", "action": "等待Tushare更新后重试", "repairable": False}
+        # evening 阶段 Tushare 应已发布数据，允许自动重试
+        can_retry = phase in ("evening",)
+        return {"reason": "tushare_empty",
+                "detail": "同步已执行但Tushare未返回数据（可能尚未发布）",
+                "action": "自动重新同步" if can_retry else "等待Tushare更新后重试",
+                "repairable": can_retry}
 
     if effective.status == SyncStatus.SUCCESS:
         return {"reason": "tushare_partial", "detail": f"同步成功({effective.rows_synced}行)但该表数据仍不完整", "action": "可重试", "repairable": True}
