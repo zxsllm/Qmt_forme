@@ -279,10 +279,10 @@ async def _get_price_anchors(
             SELECT ts_code, trade_date, high, low, close, vol,
                    ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) as rn
             FROM stock_daily
-            WHERE ts_code IN ({codes_csv})
+            WHERE ts_code IN ({codes_csv}) AND trade_date <= :td
         ) sub WHERE rn <= 60
         ORDER BY ts_code, trade_date DESC
-    """))
+    """), {"td": trade_date})
     bars_by_code: dict[str, list] = {}
     for row in bars_r.fetchall():
         bars_by_code.setdefault(row[0], []).append(row[1:])  # (date, high, low, close, vol)

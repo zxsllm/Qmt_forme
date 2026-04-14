@@ -207,16 +207,22 @@ async def _prefetch_batch(
         """), {"start": start_dt, "end": end_dt})
         news_by_code: dict[str, dict[str, int]] = {}
         for row in news_r.fetchall():
-            related_str = row[0] or ""
+            raw = row[0]
             sentiment = row[1] or ""
-            try:
-                related_list = json.loads(related_str) if related_str.startswith("[") else []
-            except (json.JSONDecodeError, TypeError):
+            # JSONB 列直接返回 list；兼容旧 Text 格式的 JSON 字符串
+            if isinstance(raw, list):
+                related_list = raw
+            elif isinstance(raw, str):
+                try:
+                    related_list = json.loads(raw) if raw.startswith("[") else []
+                except (json.JSONDecodeError, TypeError):
+                    related_list = []
+            else:
                 related_list = []
-            matched = [c for c in related_list if c in codes_set] if related_list else [c for c in codes if c in related_str]
-            for code in matched:
-                d = news_by_code.setdefault(code, {})
-                d[sentiment] = d.get(sentiment, 0) + 1
+            for code in related_list:
+                if code in codes_set:
+                    d = news_by_code.setdefault(code, {})
+                    d[sentiment] = d.get(sentiment, 0) + 1
         ctx["news_sentiment"] = news_by_code
 
         ann_r = await session.execute(text(f"""
@@ -224,11 +230,11 @@ async def _prefetch_batch(
                 SELECT a.id, a.ts_code,
                        ROW_NUMBER() OVER (PARTITION BY a.ts_code ORDER BY a.ann_date DESC) as rn
                 FROM stock_anns a
-                WHERE a.ts_code IN ({codes_csv})
+                WHERE a.ts_code IN ({codes_csv}) AND a.ann_date <= :td
             ) sub
             JOIN anns_classified ac ON ac.anns_id = sub.id
             WHERE sub.rn <= 10
-        """))
+        """), {"td": trade_date})
         ann_dict: dict[str, list] = {}
         for row in ann_r.fetchall():
             ann_dict.setdefault(row[0], []).append((row[1], row[2]))
