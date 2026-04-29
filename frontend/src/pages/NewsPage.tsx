@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Tabs, Select, Tag, Table, Empty, Card, Statistic, Row, Col, DatePicker } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useQuery } from '@tanstack/react-query';
-import dayjs, { type Dayjs } from 'dayjs';
+import { type Dayjs } from 'dayjs';
 import { api, type ClassifiedNewsItem, type ClassifiedAnnItem } from '../services/api';
 import Panel from '../components/Panel';
 

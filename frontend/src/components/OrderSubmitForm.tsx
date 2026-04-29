@@ -16,7 +16,7 @@ export default function OrderSubmitForm({ open, onClose, defaultCode }: Props) {
   const [form] = Form.useForm();
   const qc = useQueryClient();
   const [options, setOptions] = useState<{ value: string; label: React.ReactNode }[]>([]);
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const submitMut = useMutation({
     mutationFn: (body: SubmitOrderBody) => api.submitOrder(body),

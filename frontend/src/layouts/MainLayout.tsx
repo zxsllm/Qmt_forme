@@ -45,7 +45,7 @@ const OVERALL_COLOR: Record<string, string> = {
 const OVERALL_LABEL: Record<string, string> = {
   healthy: '数据正常', warning: '部分滞后', degraded: '数据滞后', critical: '数据异常',
 };
-const STATUS_TAG: Record<string, { color: string; text: string }> = {
+export const STATUS_TAG: Record<string, { color: string; text: string }> = {
   ok: { color: 'green', text: '正常' },
   stale: { color: 'orange', text: '滞后' },
   missing: { color: 'red', text: '缺失' },

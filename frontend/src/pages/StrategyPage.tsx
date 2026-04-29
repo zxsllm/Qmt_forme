@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import {
-  Button, Switch, Tag, Space, InputNumber, Input, Modal, Form, message,
+  Button, Tag, Space, InputNumber, Input, Modal, Form, message,
   Select, Table, Spin, Tabs,
 } from 'antd';
 import { PlayCircleOutlined, PauseCircleOutlined } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api, type BacktestRunResult, type BacktestRunSummary, type BacktestStats, type TradeRecord } from '../services/api';
+import { api, type BacktestRunResult, type BacktestStats, type TradeRecord } from '../services/api';
 import Panel from '../components/Panel';
 
 const AVAILABLE = [

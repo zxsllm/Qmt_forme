@@ -88,7 +88,7 @@ export default function SectorDetailModal({ industry, onClose, onStockClick }: P
       }
       width={600}
       styles={{
-        content: {
+        root: {
           background: 'linear-gradient(180deg, rgba(23,42,59,0.96), rgba(8,17,25,0.98))',
           border: '1px solid rgba(148,186,215,0.18)',
           borderRadius: 22,

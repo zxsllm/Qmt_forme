@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { Table, Tag, Empty, Tabs, Button, Space, message, Alert, List, Badge, Spin, Radio, Statistic, Row, Col, Card, Input } from 'antd';
+import { Table, Tag, Tabs, Button, Space, message, Alert, List, Badge, Spin, Radio, Statistic, Row, Col, Card, Input } from 'antd';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { api, type RiskAlert, type StPredictItem } from '../services/api';
 import Panel from '../components/Panel';

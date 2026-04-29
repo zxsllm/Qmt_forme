@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { init, dispose, registerIndicator, type Chart } from 'klinecharts';
+import { init, dispose, registerIndicator, CandleType, TooltipShowRule, TooltipShowType, type Chart } from 'klinecharts';
 
 export type KlinePeriod = '1min' | 'daily' | 'weekly' | 'monthly';
 
@@ -68,7 +68,7 @@ const CHART_STYLES = {
     vertical: { color: COLORS.bgHover },
   },
   candle: {
-    type: 'candle_solid' as const,
+    type: CandleType.CandleSolid,
     priceMark: { last: { show: true } },
     bar: {
       upColor: COLORS.up,
@@ -188,21 +188,22 @@ export default function KlineChart({
     const styles = {
       ...baseStyles,
       candle: {
-        ...baseStyles.candle,
-        tooltip: { showRule: 'always', showType: 'standard', custom: tooltipCustom },
+        ...(baseStyles as any).candle,
+        tooltip: { showRule: TooltipShowRule.Always, showType: TooltipShowType.Standard, custom: tooltipCustom },
       },
     };
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const chart = init(container, {
-      styles,
+      styles: styles as any,
       customApi: {
-        formatBigNumber: (value: string) => {
-          const n = parseFloat(value);
-          if (isNaN(n)) return value;
+        formatBigNumber: (value: string | number): string => {
+          const n = typeof value === 'number' ? value : parseFloat(value);
+          if (isNaN(n)) return String(value);
           const abs = Math.abs(n);
           if (abs >= 1e8) return (n / 1e8).toFixed(2) + '亿';
           if (abs >= 1e4) return (n / 1e4).toFixed(2) + '万';
-          return value;
+          return String(value);
         },
       },
     });

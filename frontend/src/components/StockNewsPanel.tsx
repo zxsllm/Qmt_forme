@@ -204,7 +204,7 @@ export default function StockNewsPanel({ tsCode, height = 160, extraTabs }: Prop
         }
         width={560}
         styles={{
-          content: {
+          root: {
             background: 'linear-gradient(180deg, rgba(23,42,59,0.96), rgba(8,17,25,0.98))',
             border: '1px solid rgba(148,186,215,0.18)',
             borderRadius: 22,
@@ -238,7 +238,7 @@ export default function StockNewsPanel({ tsCode, height = 160, extraTabs }: Prop
         }
         width={600}
         styles={{
-          content: {
+          root: {
             background: 'linear-gradient(180deg, rgba(23,42,59,0.96), rgba(8,17,25,0.98))',
             border: '1px solid rgba(148,186,215,0.18)',
             borderRadius: 22,

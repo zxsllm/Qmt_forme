@@ -487,7 +487,7 @@ function ConceptTab() {
   );
 }
 
-function MarketCapitalTab() {
+export function MarketCapitalTab() {
   const [marginDays, setMarginDays] = useState(30);
   const { data: marginData, isLoading: ml } = useQuery({
     queryKey: ['margin-data', marginDays],
@@ -661,7 +661,7 @@ function UnlockTradeTab() {
   );
 }
 
-function EventCalendarTab() {
+export function EventCalendarTab() {
   const [dateRange, setDateRange] = useState('upcoming');
 
   const params = (() => {
@@ -727,7 +727,7 @@ function EventCalendarTab() {
               { title: '代码', dataIndex: 'ts_code', width: 90 },
               { title: '名称', dataIndex: 'name', width: 80 },
               { title: '类型', dataIndex: 'type', width: 60,
-                render: (v: string, r: any) => {
+                render: (v: string, _r: any) => {
                   const colors: Record<string, string> = { '预增': 'red', '预减': 'green', '扭亏': 'orange', '续亏': 'green', '略增': 'red', '略减': 'green', '首亏': 'green', '预告': 'blue', '快报': 'cyan' };
                   return v ? <Tag color={colors[v] || 'default'} style={{ margin: 0 }}>{v}</Tag> : '-';
                 } },

@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import {
   Table, Tag, Tabs, Card, Statistic, Row, Col, Empty, DatePicker, Modal,
-  Descriptions, Input, Button, Alert, Spin, Progress, Drawer, List, Badge,
+  Descriptions, Input, Button, Alert, Spin, Progress, List, Badge,
 } from 'antd';
 import {
   FireOutlined, ThunderboltOutlined, SearchOutlined,
-  WarningOutlined, RiseOutlined, FallOutlined,
+  WarningOutlined, RiseOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { useQuery } from '@tanstack/react-query';
