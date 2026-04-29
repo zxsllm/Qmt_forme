@@ -39,11 +39,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from app.shared.monitor_stats import monitor_stats_router
+from app.shared.monitor_outcome_stats import outcome_router
+
 app.include_router(trading_router)
 app.include_router(backtest_router)
 app.include_router(review_router)
 app.include_router(plan_router)
 app.include_router(scorer_router)
+app.include_router(monitor_stats_router)
+app.include_router(outcome_router)
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +66,7 @@ async def _redis_ws_worker(channel: str) -> None:
     from app.core.redis import REDIS_URL
 
     r: aioredis.Redis | None = None
+    ps = None
     while True:
         try:
             r = aioredis.from_url(REDIS_URL, decode_responses=True)
@@ -76,11 +82,20 @@ async def _redis_ws_worker(channel: str) -> None:
             logger.warning("ws-bridge worker [%s] error, reconnecting in 2s", channel, exc_info=True)
             await asyncio.sleep(2)
         finally:
+            # Close pubsub first to stop the async generator, then the connection
+            if ps:
+                try:
+                    await ps.unsubscribe(channel)
+                    await ps.aclose()
+                except Exception:
+                    pass
+                ps = None
             if r:
                 try:
                     await r.aclose()
                 except Exception:
                     pass
+                r = None
 
 
 @app.on_event("startup")

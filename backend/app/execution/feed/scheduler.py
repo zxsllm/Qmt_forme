@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time as _time
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime, time as dtime, timedelta
 
 from app.shared.interfaces.models import BarData
 from app.execution.feed.market_feed import market_feed
@@ -36,6 +36,7 @@ SETTLEMENT_TIME = dtime(15, 1)
 SYNC_TIME = dtime(15, 30)
 REVIEW_TIME = dtime(16, 0)       # generate daily review after sync completes
 VERIFY_TIME = dtime(16, 5)       # auto-verify morning plan after review + sync
+BACKFILL_TIME = dtime(16, 10)    # backfill monitor event returns after sync
 PLAN_TIME = dtime(8, 0)          # generate morning plan before market open
 
 
@@ -239,6 +240,8 @@ class MarketDataScheduler:
         self._review_generated_today = False
         self._plan_generated_today = False
         self._plan_verified_today = False
+        self._backfill_done_today = False
+        self._monitor_cleaned_today = False
 
     def _maybe_pull_mins(self) -> None:
         """Pull minute bars for watched stocks — fire-and-forget, every 60s."""
@@ -498,6 +501,66 @@ class MarketDataScheduler:
         logger.info("scheduler watch list set: %d codes", len(codes))
 
     # ------------------------------------------------------------------
+    # Monitor context
+    # ------------------------------------------------------------------
+
+    async def _push_monitor_context(self) -> None:
+        """Push watchlist / position / industry context to monitor engine."""
+        try:
+            from app.execution.engine import trading_engine
+            from app.execution.feed.monitor_engine import monitor_engine
+
+            position_codes = {p.ts_code for p in trading_engine.position_book.get_all()}
+
+            # Load today's watchlist from daily_plan.watch_stocks_json
+            watchlist_codes: set[str] = set()
+            try:
+                import os, psycopg2
+                from app.core.config import settings
+                today_str = date.today().strftime("%Y%m%d")
+                sync_url = settings.DATABASE_URL.replace(
+                    "postgresql+asyncpg://", "postgresql://"
+                )
+
+                def _load():
+                    conn = psycopg2.connect(sync_url)
+                    try:
+                        cur = conn.cursor()
+                        cur.execute(
+                            "SELECT watch_stocks_json FROM daily_plan "
+                            "WHERE trade_date <= %s ORDER BY trade_date DESC LIMIT 1",
+                            (today_str,),
+                        )
+                        row = cur.fetchone()
+                        if row and row[0]:
+                            items = row[0] if isinstance(row[0], list) else json.loads(row[0])
+                            return {
+                                (item.get("ts_code") if isinstance(item, dict) else item)
+                                for item in items
+                                if isinstance(item, (dict, str))
+                            }
+                    finally:
+                        conn.close()
+                    return set()
+
+                import asyncio, json
+                watchlist_codes = await asyncio.to_thread(_load)
+            except Exception:
+                logger.warning("monitor context: failed to load watchlist", exc_info=True)
+
+            monitor_engine.update_context(
+                watchlist_codes=watchlist_codes,
+                position_codes=position_codes,
+                industry_map=_industry_cache,
+            )
+            logger.info(
+                "monitor context pushed: watchlist=%d, positions=%d, industries=%d",
+                len(watchlist_codes), len(position_codes), len(_industry_cache),
+            )
+        except Exception:
+            logger.warning("failed to push monitor context", exc_info=True)
+
+    # ------------------------------------------------------------------
     # Start / stop
     # ------------------------------------------------------------------
 
@@ -510,6 +573,7 @@ class MarketDataScheduler:
             self.collect_watch_codes()
         await self._load_limits()
         await self._load_industry_map()
+        await self._push_monitor_context()
         self._running = True
         self._task = asyncio.create_task(self._loop())
         logger.info("scheduler started (rt_k, %ds interval), watching %d codes",
@@ -544,12 +608,16 @@ class MarketDataScheduler:
                     self._review_generated_today = False
                     self._plan_generated_today = False
                     self._plan_verified_today = False
+                    self._backfill_done_today = False
+                    self._monitor_cleaned_today = False
+
                     if self._today_is_trading:
                         from app.execution.engine import trading_engine
                         trading_engine.begin_day()
                         self.collect_watch_codes()
                         await self._load_limits()
-                        logger.info("new trade date → begin_day + limits + watch list refreshed")
+                        await self._push_monitor_context()
+                        logger.info("new trade date → begin_day + limits + watch list + monitor context refreshed")
                     else:
                         logger.info("new day, not a trade date")
 
@@ -604,6 +672,8 @@ class MarketDataScheduler:
                             if filled:
                                 logger.info("matched %d orders | snapshot %d stocks | %.1fs",
                                             len(filled), len(snapshot), elapsed)
+                                # Position changed → refresh monitor context immediately
+                                await self._push_monitor_context()
 
                     sleep = max(0.1, POLL_INTERVAL - elapsed)
                     await asyncio.sleep(sleep)
@@ -623,9 +693,19 @@ class MarketDataScheduler:
                     if not self._plan_verified_today and t >= VERIFY_TIME and self._synced_today:
                         self._run_plan_verification()
                         self._plan_verified_today = True
+                    if not self._backfill_done_today and t >= BACKFILL_TIME and self._synced_today:
+                        self._run_monitor_backfill()
+                        self._backfill_done_today = True
                     await asyncio.sleep(self.NEWS_REFRESH_INTERVAL)
 
                 else:
+                    # Pre-market cleanup: trading day + before 09:30 + not yet cleaned
+                    if not self._monitor_cleaned_today and t < dtime(9, 30):
+                        try:
+                            await self.cleanup_monitor_data(keep_days=14)
+                            self._monitor_cleaned_today = True
+                        except Exception:
+                            logger.exception("pre-market monitor cleanup failed")
                     # Pre-market: generate morning plan at 08:00
                     if not self._plan_generated_today and t >= PLAN_TIME:
                         self._run_plan_generation()
@@ -971,6 +1051,53 @@ class MarketDataScheduler:
 
         asyncio.ensure_future(_verify())
 
+    @staticmethod
+    async def cleanup_monitor_data(keep_days: int = 14) -> dict:
+        """Delete monitor_events / monitor_largecap_alerts older than *keep_days*.
+
+        Only touches these two tables — no other data is affected.
+        Returns {"events_deleted": N, "alerts_deleted": N, "cutoff": "YYYY-MM-DD"}.
+        """
+        from sqlalchemy import text as sa_text
+        from app.core.database import async_session
+        cutoff = (date.today() - timedelta(days=keep_days)).isoformat()
+        async with async_session() as session:
+            r1 = await session.execute(sa_text(
+                "DELETE FROM monitor_events WHERE event_date < :c"
+            ), {"c": cutoff})
+            r2 = await session.execute(sa_text(
+                "DELETE FROM monitor_largecap_alerts WHERE event_date < :c"
+            ), {"c": cutoff})
+            await session.commit()
+        result = {
+            "events_deleted": r1.rowcount,
+            "alerts_deleted": r2.rowcount,
+            "cutoff": cutoff,
+        }
+        logger.info("monitor cleanup: deleted %d events + %d alerts older than %s",
+                     r1.rowcount, r2.rowcount, cutoff)
+        return result
+
+    def _run_monitor_backfill(self) -> None:
+        """Post-market: backfill +5m/+15m/+30m returns for today's monitor events."""
+        trade_date = datetime.now().strftime("%Y%m%d")
+        logger.info("monitor backfill: triggering for trade_date=%s", trade_date)
+
+        async def _bf():
+            try:
+                from app.execution.feed.monitor_backfill import backfill_monitor_returns
+                result = await asyncio.to_thread(backfill_monitor_returns, trade_date)
+                logger.info(
+                    "monitor backfill done: trade_date=%s events_updated=%s alerts_updated=%s",
+                    trade_date,
+                    result.get("events_updated"),
+                    result.get("alerts_updated"),
+                )
+            except Exception:
+                logger.exception("monitor backfill failed for trade_date=%s", trade_date)
+
+        asyncio.ensure_future(_bf())
+
     def _run_plan_generation(self) -> None:
         """Pre-market: generate morning plan via CLI subprocess.
 
@@ -984,6 +1111,9 @@ class MarketDataScheduler:
         async def _gen():
             try:
                 await asyncio.to_thread(self._run_cli_script, "morning_plan_cli.sh", trade_date)
+                # Plan saved → refresh monitor context so watchlist_hits use today's plan
+                await self._push_monitor_context()
+                logger.info("plan generation done → monitor context refreshed")
             except Exception:
                 logger.exception("plan generation failed for %s", trade_date)
 
@@ -1000,15 +1130,14 @@ class MarketDataScheduler:
         script = scripts_dir / script_name
 
         if not script.exists():
-            logger.warning("CLI script not found: %s (will be created later)", script)
-            return
+            raise RuntimeError(f"CLI script not found: {script}")
 
         log_dir = scripts_dir.parent / "logs"
         log_dir.mkdir(exist_ok=True)
         log_file = log_dir / f"{script_name.replace('.sh', '')}_{trade_date}.log"
 
+        fh = open(log_file, "a", encoding="utf-8")
         try:
-            fh = open(log_file, "a", encoding="utf-8")
             # Windows: 用 Git\bin\bash.exe（支持 /e/ 路径映射），
             # 而非 Git\usr\bin\bash.EXE（MSYS2 底层，不支持）
             bash_cmd = "bash"
@@ -1029,8 +1158,19 @@ class MarketDataScheduler:
             )
             logger.info("%s subprocess started (PID=%d), log=%s",
                         script_name, proc.pid, log_file)
-        except Exception:
-            logger.exception("failed to start %s subprocess", script_name)
+            # Block until the subprocess finishes so callers know
+            # the script has completed (e.g. daily_plan is written).
+            # This runs inside asyncio.to_thread, so it won't block
+            # the event loop.
+            rc = proc.wait(timeout=600)  # 10 min cap
+            if rc != 0:
+                raise RuntimeError(f"{script_name} exited with code {rc}")
+            logger.info("%s finished successfully", script_name)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            raise RuntimeError(f"{script_name} timed out after 600s")
+        finally:
+            fh.close()
 
     # ------------------------------------------------------------------
     # Status

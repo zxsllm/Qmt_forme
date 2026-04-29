@@ -7,6 +7,8 @@ from app.shared.models.stock import (
     IndexBasic,
     IndexClassify,
     IndexDaily,
+    MonitorEvent,
+    MonitorLargecapAlert,
     PromotionHistory,
     SimAccount,
     SimOrder,
@@ -41,6 +43,8 @@ __all__ = [
     "StrategyMeta",
     "BacktestRun",
     "PromotionHistory",
+    "MonitorEvent",
+    "MonitorLargecapAlert",
     "DailyReview",
     "DailyPlan",
 ]

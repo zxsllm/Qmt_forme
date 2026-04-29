@@ -1084,3 +1084,94 @@ class StkHolderNumber(Base):
         UniqueConstraint("ts_code", "end_date", "ann_date",
                          name="uq_stk_holdernumber"),
     )
+
+
+# ═══════════════════════════════════════════════════════════════
+# Intraday monitor — persistent event tables (P2)
+# ═══════════════════════════════════════════════════════════════
+
+class MonitorEvent(Base):
+    __tablename__ = "monitor_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_date: Mapped[str] = mapped_column(String(10), index=True)          # YYYY-MM-DD
+    event_ts: Mapped[float] = mapped_column(Float)                           # epoch seconds
+    event_time: Mapped[str] = mapped_column(String(8))                       # HH:MM:SS
+    index_code: Mapped[str] = mapped_column(String(16))
+    index_name: Mapped[str | None] = mapped_column(String(32))
+    window: Mapped[str] = mapped_column(String(8))                           # 1min/5min/15min
+    delta_pct: Mapped[float] = mapped_column(Float)
+    price_now: Mapped[float | None] = mapped_column(Float)
+    price_then: Mapped[float | None] = mapped_column(Float)
+    pattern: Mapped[str | None] = mapped_column(String(32))
+    level: Mapped[str | None] = mapped_column(String(8))                     # low/medium/high
+    event_score: Mapped[int | None] = mapped_column(Integer)
+    watchlist_hits_json: Mapped[str | None] = mapped_column(Text)            # JSON array
+    position_hits_json: Mapped[str | None] = mapped_column(Text)             # JSON array
+    hit_count: Mapped[int | None] = mapped_column(Integer, default=0)
+    top_sectors_json: Mapped[str | None] = mapped_column(Text)               # JSON array
+    summary: Mapped[str | None] = mapped_column(Text)
+    action_hint: Mapped[str | None] = mapped_column(String(128))
+    # P2-3: backfill fields — NULL until post-market batch fills them
+    ret_5m: Mapped[float | None] = mapped_column(Float)
+    ret_15m: Mapped[float | None] = mapped_column(Float)
+    ret_30m: Mapped[float | None] = mapped_column(Float)
+    max_move_30m: Mapped[float | None] = mapped_column(Float)
+    min_move_30m: Mapped[float | None] = mapped_column(Float)
+    ret_eod: Mapped[float | None] = mapped_column(Float)  # event price → close
+    # P3: extended outcome fields
+    ret_60m: Mapped[float | None] = mapped_column(Float)
+    max_up_60m: Mapped[float | None] = mapped_column(Float)
+    max_down_60m: Mapped[float | None] = mapped_column(Float)
+    close_pos_30m: Mapped[float | None] = mapped_column(Float)  # 0=收在区间最低, 1=最高
+    close_pos_60m: Mapped[float | None] = mapped_column(Float)
+    path_label: Mapped[str | None] = mapped_column(String(20))
+
+    __table_args__ = (
+        UniqueConstraint("event_date", "event_ts", "index_code", "window",
+                         name="uq_monitor_event"),
+    )
+
+
+class MonitorLargecapAlert(Base):
+    __tablename__ = "monitor_largecap_alerts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_date: Mapped[str] = mapped_column(String(10), index=True)          # YYYY-MM-DD
+    event_ts: Mapped[float] = mapped_column(Float)                           # epoch seconds
+    event_time: Mapped[str] = mapped_column(String(8))                       # HH:MM:SS
+    ts_code: Mapped[str] = mapped_column(String(16))
+    name: Mapped[str | None] = mapped_column(String(32))
+    price_now: Mapped[float | None] = mapped_column(Float)
+    price_yesterday: Mapped[float | None] = mapped_column(Float)
+    price_chg_pct: Mapped[float | None] = mapped_column(Float)
+    vol_now: Mapped[float | None] = mapped_column(Float)
+    vol_yesterday: Mapped[float | None] = mapped_column(Float)
+    vol_ratio: Mapped[float | None] = mapped_column(Float)
+    circ_mv_yi: Mapped[float | None] = mapped_column(Float)
+    sector: Mapped[str | None] = mapped_column(String(32))
+    sector_strong: Mapped[bool | None] = mapped_column(default=False)
+    in_watchlist: Mapped[bool | None] = mapped_column(default=False)
+    in_position: Mapped[bool | None] = mapped_column(default=False)
+    # P3: entry = next-minute open (auditable buy price)
+    entry_price: Mapped[float | None] = mapped_column(Float)   # 下一分钟开盘价
+    entry_time: Mapped[str | None] = mapped_column(String(8))  # HH:MM:SS
+    # P2-3: backfill fields (returns vs entry_price)
+    ret_5m: Mapped[float | None] = mapped_column(Float)
+    ret_15m: Mapped[float | None] = mapped_column(Float)
+    ret_30m: Mapped[float | None] = mapped_column(Float)
+    ret_eod: Mapped[float | None] = mapped_column(Float)  # entry_price → daily close
+    # P3: extended outcome fields
+    ret_60m: Mapped[float | None] = mapped_column(Float)
+    max_up_30m: Mapped[float | None] = mapped_column(Float)
+    max_down_30m: Mapped[float | None] = mapped_column(Float)
+    max_up_60m: Mapped[float | None] = mapped_column(Float)
+    max_down_60m: Mapped[float | None] = mapped_column(Float)
+    close_pos_30m: Mapped[float | None] = mapped_column(Float)
+    close_pos_60m: Mapped[float | None] = mapped_column(Float)
+    path_label: Mapped[str | None] = mapped_column(String(20))
+
+    __table_args__ = (
+        UniqueConstraint("event_date", "event_ts", "ts_code",
+                         name="uq_monitor_largecap"),
+    )

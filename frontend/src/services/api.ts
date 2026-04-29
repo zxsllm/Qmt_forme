@@ -284,6 +284,38 @@ export const api = {
   monitorSnapshot: () =>
     fetchJson<MonitorSnapshot>('/api/v1/monitor/snapshot'),
 
+  monitorEvents: (params: { date?: string; pattern?: string; level?: string; min_score?: number; only_watchlist_hit?: boolean; only_position_hit?: boolean; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.date) qs.set('date', params.date);
+    if (params.pattern) qs.set('pattern', params.pattern);
+    if (params.level) qs.set('level', params.level);
+    if (params.min_score) qs.set('min_score', String(params.min_score));
+    if (params.only_watchlist_hit) qs.set('only_watchlist_hit', 'true');
+    if (params.only_position_hit) qs.set('only_position_hit', 'true');
+    if (params.limit) qs.set('limit', String(params.limit));
+    return fetchJson<MonitorEventsResp>(`/api/v1/monitor/events?${qs}`);
+  },
+
+  monitorEventStats: (days = 30) =>
+    fetchJson<MonitorEventStatsResp>(`/api/v1/monitor/events/stats?days=${days}`),
+
+  monitorLargecap: (params: { date?: string; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.date) qs.set('date', params.date);
+    if (params.limit) qs.set('limit', String(params.limit));
+    return fetchJson<MonitorLargecapResp>(`/api/v1/monitor/largecap?${qs}`);
+  },
+
+  // P3 Outcome APIs
+  outcomeBaseline: (days = 30, source: 'largecap' | 'events' | 'all' = 'all') =>
+    fetchJson<OutcomeBaselineResp>(`/api/v1/monitor/outcomes/baseline?days=${days}&source=${source}`),
+
+  outcomeSlices: (groupBy: string, days = 30, source: 'largecap' | 'events' = 'largecap') =>
+    fetchJson<OutcomeSlicesResp>(`/api/v1/monitor/outcomes/slices?group_by=${groupBy}&days=${days}&source=${source}`),
+
+  outcomeDistribution: (days = 30) =>
+    fetchJson<OutcomeDistributionResp>(`/api/v1/monitor/outcomes/distribution?days=${days}`),
+
   getTopInst: (tradeDate = '', tsCode = '') =>
     fetchJson<ApiList<Record<string, unknown>>>(
       `/api/v1/market/top-inst?trade_date=${tradeDate}&ts_code=${tsCode}`,
@@ -759,6 +791,7 @@ export interface DragonTigerItem {
   l_amount: number | null;
   net_amount: number | null;
   net_rate: number | null;
+  inst_net: number | null;
   reason: string | null;
 }
 
@@ -911,10 +944,14 @@ export interface ContinuationResp {
   step_history: { trade_date: string; nums: number }[];
 }
 
+export interface HotMoneyStock {
+  ts_code: string; name: string;
+  buy: number | null; sell: number | null; net: number | null;
+}
 export interface HotMoneyItem {
   hm_name: string; stock_count: number;
   total_buy: number | null; total_sell: number | null; total_net: number | null;
-  stocks: string[];
+  stocks: HotMoneyStock[];
 }
 export interface HotMoneyResp { trade_date: string; data: HotMoneyItem[] }
 
@@ -1028,6 +1065,8 @@ export interface MonitorSectorRow {
 export interface MonitorAnomalyEvent {
   ts: number;
   time: string;
+  detected_at: string;
+  trigger_minute: string;
   index_code: string;
   index_name: string;
   window: string;
@@ -1035,11 +1074,22 @@ export interface MonitorAnomalyEvent {
   price_now: number;
   price_then: number;
   top_sectors: { name: string; delta: number; pct_now: number }[];
+  // P1 enrichment
+  watchlist_hits: string[];
+  position_hits: string[];
+  hit_count: number;
+  pattern: string;
+  level: string;
+  summary: string;
+  event_score: number;
+  action_hint: string;
 }
 
 export interface LargecapAlertEvent {
   ts: number;
   time: string;
+  detected_at: string;
+  trigger_minute: string;
   ts_code: string;
   name: string;
   price_now: number;
@@ -1049,10 +1099,24 @@ export interface LargecapAlertEvent {
   vol_yesterday: number;
   vol_ratio: number;
   circ_mv_yi: number;
+  in_watchlist?: boolean;
+  in_position?: boolean;
+  sector_strong?: boolean;
+  sector?: string;
 }
 
 export interface MonitorSnapshot {
   ts: number;
+  // ── State fields ──
+  trading_time: boolean;
+  live_ready: boolean;
+  snapshot_age_s: number | null;
+  last_tick_time: string | null;
+  event_date: string | null;
+  // ── Context ──
+  watchlist_count: number;
+  position_count: number;
+  // ── Data fields ──
   history_len: number;
   indices: MonitorIndexRow[];
   sectors: MonitorSectorRow[];
@@ -1060,6 +1124,215 @@ export interface MonitorSnapshot {
   anomaly_count: number;
   largecap_alerts: LargecapAlertEvent[];
   largecap_alert_count: number;
+}
+
+// ── Monitor Events & Stats (P2-4) ──
+
+export interface MonitorEventRow {
+  id: number;
+  event_date: string;
+  event_ts: number;
+  event_time: string;
+  index_code: string;
+  index_name: string;
+  window: string;
+  delta_pct: number;
+  pattern: string;
+  level: string;
+  event_score: number;
+  hit_count: number;
+  summary: string;
+  action_hint: string;
+  ret_5m: number | null;
+  ret_15m: number | null;
+  ret_30m: number | null;
+  max_move_30m: number | null;
+  min_move_30m: number | null;
+  ret_eod: number | null;
+  // P3 outcome fields
+  ret_60m: number | null;
+  max_up_60m: number | null;
+  max_down_60m: number | null;
+  close_pos_30m: number | null;
+  close_pos_60m: number | null;
+  path_label: string | null;
+  watchlist_hits_json: string | null;
+  position_hits_json: string | null;
+  top_sectors_json: string | null;
+  price_now: number | null;
+  price_then: number | null;
+}
+
+export interface MonitorEventsResp {
+  events: MonitorEventRow[];
+  trade_date: string;
+  total: number;
+}
+
+export interface MonitorStatGroup {
+  count: number;
+  avg_ret_eod?: number | null;
+  avg_ret_15m?: number | null;
+  avg_ret_30m?: number | null;
+  avg_ret_5m?: number | null;
+  avg_score?: number | null;
+  win_rate: number | null;
+}
+
+export interface MonitorLargecapStats {
+  count: number;
+  avg_ret_5m: number | null;
+  avg_ret_15m: number | null;
+  avg_ret_30m: number | null;
+  avg_ret_eod: number | null;
+  win_rate_15m: number | null;
+  win_rate_30m: number | null;
+  win_rate_eod: number | null;
+  win_rate: number | null;  // back-compat = win_rate_15m
+  watchlist_hits: number;
+  position_hits: number;
+  sector_strong_count: number;
+}
+
+export type WindowKey = 'ret_15m' | 'ret_30m' | 'ret_eod';
+export type WindowAvailability = Record<'index' | 'largecap', Record<WindowKey, 'ok' | 'unavailable'>>;
+
+// ── P3 Outcome Analysis ──
+
+export interface OutcomeBaseline {
+  largecap?: {
+    sample_count: number;
+    avg_ret_5m: number | null;
+    avg_ret_15m: number | null;
+    avg_ret_30m: number | null;
+    avg_ret_60m: number | null;
+    avg_ret_eod: number | null;
+    median_ret_30m: number | null;
+    median_ret_60m: number | null;
+    median_ret_eod: number | null;
+    win_rate_30m: number | null;
+    win_rate_60m: number | null;
+    win_rate_eod: number | null;
+    worst_drawdown_30m: number | null;
+    worst_drawdown_60m: number | null;
+    avg_max_up_30m: number | null;
+    avg_max_down_30m: number | null;
+    profit_loss_ratio: number | null;
+    avg_close_pos_30m: number | null;
+    avg_close_pos_60m: number | null;
+  };
+  events?: {
+    sample_count: number;
+    avg_ret_eod: number | null;
+    median_ret_eod: number | null;
+    win_rate_eod: number | null;
+    profit_loss_ratio: number | null;
+  };
+}
+
+export interface OutcomeBaselineResp {
+  baseline: OutcomeBaseline;
+  date_range: [string, string];
+  window_availability?: WindowAvailability;
+}
+
+export interface OutcomeSlice {
+  group: string;
+  count: number;
+  avg_ret_5m?: number | null;
+  avg_ret_15m?: number | null;
+  avg_ret_30m?: number | null;
+  avg_ret_60m?: number | null;
+  median_ret_30m?: number | null;
+  win_rate_30m?: number | null;
+  avg_max_up_30m?: number | null;
+  avg_max_down_30m?: number | null;
+  avg_close_pos_30m?: number | null;
+  profit_loss_ratio?: number | null;
+  // event-specific
+  avg_ret_eod?: number | null;
+  median_ret_eod?: number | null;
+  win_rate_eod?: number | null;
+  avg_score?: number | null;
+}
+
+export interface OutcomeSlicesResp {
+  slices: OutcomeSlice[];
+  group_by: string;
+  source: string;
+  date_range: [string, string];
+}
+
+export interface OutcomeDistributionResp {
+  largecap: Record<string, number>;
+  events: Record<string, number>;
+  date_range: [string, string];
+}
+
+export interface MonitorLargecapRow {
+  id: number;
+  event_date: string;
+  event_ts: number;
+  event_time: string;
+  ts_code: string;
+  name: string;
+  price_now: number | null;
+  price_yesterday: number | null;
+  price_chg_pct: number | null;
+  vol_ratio: number | null;
+  circ_mv_yi: number | null;
+  sector: string | null;
+  sector_strong: boolean | null;
+  in_watchlist: boolean | null;
+  in_position: boolean | null;
+  ret_5m: number | null;
+  ret_15m: number | null;
+  ret_30m: number | null;
+  ret_eod: number | null;
+  path_label: string | null;
+}
+
+export interface MonitorLargecapResp {
+  alerts: MonitorLargecapRow[];
+  trade_date: string;
+  total: number;
+}
+
+export interface MonitorIndexSummary {
+  count: number;
+  avg_ret_eod: number | null;
+  win_rate: number | null;
+  // These stay null for index — no minute-level data source yet.
+  avg_ret_15m: number | null;
+  avg_ret_30m: number | null;
+  win_rate_15m: number | null;
+  win_rate_30m: number | null;
+}
+
+export interface LargecapSliceRow {
+  slot?: string;
+  count: number;
+  avg_ret_15m: number | null;
+  avg_ret_30m: number | null;
+  avg_ret_eod: number | null;
+  win_rate_30m: number | null;
+  win_rate_eod: number | null;
+  win_rate: number | null;  // back-compat
+}
+
+export interface MonitorEventStatsResp {
+  date_range: [string, string];
+  total_event_count: number;
+  index_summary: MonitorIndexSummary;
+  by_pattern: (MonitorStatGroup & { pattern: string })[];
+  by_level: (MonitorStatGroup & { level: string })[];
+  by_score_band: (MonitorStatGroup & { band: string })[];
+  hit_comparison: Record<string, MonitorStatGroup>;
+  largecap_stats: MonitorLargecapStats | Record<string, never>;
+  largecap_by_hit: Record<string, LargecapSliceRow>;
+  largecap_by_sector_strong?: Record<string, LargecapSliceRow>;
+  largecap_by_time_slot: (LargecapSliceRow & { slot: string })[];
+  window_availability?: WindowAvailability;
 }
 
 export interface RiskAlert {
