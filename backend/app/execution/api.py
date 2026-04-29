@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import date
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
@@ -10,9 +11,10 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from app.shared.interfaces.types import OrderSide, OrderType, OrderStatus
-from app.shared.interfaces.models import Signal
+from app.shared.interfaces.models import Position, Signal
 from app.execution.engine import trading_engine
 from app.execution.observability.heartbeat import check_heartbeats, send_heartbeat
+from app.execution.feed.scheduler import get_rt_snapshot
 from app.execution.feed.ws_manager import ws_manager
 from app.core.database import async_session
 
@@ -76,6 +78,66 @@ async def _get_price_limits(ts_code: str) -> tuple[float | None, float | None]:
         up_limit = round(close * (1 + pct), 2)
         down_limit = round(close * (1 - pct), 2)
         return up_limit, down_limit
+
+
+async def _latest_position_prices(codes: list[str]) -> dict[str, float]:
+    """Resolve latest prices for held codes from today's snapshot or latest daily close."""
+    if not codes:
+        return {}
+
+    prices: dict[str, float] = {}
+    snapshot, snapshot_ts = get_rt_snapshot()
+    snap_is_today = bool(snapshot and snapshot_ts and date.fromtimestamp(snapshot_ts) == date.today())
+    missing_codes: list[str] = []
+
+    if snap_is_today:
+        for code in codes:
+            row = snapshot.get(code)
+            close = float(row.get("close", 0)) if row else 0.0
+            if close > 0:
+                prices[code] = close
+            else:
+                missing_codes.append(code)
+    else:
+        missing_codes = codes
+
+    if not missing_codes:
+        return prices
+
+    placeholders = ", ".join(f":c{i}" for i in range(len(missing_codes)))
+    params = {f"c{i}": code for i, code in enumerate(missing_codes)}
+    async with async_session() as session:
+        result = await session.execute(
+            text(f"""
+                SELECT DISTINCT ON (ts_code) ts_code, close
+                FROM stock_daily
+                WHERE ts_code IN ({placeholders})
+                ORDER BY ts_code, trade_date DESC
+            """),
+            params,
+        )
+        for ts_code, close in result.all():
+            if close is not None and float(close) > 0:
+                prices[ts_code] = float(close)
+
+    return prices
+
+
+async def _refresh_positions_from_market() -> list[Position]:
+    """Refresh in-memory position marks before returning positions/account APIs."""
+    positions = trading_engine.get_positions()
+    if not positions:
+        trading_engine.account_mgr.refresh(trading_engine.position_book)
+        return positions
+
+    prices = await _latest_position_prices([p.ts_code for p in positions if p.qty > 0])
+    for pos in positions:
+        price = prices.get(pos.ts_code)
+        if price is not None and price > 0:
+            trading_engine.position_book.update_market_price(pos.ts_code, price)
+
+    trading_engine.account_mgr.refresh(trading_engine.position_book)
+    return trading_engine.get_positions()
 
 
 # ---------------------------------------------------------------------------
@@ -146,12 +208,13 @@ async def list_orders(status: OrderStatus | None = None):
 
 @router.get("/positions")
 async def list_positions():
-    positions = trading_engine.get_positions()
+    positions = await _refresh_positions_from_market()
     return {"count": len(positions), "data": [p.model_dump(mode="json") for p in positions]}
 
 
 @router.get("/account")
 async def get_account():
+    await _refresh_positions_from_market()
     return trading_engine.get_account().model_dump(mode="json")
 
 
