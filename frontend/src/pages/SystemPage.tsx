@@ -228,8 +228,32 @@ function StPredictTab() {
         : <span style={{ color: '#556677' }}>-</span>,
     },
     {
-      title: '预测理由', dataIndex: 'reason', width: 320, ellipsis: { showTitle: true },
-      render: (v: string) => <span style={{ color: '#93a9bc', fontSize: 12 }}>{v || '-'}</span>,
+      title: '方式', dataIndex: 'predict_method', width: 95, align: 'center' as const,
+      filters: [
+        { text: '公告确认', value: '公告确认' },
+        { text: '公告风险提示', value: '公告风险提示' },
+        { text: '年报财务', value: '年报财务' },
+        { text: '预告推算', value: '预告推算' },
+      ],
+      onFilter: (value: boolean | React.Key, record: StPredictItem) => record.predict_method === value,
+      render: (v: string | undefined) => {
+        const color = v === '公告确认' ? 'red' : v === '公告风险提示' ? 'orange' : v === '年报财务' ? 'blue' : 'purple';
+        return v ? <Tag color={color} style={{ margin: 0 }}>{v}</Tag> : '-';
+      },
+    },
+    {
+      title: '预测理由', dataIndex: 'reason', width: 390, ellipsis: { showTitle: true },
+      render: (v: string, r: StPredictItem) => (
+        <span style={{ color: '#93a9bc', fontSize: 12 }}>
+          {v || '-'}
+          {r.ann_url && (
+            <a href={r.ann_url} target="_blank" rel="noreferrer"
+              style={{ color: '#6bc7ff', marginLeft: 6, fontSize: 11 }}>
+              查看公告
+            </a>
+          )}
+        </span>
+      ),
     },
   ];
 

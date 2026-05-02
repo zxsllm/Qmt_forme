@@ -693,7 +693,10 @@ class MarketDataScheduler:
                     if not self._plan_verified_today and t >= VERIFY_TIME and self._synced_today:
                         self._run_plan_verification()
                         self._plan_verified_today = True
-                    if not self._backfill_done_today and t >= BACKFILL_TIME and self._synced_today:
+                    # backfill 不依赖 _synced_today：daily-sync 哪怕失败，
+                    # 16:10 一到也跑一次，能补多少补多少；下次 tick 还会重试，
+                    # 直到 _backfill_done_today=True。
+                    if not self._backfill_done_today and t >= BACKFILL_TIME:
                         self._run_monitor_backfill()
                         self._backfill_done_today = True
                     await asyncio.sleep(self.NEWS_REFRESH_INTERVAL)

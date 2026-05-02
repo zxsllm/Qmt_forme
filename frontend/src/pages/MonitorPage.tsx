@@ -770,25 +770,49 @@ function LargecapTimeline() {
                   )}
                 </span>
               )}
-              {/* 主行直接并排所有可用结果窗口；Tooltip 只做补充说明 */}
-              {(a.ret_15m != null || a.ret_30m != null || a.ret_eod != null) && (() => {
-                const items: { label: string; value: number }[] = [];
-                if (a.ret_15m != null) items.push({ label: '15m', value: a.ret_15m });
-                if (a.ret_30m != null) items.push({ label: '30m', value: a.ret_30m });
-                if (a.ret_eod != null) items.push({ label: '收盘', value: a.ret_eod });
+              {/* 主行直接并排所有结果窗口；NULL 显示"待回填" */}
+              {(() => {
+                const slots: { label: string; value: number | null }[] = [
+                  { label: '15m', value: a.ret_15m ?? null },
+                  { label: '30m', value: a.ret_30m ?? null },
+                  { label: '收盘', value: a.ret_eod ?? null },
+                ];
+                const allNull = slots.every(s => s.value == null);
+                const now = new Date();
+                const today = localDateKey(now);
+                const isToday = a.event_date === today;
+                const nowMin = now.getHours() * 60 + now.getMinutes();
+                const closed = !isToday || nowMin >= 15 * 60;
+                const dayGap = diffLocalDays(today, a.event_date);
+                const olderThanOneDay = !isNaN(dayGap) && dayGap >= 2;
+                const pendingLabel = !closed
+                  ? '盘中'
+                  : olderThanOneDay ? '无结果' : '待回填';
+                const pendingTip = !closed
+                  ? '当日收盘后回填'
+                  : olderThanOneDay
+                    ? '回填已完成但未得到有效结果（多为分钟数据缺失或入场窗口越过收盘）'
+                    : '收盘后等待 backfill 补齐；可手动跑 backfill_monitor_returns 兜底';
+                const tooltipTitle = allNull
+                  ? pendingTip
+                  : '入场价 = 下一分钟开盘价；分别显示 15m / 30m / 收盘结果';
                 return (
-                  <Tooltip title="入场价 = 下一分钟开盘价；分别显示 15m / 30m / 收盘结果">
+                  <Tooltip title={tooltipTitle}>
                     <div style={{
                       marginLeft: 'auto',
                       display: 'flex', gap: 10, justifyContent: 'flex-end',
                       minWidth: 220, fontSize: 10, cursor: 'help',
                     }}>
-                      {items.map((it) => (
+                      {slots.map((it) => (
                         <span key={it.label} style={{ display: 'inline-flex', gap: 3, alignItems: 'baseline' }}>
                           <span style={{ color: '#556677' }}>{it.label}</span>
-                          <span style={{ color: pctColor(it.value), fontWeight: 600 }}>
-                            {it.value > 0 ? '+' : ''}{it.value.toFixed(2)}%
-                          </span>
+                          {it.value != null ? (
+                            <span style={{ color: pctColor(it.value), fontWeight: 600 }}>
+                              {it.value > 0 ? '+' : ''}{it.value.toFixed(2)}%
+                            </span>
+                          ) : (
+                            <span style={{ color: '#556677' }}>{pendingLabel}</span>
+                          )}
                         </span>
                       ))}
                     </div>
@@ -830,7 +854,6 @@ function StatsPanel() {
   const lcAvg30 = 'avg_ret_30m' in lc ? lc.avg_ret_30m : null;
   const lcAvgEod = 'avg_ret_eod' in lc ? lc.avg_ret_eod : null;
   const lcWrEod = 'win_rate_eod' in lc ? lc.win_rate_eod : null;
-  const indexAvail = data.window_availability?.index;
 
   function conclusionText(avgRet: number | null, winRate: number | null, count: number): string {
     if (count === 0) return '暂无数据';
@@ -927,35 +950,30 @@ function StatsPanel() {
 
       {/* ═══ Layer 1: Today's Conclusion ═══ */}
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-        {/* Index anomaly summary — 主窗口=收盘结果；15m/30m 暂不可用 */}
+        {/* Index anomaly summary — 仅看收盘方向是否命中 */}
         <SummaryCard
           title="指数异动验证"
-          subtitle="触发后到当日收盘的方向验证"
+          subtitle="触发后到当日收盘的方向命中率"
           count={evtCount}
           avgRet={evtAvgEod}
           winRate={evtWr}
           retLabel="平均收盘结果"
-          winRateLabel="胜率(收盘)"
-          unavailable={
-            (indexAvail?.ret_15m === 'unavailable' || indexAvail?.ret_30m === 'unavailable')
-              ? '15m/30m 暂不可用（无分钟级指数数据源）'
-              : undefined
-          }
+          winRateLabel="方向命中率(收盘)"
           conclusion={conclusionText(evtAvgEod, evtWr, evtCount)}
           advice={indexAdvice(evtAvgEod, evtWr, evtCount)}
         />
-        {/* Largecap summary — 主窗口=30m；副窗口=收盘结果 */}
+        {/* Largecap summary — 主窗口=30m；副窗口=收盘 */}
         <SummaryCard
           title="大盘股异动验证"
-          subtitle="下一分钟开盘买入；30m 为主窗口，收盘结果为副窗口"
+          subtitle="下一分钟开盘买入；30m 为主窗口，收盘为副窗口"
           count={lcCount}
           avgRet={lcAvg30}
           winRate={lcWr30}
           retLabel="平均30m结果"
-          winRateLabel="胜率(30m)"
+          winRateLabel="30min上涨率"
           extraMetrics={[
             { label: '平均收盘结果', value: lcAvgEod, kind: 'pct' },
-            { label: '胜率(收盘)', value: lcWrEod, kind: 'rate' },
+            { label: '收盘上涨率', value: lcWrEod, kind: 'rate' },
           ]}
           conclusion={conclusionText(lcAvg30, lcWr30, lcCount)}
           advice={largecapAdvice(lcAvg30, lcWr30, lcAvgEod, lcWrEod, lcCount)}
@@ -1086,8 +1104,8 @@ function StatsPanel() {
               <span style={{ color: '#93a9bc' }}>15m结果: <b style={{ color: pctColor(s.avg_ret_15m) }}>{fmt(s.avg_ret_15m)}</b></span>
               <span style={{ color: '#93a9bc' }}>30m结果: <b style={{ color: pctColor(s.avg_ret_30m) }}>{fmt(s.avg_ret_30m)}</b></span>
               <span style={{ color: '#93a9bc' }}>收盘结果: <b style={{ color: pctColor(s.avg_ret_eod) }}>{fmt(s.avg_ret_eod)}</b></span>
-              <span style={{ color: '#93a9bc' }}>胜率(30m): <b style={{ color: wrColor(s.win_rate_30m) }}>{s.win_rate_30m != null ? `${s.win_rate_30m.toFixed(1)}%` : '-'}</b></span>
-              <span style={{ color: '#93a9bc' }}>胜率(收盘): <b style={{ color: wrColor(s.win_rate_eod) }}>{s.win_rate_eod != null ? `${s.win_rate_eod.toFixed(1)}%` : '-'}</b></span>
+              <span style={{ color: '#93a9bc' }}>30min上涨率: <b style={{ color: wrColor(s.win_rate_30m) }}>{s.win_rate_30m != null ? `${s.win_rate_30m.toFixed(1)}%` : '-'}</b></span>
+              <span style={{ color: '#93a9bc' }}>收盘上涨率: <b style={{ color: wrColor(s.win_rate_eod) }}>{s.win_rate_eod != null ? `${s.win_rate_eod.toFixed(1)}%` : '-'}</b></span>
               <span style={{ color: '#556677' }}>观察池命中 {s.watchlist_hits} · 持仓命中 {s.position_hits} · 板块共振 {s.sector_strong_count}</span>
             </>);
           })()}
@@ -1209,7 +1227,7 @@ function StatsTable({ title, hint, retHeader, rows, minSample = 0 }: {
             <th style={hdr}>样本</th>
             <th style={hdr}>{retHeader}</th>
             <th style={hdr}>
-              <Tooltip title="信号方向和实际结果一致的比例">胜率</Tooltip>
+              <Tooltip title="异动方向与当日收盘方向一致的比例">方向命中率(收盘)</Tooltip>
             </th>
           </tr>
         </thead>
@@ -1274,8 +1292,8 @@ function LargecapBreakdownTable({ title, hint, rows, minSample = 3 }: {
             <th style={hdr}>15m结果</th>
             <th style={hdr}>30m结果</th>
             <th style={hdr}>收盘结果</th>
-            <th style={hdr}>胜率(30m)</th>
-            <th style={hdr}>胜率(收盘)</th>
+            <th style={hdr}>30min上涨率</th>
+            <th style={hdr}>收盘上涨率</th>
           </tr>
         </thead>
         <tbody>
@@ -1397,10 +1415,10 @@ function OutcomePanel() {
               { label: '平均15m结果', value: lc.avg_ret_15m, fmt: 'pct' },
               { label: '平均30m结果', value: lc.avg_ret_30m, fmt: 'pct' },
               { label: '中位30m结果', value: lc.median_ret_30m, fmt: 'pct' },
-              { label: '胜率(30m)', value: lc.win_rate_30m, fmt: 'rate' },
+              { label: '30min上涨率', value: lc.win_rate_30m, fmt: 'rate' },
               { label: '平均收盘结果', value: lc.avg_ret_eod, fmt: 'pct' },
               { label: '中位收盘结果', value: lc.median_ret_eod, fmt: 'pct' },
-              { label: '胜率(收盘)', value: lc.win_rate_eod, fmt: 'rate' },
+              { label: '收盘上涨率', value: lc.win_rate_eod, fmt: 'rate' },
               { label: '盈亏比', value: lc.profit_loss_ratio, fmt: 'ratio' },
               { label: '最大回撤(30m)', value: lc.worst_drawdown_30m, fmt: 'pct' },
               { label: '均上冲(30m)', value: lc.avg_max_up_30m, fmt: 'pct' },
@@ -1411,13 +1429,11 @@ function OutcomePanel() {
         {ev && ev.sample_count > 0 && (
           <BaselineCard
             title="指数异动 — 信号后效 (非买入基线)"
-            subtitle={`${ev.sample_count} 样本 · 触发快照价→当日收盘 · 不可直接交易 · 15m/30m 暂不可用`}
+            subtitle={`${ev.sample_count} 样本 · 触发快照价→当日收盘 · 不可直接交易`}
             metrics={[
-              { label: '平均15m结果', value: null, fmt: 'pct', unavailable: true },
-              { label: '平均30m结果', value: null, fmt: 'pct', unavailable: true },
               { label: '平均收盘结果', value: ev.avg_ret_eod, fmt: 'pct' },
               { label: '中位收盘结果', value: ev.median_ret_eod, fmt: 'pct' },
-              { label: '胜率(收盘)', value: ev.win_rate_eod, fmt: 'rate' },
+              { label: '方向命中率(收盘)', value: ev.win_rate_eod, fmt: 'rate' },
               { label: '盈亏比', value: ev.profit_loss_ratio, fmt: 'ratio' },
             ]}
           />
@@ -1486,10 +1502,10 @@ function OutcomePanel() {
                     <Tooltip title="下一分钟开盘买入，持有到当日收盘的平均收益">收盘结果</Tooltip>
                   </th>
                   <th style={hdrS}>
-                    <Tooltip title="30 分钟后盈利的比例">胜率(30m)</Tooltip>
+                    <Tooltip title="30 分钟后盈利（ret_30m &gt; 0）的样本比例">30min上涨率</Tooltip>
                   </th>
                   <th style={hdrS}>
-                    <Tooltip title="持有到收盘盈利的比例">胜率(收盘)</Tooltip>
+                    <Tooltip title="持有到收盘盈利（ret_eod &gt; 0）的样本比例">收盘上涨率</Tooltip>
                   </th>
                   <th style={hdrS}>
                     <Tooltip title="平均盈利 / 平均亏损（按 30m 口径）">盈亏比</Tooltip>
@@ -1505,7 +1521,9 @@ function OutcomePanel() {
                     <Tooltip title="事件触发价到当日收盘价的收益">收盘结果</Tooltip>
                   </th>
                   <th style={hdrS}>中位收盘结果</th>
-                  <th style={hdrS}>胜率(收盘)</th>
+                  <th style={hdrS}>
+                    <Tooltip title="异动方向与当日收盘方向一致的比例">方向命中率(收盘)</Tooltip>
+                  </th>
                   <th style={hdrS}>盈亏比</th>
                   <th style={hdrS}>均分</th>
                 </>)}

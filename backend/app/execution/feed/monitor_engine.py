@@ -68,6 +68,20 @@ def _redis():
     return redis_client
 
 
+# Circuit breaker: 一次 Redis 调用失败后，60 秒内 _redis_alive() 直接返回 False，
+# 让 get_snapshot 跳过后续 redis 操作，避免每次请求都串行卡 3 个 socket_timeout。
+_redis_unavailable_until: float = 0.0
+
+
+def _redis_alive() -> bool:
+    return _time.time() >= _redis_unavailable_until
+
+
+def _mark_redis_down() -> None:
+    global _redis_unavailable_until
+    _redis_unavailable_until = _time.time() + 60.0
+
+
 def _get_sync_engine():
     """Lazy create a sync engine for fire-and-forget DB writes."""
     global _sync_engine
@@ -342,6 +356,7 @@ class MonitorEngine:
             return [json.loads(item) for item in raw_list]
         except Exception:
             logger.warning("failed to load anomalies from Redis", exc_info=True)
+            _mark_redis_down()
             return []
 
     # ── Large-cap volume-price surge ────────────────────────────────
@@ -511,6 +526,7 @@ class MonitorEngine:
             return [json.loads(item) for item in raw]
         except Exception:
             logger.warning("failed to load largecap alerts from Redis", exc_info=True)
+            _mark_redis_down()
             return []
 
     def on_tick(self, snapshot: dict, sector_rankings: list[dict]) -> None:
@@ -758,21 +774,23 @@ class MonitorEngine:
             # runs the full _new_day_check() (including largecap baseline).
             stale_events = True
             logger.info("get_snapshot: stale in-memory state from %s, will be cleaned on next tick", self._today)
-        try:
-            r = _redis()
-            stored_date = r.get(REDIS_KEY_EVENT_DATE)
-            if stored_date:
-                stored_date = stored_date if isinstance(stored_date, str) else stored_date.decode()
-            if stored_date and stored_date != today_iso:
-                # Redis events belong to a previous day — purge
-                r.delete(REDIS_KEY)
-                r.delete(REDIS_KEY_LARGECAP)
-                r.set(REDIS_KEY_EVENT_DATE, today_iso, ex=24 * 3600)
-                stale_events = True
-                logger.info("get_snapshot: purged stale Redis events from %s", stored_date)
-            event_date = stored_date if stored_date == today_iso else today_iso
-        except Exception:
-            logger.warning("get_snapshot: Redis date check failed", exc_info=True)
+        if _redis_alive():
+            try:
+                r = _redis()
+                stored_date = r.get(REDIS_KEY_EVENT_DATE)
+                if stored_date:
+                    stored_date = stored_date if isinstance(stored_date, str) else stored_date.decode()
+                if stored_date and stored_date != today_iso:
+                    # Redis events belong to a previous day — purge
+                    r.delete(REDIS_KEY)
+                    r.delete(REDIS_KEY_LARGECAP)
+                    r.set(REDIS_KEY_EVENT_DATE, today_iso, ex=24 * 3600)
+                    stale_events = True
+                    logger.info("get_snapshot: purged stale Redis events from %s", stored_date)
+                event_date = stored_date if stored_date == today_iso else today_iso
+            except Exception:
+                logger.warning("get_snapshot: Redis date check failed", exc_info=True)
+                _mark_redis_down()
 
         # ── Snapshot age & last tick ──
         # When stale (cross-day), ignore yesterday's in-memory history
@@ -828,14 +846,14 @@ class MonitorEngine:
             sectors.sort(key=lambda x: abs(x["pct_chg"]), reverse=True)
 
         # Read anomalies from Redis (survives restart); stale already purged above
-        anomalies = [] if stale_events else self._load_anomalies_from_redis()
+        anomalies = [] if (stale_events or not _redis_alive()) else self._load_anomalies_from_redis()
         anomalies.reverse()  # newest first
 
         # P1: enrich each anomaly with hits, pattern, level, score, action_hint
         for ev in anomalies:
             self._enrich_anomaly(ev, anomalies)
 
-        largecap_alerts = [] if stale_events else self._load_largecap_alerts_from_redis()
+        largecap_alerts = [] if (stale_events or not _redis_alive()) else self._load_largecap_alerts_from_redis()
 
         # P1-1: enrich largecap alerts with watchlist/position hit flag
         for la in largecap_alerts:

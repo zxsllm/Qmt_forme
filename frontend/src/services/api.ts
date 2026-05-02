@@ -1029,7 +1029,9 @@ export interface StPredictItem {
   predicted_st_date: string | null;
   disclosure_date: string;
   warn_count: number;
+  predict_method?: string;
   reason: string;
+  ann_url?: string | null;
 }
 
 export interface SectorResonanceItem {

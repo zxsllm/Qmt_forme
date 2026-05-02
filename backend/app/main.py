@@ -1538,6 +1538,7 @@ async def get_st_predict():
             if not rules:
                 rules.append("财务指标异常")
             rec["reason"] = "；".join(rules)
+            rec["predict_method"] = "年报财务" if src == "published" else "预告推算"
 
             # net_profit_min/max: 万元 → 元 (统一单位给前端 fmtWan)
             if rec.get("net_profit_min") is not None:
@@ -1550,6 +1551,135 @@ async def get_st_predict():
                 rec.pop(k, None)
 
             items.append(rec)
+
+        # 公告优先：财务表更新慢时，先用风险提示/实施公告补足待 ST 股票。
+        ann_r = await session.execute(text("""
+            WITH current_st AS (
+                SELECT DISTINCT ts_code FROM stock_st
+                WHERE trade_date = (SELECT MAX(trade_date) FROM stock_st)
+            ),
+            trade_days AS (
+                SELECT cal_date FROM trade_cal
+                WHERE is_open = 1 AND exchange = 'SSE'
+                      AND cal_date >= :cal_start
+                ORDER BY cal_date
+            ),
+            disc AS (
+                SELECT ts_code, actual_date, pre_date
+                FROM disclosure_date WHERE end_date = :report_end
+            ),
+            ann AS (
+                SELECT DISTINCT ON (a.ts_code)
+                       a.ts_code, b.name, b.market, a.ann_date, a.title, a.url,
+                       CASE
+                         WHEN a.title NOT LIKE '%%可能被实施%%'
+                          AND (
+                            a.title LIKE '%%被实施退市风险警示%%'
+                            OR a.title LIKE '%%实施退市风险警示%%'
+                            OR a.title LIKE '%%股票简称变更为%%ST%%'
+                          )
+                         THEN '公告确认'
+                         ELSE '公告风险提示'
+                       END AS predict_method,
+                       (SELECT MIN(cal_date) FROM trade_days WHERE cal_date > a.ann_date) AS next_trade_date,
+                       COALESCE(d.actual_date, d.pre_date) AS disclosure_date,
+                       COALESCE(ra.warn_count, 0) AS warn_count
+                FROM stock_anns a
+                JOIN stock_basic b ON a.ts_code = b.ts_code
+                LEFT JOIN disc d ON a.ts_code = d.ts_code
+                LEFT JOIN (
+                    SELECT ts_code, count(*) AS warn_count
+                    FROM stock_anns
+                    WHERE title LIKE '%%可能被实施%%风险警示%%'
+                       OR title LIKE '%%可能被实施%%退市风险%%'
+                    GROUP BY ts_code
+                ) ra ON a.ts_code = ra.ts_code
+                WHERE a.ann_date >= :ann_cutoff
+                  AND NOT EXISTS (SELECT 1 FROM current_st s WHERE s.ts_code = a.ts_code)
+                  AND b.name NOT LIKE '%%-U' AND b.name NOT LIKE '%%-U_'
+                  AND (
+                      a.title LIKE '%%可能被实施%%风险警示%%'
+                      OR a.title LIKE '%%可能被实施%%退市风险%%'
+                      OR a.title LIKE '%%被实施退市风险警示%%'
+                      OR a.title LIKE '%%实施退市风险警示%%'
+                      OR a.title LIKE '%%股票简称变更为%%ST%%'
+                  )
+                  AND a.title NOT LIKE '%%撤销%%'
+                ORDER BY a.ts_code,
+                         CASE
+                           WHEN a.title NOT LIKE '%%可能被实施%%'
+                            AND (
+                              a.title LIKE '%%被实施退市风险警示%%'
+                              OR a.title LIKE '%%实施退市风险警示%%'
+                              OR a.title LIKE '%%股票简称变更为%%ST%%'
+                            )
+                           THEN 0 ELSE 1 END,
+                         a.ann_date DESC
+            )
+            SELECT * FROM ann
+            ORDER BY ann_date DESC
+        """), {
+            "cal_start": cal_start,
+            "report_end": report_end,
+            "ann_cutoff": f"{report_year}0101",
+        })
+        ann_cols = ann_r.keys()
+
+        from app.shared.risk_alerts import _extract_effective_date
+
+        def _ann_priority(method: str) -> int:
+            if method == "公告确认":
+                return 0
+            if method == "公告风险提示":
+                return 1
+            return 2
+
+        existing_by_code = {item["ts_code"]: item for item in items}
+        for row in ann_r.fetchall():
+            rec = dict(zip(ann_cols, row))
+            code = rec["ts_code"]
+            method = rec["predict_method"]
+            existing = existing_by_code.get(code)
+            if existing and _ann_priority(existing.get("predict_method", "")) <= _ann_priority(method):
+                continue
+
+            ann_date = rec.get("ann_date") or ""
+            title = rec.get("title") or ""
+            effective = _extract_effective_date(title, ann_date[:4] if len(ann_date) >= 4 else "")
+            predicted_date = effective or rec.get("disclosure_date") or rec.get("next_trade_date")
+            reason = (
+                f"{method}: {title}；公告日{ann_date}"
+                + (f"；预计/确认生效日{predicted_date}" if predicted_date else "")
+            )
+            item = {
+                "ts_code": code,
+                "name": rec.get("name"),
+                "profit": None,
+                "revenue": None,
+                "bps": None,
+                "net_profit_min": None,
+                "net_profit_max": None,
+                "forecast_ann_date": ann_date,
+                "pre_date": ann_date,
+                "predicted_st_date": predicted_date,
+                "disclosure_date": rec.get("disclosure_date") or ann_date,
+                "warn_count": rec.get("warn_count") or 0,
+                "predict_method": method,
+                "reason": reason,
+                "ann_url": rec.get("url"),
+            }
+            if existing:
+                items[items.index(existing)] = item
+            else:
+                items.append(item)
+            existing_by_code[code] = item
+
+        method_rank = {"公告确认": 0, "公告风险提示": 1, "年报财务": 2, "预告推算": 3}
+        items.sort(key=lambda x: (
+            x.get("predicted_st_date") or "99999999",
+            method_rank.get(x.get("predict_method", ""), 9),
+            x.get("ts_code") or "",
+        ))
 
         return {"count": len(items), "data": items, "report_year": report_year}
 

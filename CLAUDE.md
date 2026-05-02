@@ -23,6 +23,8 @@ Phase 5.0 已完成 (自动化复盘与早盘计划) → 下一步: Phase 6 (QMT
 ## 技术栈
 
 Python 3.12 | FastAPI | SQLAlchemy 2.0 (async) + asyncpg | PostgreSQL 18 + Alembic | Redis (Memurai 6379)
+
+**所有 Python 命令必须用项目 venv**: `.venv/Scripts/python.exe`（Windows）。禁止用全局 `python` / `E:\Python\Python312\python.exe`，否则模块缺失或版本错位。
 React 19 | TypeScript 5.9 | Vite 8 | Ant Design 6 | TailwindCSS 4 | klinecharts 9.8 | Zustand + React Query
 Tushare Pro (满权限) | venv `.venv/` | Windows 环境
 

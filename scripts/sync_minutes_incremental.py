@@ -11,6 +11,7 @@ Usage:
 
 import argparse
 import logging
+import os
 import sys
 import time
 from datetime import datetime
@@ -30,6 +31,21 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+
+def bypass_proxy_for_tushare() -> None:
+    """Minute sync talks to domestic Tushare endpoints; proxying them is slow."""
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        os.environ.pop(name, None)
+
+    hosts = ["api.tushare.pro", "api.waditu.com", "127.0.0.1", "localhost"]
+    for name in ("NO_PROXY", "no_proxy"):
+        current = [item.strip() for item in os.environ.get(name, "").split(",") if item.strip()]
+        merged = current + [host for host in hosts if host not in current]
+        os.environ[name] = ",".join(merged)
+
+
+bypass_proxy_for_tushare()
 
 sync_url = settings.DATABASE_URL.replace("+asyncpg", "+psycopg")
 engine = create_engine(sync_url, echo=False)
