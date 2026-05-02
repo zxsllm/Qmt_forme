@@ -87,7 +87,10 @@ def get_latest_trade_date() -> str:
 
 
 def pull_range(ts_code: str, start_date: str, end_date: str) -> int:
-    """Pull 1-min bars for one stock in a specific date range."""
+    """Pull 1-min bars for one stock in a specific date range.
+
+    遇 df.empty 二次重试再判定，避免把"接口偶发抽风"和"真无数据"混淆。
+    """
     start_dt = f"{start_date} 09:00:00"
     end_dt = f"{end_date} 16:00:00"
 
@@ -99,7 +102,23 @@ def pull_range(ts_code: str, start_date: str, end_date: str) -> int:
             ts_code=ts_code, freq=FREQ,
             start_date=start_dt, end_date=cur_end,
         )
-        if df.empty:
+        if df is None or df.empty:
+            if not all_rows:
+                # 第一页就空，二次确认是否真无数据
+                time.sleep(0.4)
+                df = svc.stk_mins(
+                    ts_code=ts_code, freq=FREQ,
+                    start_date=start_dt, end_date=cur_end,
+                )
+                if df is None or df.empty:
+                    break
+                all_rows.append(df)
+                if len(df) < 8000:
+                    break
+                earliest = df["trade_time"].min()
+                cur_end = earliest
+                time.sleep(0.05)
+                continue
             break
         all_rows.append(df)
         if len(df) < 8000:
@@ -196,6 +215,38 @@ def main():
     )
     if errors:
         logger.info("Failed stocks (first 20): %s", errors[:20])
+
+    # ── Sanity check: 实际写入是否真的覆盖到 target_date ──
+    # 防 silent failure：即使中间每只都"+241 bars"看起来正常，
+    # 也要在收尾时验 DB 中目标日期的覆盖度，覆盖不达标就以非零退出码结束，
+    # 让 scheduler / 健康面板能感知。
+    target_dash = f"{target_date[:4]}-{target_date[4:6]}-{target_date[6:]}"
+    with engine.connect() as conn:
+        n_codes = conn.execute(text(
+            "SELECT COUNT(DISTINCT ts_code) FROM stock_min_kline "
+            "WHERE freq=:f AND trade_time::date=:d"
+        ), {"f": FREQ, "d": target_dash}).scalar() or 0
+        # 只校验非测试模式且非 --from（普通日常增量）
+    if args.test == 0 and not args.from_date:
+        l_count = len(stocks)
+        coverage = n_codes / l_count if l_count else 0
+        logger.info(
+            "Sanity check: target=%s  ts_codes_in_db=%d / %d  coverage=%.1f%%",
+            target_date, n_codes, l_count, coverage * 100,
+        )
+        if coverage < 0.95:
+            logger.error(
+                "SANITY FAIL: target_date=%s coverage %.1f%% < 95%%, "
+                "very likely Tushare didn't return today's data yet — "
+                "exiting non-zero so callers can detect this.",
+                target_date, coverage * 100,
+            )
+            sys.exit(2)
+    else:
+        logger.info(
+            "Sanity check (info-only, test/--from mode): target=%s  ts_codes_in_db=%d",
+            target_date, n_codes,
+        )
 
 
 if __name__ == "__main__":
