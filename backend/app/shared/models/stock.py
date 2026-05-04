@@ -133,6 +133,27 @@ class StockMinKline(Base):
     amount: Mapped[float | None] = mapped_column(Float)
 
 
+class CbMinKline(Base):
+    """Mapped to the partitioned cb_min_kline table (created via raw SQL).
+
+    Convertible-bond 1min bars. Pulled via the same Tushare stk_mins endpoint
+    used for stocks (the upstream API is polymorphic on ts_code).
+    """
+
+    __tablename__ = "cb_min_kline"
+    __table_args__ = {"extend_existing": True}
+
+    ts_code: Mapped[str] = mapped_column(String(16), primary_key=True)
+    trade_time: Mapped[datetime] = mapped_column(DateTime, primary_key=True)
+    freq: Mapped[str] = mapped_column(String(8), primary_key=True, default="1min")
+    open: Mapped[float | None] = mapped_column(Float)
+    close: Mapped[float | None] = mapped_column(Float)
+    high: Mapped[float | None] = mapped_column(Float)
+    low: Mapped[float | None] = mapped_column(Float)
+    vol: Mapped[float | None] = mapped_column(Float)
+    amount: Mapped[float | None] = mapped_column(Float)
+
+
 # =========================================================================
 # Phase 4: Backtest support tables
 # =========================================================================

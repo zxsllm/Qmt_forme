@@ -38,38 +38,44 @@ PARTITIONS = [
 ]
 
 
+def _create_partitioned_table(conn, parent: str, idx_name: str) -> None:
+    """Generic helper: create a partitioned k-line table + monthly partitions + index."""
+    conn.execute(text(f"""
+        CREATE TABLE IF NOT EXISTS {parent} (
+            ts_code     VARCHAR(16) NOT NULL,
+            trade_time  TIMESTAMP   NOT NULL,
+            freq        VARCHAR(8)  NOT NULL DEFAULT '1min',
+            open        DOUBLE PRECISION,
+            close       DOUBLE PRECISION,
+            high        DOUBLE PRECISION,
+            low         DOUBLE PRECISION,
+            vol         DOUBLE PRECISION,
+            amount      DOUBLE PRECISION,
+            PRIMARY KEY (ts_code, trade_time, freq)
+        ) PARTITION BY RANGE (trade_time)
+    """))
+    logger.info("Parent table %s ready", parent)
+
+    for suffix, start, end in PARTITIONS:
+        part_name = f"{parent}_{suffix}"
+        conn.execute(text(f"""
+            CREATE TABLE IF NOT EXISTS {part_name}
+            PARTITION OF {parent}
+            FOR VALUES FROM ('{start}') TO ('{end}')
+        """))
+        logger.info("  Partition %s: [%s, %s)", part_name, start, end)
+
+    conn.execute(text(f"""
+        CREATE INDEX IF NOT EXISTS {idx_name}
+        ON {parent} (ts_code, trade_time)
+    """))
+
+
 def create_table():
     with engine.begin() as conn:
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS stock_min_kline (
-                ts_code     VARCHAR(16) NOT NULL,
-                trade_time  TIMESTAMP   NOT NULL,
-                freq        VARCHAR(8)  NOT NULL DEFAULT '1min',
-                open        DOUBLE PRECISION,
-                close       DOUBLE PRECISION,
-                high        DOUBLE PRECISION,
-                low         DOUBLE PRECISION,
-                vol         DOUBLE PRECISION,
-                amount      DOUBLE PRECISION,
-                PRIMARY KEY (ts_code, trade_time, freq)
-            ) PARTITION BY RANGE (trade_time)
-        """))
-        logger.info("Parent table stock_min_kline created (or already exists)")
-
-        for suffix, start, end in PARTITIONS:
-            part_name = f"stock_min_kline_{suffix}"
-            conn.execute(text(f"""
-                CREATE TABLE IF NOT EXISTS {part_name}
-                PARTITION OF stock_min_kline
-                FOR VALUES FROM ('{start}') TO ('{end}')
-            """))
-            logger.info("  Partition %s: [%s, %s)", part_name, start, end)
-
-        conn.execute(text("""
-            CREATE INDEX IF NOT EXISTS idx_min_kline_ts_code
-            ON stock_min_kline (ts_code, trade_time)
-        """))
-        logger.info("Index created")
+        _create_partitioned_table(conn, "stock_min_kline", "idx_min_kline_ts_code")
+        _create_partitioned_table(conn, "cb_min_kline",    "idx_cb_min_kline_ts_code")
+        logger.info("Indexes created")
 
 
 def verify():
@@ -77,7 +83,7 @@ def verify():
         result = conn.execute(text("""
             SELECT relname, pg_size_pretty(pg_relation_size(oid))
             FROM pg_class
-            WHERE relname LIKE 'stock_min_kline%'
+            WHERE relname LIKE 'stock_min_kline%' OR relname LIKE 'cb_min_kline%'
             ORDER BY relname
         """))
         for row in result:

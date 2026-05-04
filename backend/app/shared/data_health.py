@@ -426,39 +426,91 @@ async def run_health_check(session: AsyncSession, auto_repair: bool = True) -> d
         "note": sched_note, "diagnosis": None, "gap_days": 0,
     })
 
-    # Partitions
-    partition_ok = True
-    partition_note = ""
-    try:
-        month_str = now.strftime("%Y_%m")
-        r_part = await session.execute(text(
-            "SELECT count(*) FROM pg_class WHERE relname = :name"
-        ), {"name": f"stock_min_kline_{month_str}"})
-        has_cur = (r_part.scalar_one_or_none() or 0) > 0
-        if not has_cur:
+    # Partitions — both stock_min_kline and cb_min_kline share the same monthly layout.
+    async def _check_partitions(parent: str, label: str) -> None:
+        partition_ok = True
+        partition_note = ""
+        try:
+            month_str = now.strftime("%Y_%m")
+            r_part = await session.execute(text(
+                "SELECT count(*) FROM pg_class WHERE relname = :name"
+            ), {"name": f"{parent}_{month_str}"})
+            has_cur = (r_part.scalar_one_or_none() or 0) > 0
+            if not has_cur:
+                partition_ok = False
+                partition_note = f"缺少{now.year}年{now.month}月分区"
+        except Exception:
             partition_ok = False
-            partition_note = f"缺少{now.year}年{now.month}月分区"
-    except Exception:
-        partition_ok = False
-        partition_note = "检查失败"
+            partition_note = "检查失败"
 
-    next_month = (now.replace(day=1) + timedelta(days=32)).replace(day=1)
-    try:
-        r_next = await session.execute(text(
-            "SELECT count(*) FROM pg_class WHERE relname = :name"
-        ), {"name": f"stock_min_kline_{next_month.strftime('%Y_%m')}"})
-        has_next = (r_next.scalar_one_or_none() or 0) > 0
-        if not has_next and now.day >= 25:
-            partition_note += ("; " if partition_note else "") + f"下月({next_month.month}月)分区未创建"
-    except Exception:
-        pass
+        next_month = (now.replace(day=1) + timedelta(days=32)).replace(day=1)
+        try:
+            r_next = await session.execute(text(
+                "SELECT count(*) FROM pg_class WHERE relname = :name"
+            ), {"name": f"{parent}_{next_month.strftime('%Y_%m')}"})
+            has_next = (r_next.scalar_one_or_none() or 0) > 0
+            if not has_next and now.day >= 25:
+                partition_note += ("; " if partition_note else "") + f"下月({next_month.month}月)分区未创建"
+        except Exception:
+            pass
 
-    infra_checks.append({
-        "name": "partitions", "label": "分钟分区", "group": "infra",
-        "actual_date": partition_note or "正常", "expected_date": "",
-        "status": "ok" if partition_ok else "stale", "severity": "important",
-        "note": partition_note, "diagnosis": None, "gap_days": 0,
-    })
+        infra_checks.append({
+            "name": f"{parent}_partitions", "label": label, "group": "infra",
+            "actual_date": partition_note or "正常", "expected_date": "",
+            "status": "ok" if partition_ok else "stale", "severity": "important",
+            "note": partition_note, "diagnosis": None, "gap_days": 0,
+        })
+
+    await _check_partitions("stock_min_kline", "股票分钟分区")
+    await _check_partitions("cb_min_kline",    "可转债分钟分区")
+
+    # Minute-data freshness — both stock and CB minute tables, latest trading-day coverage.
+    async def _check_minute_freshness(table: str, label: str, expected_pct: float) -> None:
+        actual_date = ""
+        cov_pct = 0.0
+        note = ""
+        status = "ok"
+        try:
+            r_max = await session.execute(text(
+                f"SELECT to_char(max(trade_time), 'YYYYMMDD') FROM {table}"
+            ))
+            actual_date = r_max.scalar_one_or_none() or ""
+
+            if is_trade_day and phase in ("evening", "post_sync"):
+                expected_date = today
+            elif is_trade_day:
+                expected_date = prev_td if prev_td else latest_td
+            else:
+                expected_date = latest_td
+
+            if not actual_date:
+                status = "missing"
+                note = "无数据"
+            elif actual_date < expected_date:
+                status = "stale"
+                note = f"最新{actual_date}, 预期{expected_date}"
+            else:
+                # 顺手报一下当天覆盖率
+                r_cnt = await session.execute(text(
+                    f"SELECT COUNT(DISTINCT ts_code) FROM {table} "
+                    f"WHERE trade_time::date = to_date(:d, 'YYYYMMDD')"
+                ), {"d": actual_date})
+                got = r_cnt.scalar_one_or_none() or 0
+                note = f"{actual_date}已写入 {got} 只"
+                cov_pct = got
+        except Exception as e:
+            status = "missing"
+            note = f"查询失败: {type(e).__name__}"
+
+        infra_checks.append({
+            "name": f"{table}_freshness", "label": label, "group": "infra",
+            "actual_date": actual_date, "expected_date": "最新交易日",
+            "status": status, "severity": "important",
+            "note": note, "diagnosis": None, "gap_days": 0,
+        })
+
+    await _check_minute_freshness("stock_min_kline", "股票分钟覆盖", 0.95)
+    await _check_minute_freshness("cb_min_kline",    "可转债分钟覆盖", 0.90)
 
     # Redis
     redis_ok = False

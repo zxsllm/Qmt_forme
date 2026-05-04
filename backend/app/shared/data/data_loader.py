@@ -31,6 +31,21 @@ def is_index_code(ts_code: str) -> bool:
     return False
 
 
+# 可转债代码段:
+#   沪市 11xxxx.SH / 1180xx.SH(K 型) / 1457xx.SH(私募 K)
+#   深市 12xxxx.SZ
+def is_cb_code(ts_code: str) -> bool:
+    """Heuristic: detect if a ts_code is a convertible bond."""
+    if "." not in ts_code:
+        return False
+    code, suffix = ts_code.split(".")
+    if suffix == "SH":
+        return code.startswith(("11", "118", "1457", "1459"))
+    if suffix == "SZ":
+        return code.startswith("12")
+    return False
+
+
 class DataLoader:
     """Async data access facade backed by PostgreSQL."""
 
@@ -154,9 +169,11 @@ class DataLoader:
     async def universal_daily(
         self, ts_code: str, start_date: str = "", end_date: str = "",
     ) -> pd.DataFrame:
-        """Auto-detect stock vs index, return OHLCV daily data from correct table."""
+        """Auto-detect stock vs index vs CB, return OHLCV daily data from correct table."""
         if is_index_code(ts_code):
             return await self.index_daily(ts_code, start_date, end_date)
+        if is_cb_code(ts_code):
+            return await self.cb_daily(ts_code, start_date, end_date)
         return await self.daily_with_basic(ts_code, start_date, end_date)
 
     async def universal_weekly(
@@ -164,6 +181,9 @@ class DataLoader:
     ) -> pd.DataFrame:
         if is_index_code(ts_code):
             return await self.index_weekly(ts_code, start_date, end_date)
+        if is_cb_code(ts_code):
+            # CB 周线表不存在，退化为日线（前端 K 线组件按时间轴正确渲染）
+            return await self.cb_daily(ts_code, start_date, end_date)
         return await self.weekly(ts_code, start_date, end_date)
 
     async def universal_monthly(
@@ -171,7 +191,56 @@ class DataLoader:
     ) -> pd.DataFrame:
         if is_index_code(ts_code):
             return await self.index_monthly(ts_code, start_date, end_date)
+        if is_cb_code(ts_code):
+            return await self.cb_daily(ts_code, start_date, end_date)
         return await self.monthly(ts_code, start_date, end_date)
+
+    # ── Convertible bond ────────────────────────────────────────────
+
+    async def cb_daily(
+        self,
+        ts_code: str,
+        start_date: str = "",
+        end_date: str = "",
+    ) -> pd.DataFrame:
+        sql = (
+            "SELECT ts_code, trade_date, pre_close, open, high, low, close, "
+            "       change, pct_chg, vol, amount, "
+            "       bond_value, bond_over_rate, cb_value, cb_over_rate "
+            "FROM cb_daily WHERE ts_code = :c"
+        )
+        params: dict = {"c": ts_code}
+        if start_date:
+            sql += " AND trade_date >= :s"
+            params["s"] = start_date
+        if end_date:
+            sql += " AND trade_date <= :e"
+            params["e"] = end_date
+        sql += " ORDER BY trade_date"
+        return await self._query(sql, params)
+
+    async def search_cb(self, q: str, limit: int = 20) -> pd.DataFrame:
+        """Search active convertible bonds by ts_code prefix, bond name, or underlying-stock name/code."""
+        prefix = f"{q}%"
+        contains = f"%{q}%"
+        return await self._query(
+            "SELECT ts_code, bond_short_name, stk_code, stk_short_name, list_date, delist_date "
+            "FROM cb_basic "
+            "WHERE list_date IS NOT NULL AND list_date <> '' "
+            "  AND (delist_date IS NULL OR delist_date = '' OR delist_date > to_char(now(), 'YYYYMMDD')) "
+            "  AND ( "
+            "    ts_code         ILIKE :prefix "
+            "    OR bond_short_name ILIKE :contains "
+            "    OR stk_code        ILIKE :prefix "
+            "    OR stk_short_name  ILIKE :contains "
+            "  ) "
+            "ORDER BY "
+            "  CASE WHEN ts_code ILIKE :prefix OR bond_short_name ILIKE :prefix "
+            "            OR stk_code ILIKE :prefix OR stk_short_name ILIKE :prefix THEN 0 ELSE 1 END, "
+            "  ts_code "
+            "LIMIT :lim",
+            {"prefix": prefix, "contains": contains, "lim": limit},
+        )
 
     # ── Minute bars ─────────────────────────────────────────────────
 
@@ -183,7 +252,8 @@ class DataLoader:
         freq: str = "1min",
     ) -> pd.DataFrame:
         from datetime import datetime as _dt
-        sql = "SELECT * FROM stock_min_kline WHERE ts_code = :c AND freq = :f"
+        table = "cb_min_kline" if is_cb_code(ts_code) else "stock_min_kline"
+        sql = f"SELECT * FROM {table} WHERE ts_code = :c AND freq = :f"
         params: dict = {"c": ts_code, "f": freq}
         if start_time:
             sql += " AND trade_time >= :s"

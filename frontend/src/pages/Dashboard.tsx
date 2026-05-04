@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import { AutoComplete, Space, Radio, Statistic, Table, Tag } from 'antd';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../services/api';
@@ -110,13 +110,27 @@ function DetailStrip({ tsCode, isIdx }: { tsCode: string; isIdx: boolean }) {
   );
 }
 
+// 防抖 hook：value 变化后稳定 ms 才返回新值，过程中变化就重新计时
+function useDebouncedValue<T>(value: T, ms: number): T {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const id = setTimeout(() => setV(value), ms);
+    return () => clearTimeout(id);
+  }, [value, ms]);
+  return v;
+}
+
+const TYPE_META: Record<string, { tag: string; color: string; bg: string }> = {
+  stock: { tag: '股', color: '#6bc7ff', bg: 'rgba(107,199,255,0.10)' },
+  index: { tag: '指', color: '#ffbf75', bg: 'rgba(255,191,117,0.10)' },
+  cb:    { tag: '债', color: '#b48cff', bg: 'rgba(180,140,255,0.10)' },
+};
+
 export default function Dashboard() {
   const [code, setCode] = useState(DEFAULT_CODE);
   const [inputVal, setInputVal] = useState(DEFAULT_CODE);
   const [period, setPeriod] = useState<KlinePeriod>('daily');
   const [quickSide, setQuickSide] = useState<'BUY' | 'SELL' | null>(null);
-  const [searchOptions, setSearchOptions] = useState<{ value: string; label: React.ReactNode }[]>([]);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const { connected } = useMarketFeed();
   const isIdx = isIndexCode(code);
@@ -134,44 +148,72 @@ export default function Dashboard() {
   });
   const valRow = (valuation?.data?.length ?? 0) > 0 ? valuation!.data[valuation!.data.length - 1] : null;
 
-  const onSearchInput = useCallback((text: string) => {
-    setInputVal(text);
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (!text || text.length < 1) { setSearchOptions([]); return; }
+  // 搜索改用 react-query：自动缓存、自动取消过期请求、loading/error 状态可直接用
+  const debouncedQ = useDebouncedValue(inputVal.trim(), 180);
+  const searchEnabled = !!debouncedQ && debouncedQ !== code;
 
-    debounceRef.current = setTimeout(async () => {
-      try {
-        const res = await api.searchStocks(text, true);
-        setSearchOptions(
-          res.data.map((s) => {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const isIndex = (s as any).type === 'index' || s.list_status === 'INDEX';
-            return {
-              value: s.ts_code,
-              label: (
-                <span>
-                  <b style={{ color: isIndex ? '#faad14' : '#6bc7ff' }}>{s.ts_code}</b>
-                  <span style={{ marginLeft: 8, color: '#93a9bc', fontSize: 12 }}>
-                    {s.name}
-                  </span>
-                  {isIndex && (
-                    <span style={{ marginLeft: 6, color: '#faad14', fontSize: 11 }}>[指数]</span>
-                  )}
-                </span>
-              ),
-            };
-          }),
-        );
-      } catch {
-        setSearchOptions([]);
-      }
-    }, 200);
-  }, []);
+  const { data: searchData, isFetching: searchLoading } = useQuery({
+    queryKey: ['stock-search', debouncedQ],
+    queryFn: () => api.searchStocks(debouncedQ, true),
+    enabled: searchEnabled,
+    staleTime: 60_000,
+    gcTime: 300_000,
+    placeholderData: (prev) => prev,
+  });
 
+  // 关键：AutoComplete 选中后会把 option.label 回填到 input。
+  // 因此 label 必须是纯 ts_code（字符串），下拉富展示用 itemLabel(JSX) 走 optionRender。
+  type SearchItem = {
+    value: string;          // ts_code
+    label: string;          // input 显示（=ts_code）
+    itemLabel: React.ReactNode;  // 下拉显示
+  };
+  const searchOptions: SearchItem[] = useMemo(() => {
+    if (!searchEnabled || !searchData?.data) return [];
+    return searchData.data.map((s) => {
+      const t = (s as { type?: string }).type
+        ?? (s.list_status === 'INDEX' ? 'index'
+        : s.list_status === 'CB' ? 'cb' : 'stock');
+      const meta = TYPE_META[t] ?? TYPE_META.stock;
+      return {
+        value: s.ts_code,
+        label: s.ts_code,
+        itemLabel: (
+          <span style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            overflow: 'hidden',
+          }}>
+            <span style={{
+              fontSize: 10, fontWeight: 700, color: meta.color, background: meta.bg,
+              padding: '1px 6px', borderRadius: 999, flexShrink: 0,
+            }}>{meta.tag}</span>
+            <b style={{ color: meta.color, fontSize: 12, flexShrink: 0 }}>{s.ts_code}</b>
+            <span style={{
+              color: '#e6f1fa', fontSize: 12,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>{s.name}</span>
+            {s.industry && (
+              <span style={{
+                color: '#6b7f8e', fontSize: 11, marginLeft: 'auto',
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                maxWidth: 140, flexShrink: 0,
+              }}>
+                {s.industry}
+              </span>
+            )}
+          </span>
+        ),
+      };
+    });
+  }, [searchData, searchEnabled]);
+
+  // 反查 code 对应名称：缓存 5 分钟，跟搜索缓存共享 staleTime 行为
   const { data: stockInfo } = useQuery({
     queryKey: ['stock-search-info', code],
     queryFn: () => api.searchStocks(code, true),
     enabled: !!code,
+    staleTime: 300_000,
+    gcTime: 600_000,
   });
 
   const stockName = stockInfo?.data?.find(s => s.ts_code === code)?.name
@@ -261,11 +303,16 @@ export default function Dashboard() {
       <AutoComplete
         value={inputVal}
         options={searchOptions}
-        onSearch={onSearchInput}
+        // 下拉用富 JSX，输入框只显 ts_code
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        optionRender={(opt: any) => (opt.data?.itemLabel ?? opt.label)}
+        onChange={(v: string) => setInputVal(v)}
         onSelect={(v: string) => { setCode(v); setInputVal(v); }}
-        placeholder="代码/名称/拼音"
+        placeholder="代码/名称/拼音 (股/指/债)"
         style={{ width: 180 }}
         size="small"
+        notFoundContent={searchLoading ? '搜索中...' : (debouncedQ ? '无匹配' : null)}
+        popupMatchSelectWidth={360}
       />
       <span style={{ fontWeight: 600, color: '#e6f1fa' }}>{stockName}</span>
       {latestClose != null && (

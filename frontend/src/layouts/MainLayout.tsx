@@ -210,7 +210,7 @@ export default function MainLayout() {
   const navigate = useNavigate();
   const location = useLocation();
 
-  const { data: healthReport } = useQuery({
+  const { data: healthReport, isLoading: healthLoading, isError: healthIsError, error: healthError, refetch: healthRefetch } = useQuery({
     queryKey: ['data-health'],
     queryFn: () => api.dataHealth(),
     refetchInterval: (query) => {
@@ -219,6 +219,7 @@ export default function MainLayout() {
       return 60_000;
     },
     staleTime: 8_000,
+    retry: 2,
   });
 
   const overall = healthReport?.overall ?? 'healthy';
@@ -307,7 +308,49 @@ export default function MainLayout() {
         onClose={() => setHealthOpen(false)}
         styles={{ body: { padding: '12px 16px' } }}
       >
-        {healthReport && <HealthDrawerContent report={healthReport} />}
+        {healthReport ? (
+          <HealthDrawerContent report={healthReport} />
+        ) : healthIsError ? (
+          <div style={{ padding: '32px 8px', textAlign: 'center' }}>
+            <CloseCircleOutlined style={{ fontSize: 28, color: '#ef4444' }} />
+            <div style={{ color: '#e6f1fa', fontSize: 13, marginTop: 12, fontWeight: 600 }}>
+              健康接口请求失败
+            </div>
+            <div style={{ color: '#93a9bc', fontSize: 11, marginTop: 6, wordBreak: 'break-all' }}>
+              {(healthError as Error)?.message ?? '未知错误'}
+            </div>
+            <div
+              onClick={() => healthRefetch()}
+              style={{
+                display: 'inline-block', marginTop: 14, padding: '6px 14px',
+                borderRadius: 14, cursor: 'pointer', fontSize: 12,
+                background: 'linear-gradient(135deg, #2481bd, #3b61d6)', color: '#fff',
+              }}
+            >
+              <SyncOutlined /> 重试
+            </div>
+          </div>
+        ) : healthLoading ? (
+          <div style={{ padding: '32px 8px', textAlign: 'center', color: '#93a9bc', fontSize: 12 }}>
+            <SyncOutlined spin style={{ fontSize: 22, color: '#6bc7ff' }} />
+            <div style={{ marginTop: 10 }}>正在拉取数据健康状态...</div>
+          </div>
+        ) : (
+          <div style={{ padding: '32px 8px', textAlign: 'center', color: '#93a9bc', fontSize: 12 }}>
+            <WarningOutlined style={{ fontSize: 22, color: '#f59e0b' }} />
+            <div style={{ marginTop: 10 }}>暂无健康数据</div>
+            <div
+              onClick={() => healthRefetch()}
+              style={{
+                display: 'inline-block', marginTop: 12, padding: '6px 14px',
+                borderRadius: 14, cursor: 'pointer', fontSize: 12,
+                background: 'linear-gradient(135deg, #2f4354, #22303b)', color: '#e6f1fa',
+              }}
+            >
+              <SyncOutlined /> 立即检查
+            </div>
+          </div>
+        )}
       </Drawer>
     </div>
   );

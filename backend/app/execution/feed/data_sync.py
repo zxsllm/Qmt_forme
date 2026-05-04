@@ -1328,17 +1328,22 @@ def run_post_market_sync(trade_date: str) -> dict[str, bool]:
     return results
 
 
-def run_minutes_subprocess() -> None:
-    """Launch sync_minutes_incremental.py as isolated subprocess."""
-    script = SCRIPTS_DIR / "sync_minutes_incremental.py"
+def _run_minute_subprocess(label: str, script_name: str, log_prefix: str) -> None:
+    """Generic launcher for a minute-data sync subprocess.
+
+    Sync status is not tracked via sync_tracker (subprocess exits asynchronously);
+    health check infers freshness from MAX(trade_time) on the target table.
+    """
+    from datetime import date
+
+    script = SCRIPTS_DIR / script_name
     if not script.exists():
-        logger.error("sync_minutes script not found: %s", script)
+        logger.error("%s script not found: %s", label, script)
         return
     try:
         log_dir = SCRIPTS_DIR.parent / "logs"
         log_dir.mkdir(exist_ok=True)
-        from datetime import date
-        log_file = log_dir / f"sync_minutes_{date.today().strftime('%Y%m%d')}.log"
+        log_file = log_dir / f"{log_prefix}_{date.today().strftime('%Y%m%d')}.log"
         fh = open(log_file, "a", encoding="utf-8")
         proc = subprocess.Popen(
             [sys.executable, str(script)],
@@ -1346,6 +1351,21 @@ def run_minutes_subprocess() -> None:
             stdout=fh,
             stderr=subprocess.STDOUT,
         )
-        logger.info("sync_minutes subprocess started (PID=%d), log=%s", proc.pid, log_file)
+        logger.info("%s subprocess started (PID=%d), log=%s", label, proc.pid, log_file)
     except Exception:
-        logger.exception("failed to start sync_minutes subprocess")
+        logger.exception("failed to start %s subprocess", label)
+
+
+def run_minutes_subprocess() -> None:
+    """Launch sync_minutes_incremental.py as isolated subprocess (stocks)."""
+    _run_minute_subprocess("minutes", "sync_minutes_incremental.py", "sync_minutes")
+
+
+def run_cb_minutes_subprocess() -> None:
+    """Launch sync_cb_minutes_incremental.py as isolated subprocess (convertible bonds).
+
+    CB universe is ~370 bonds (vs ~5300 stocks), so this finishes in 5-10 min.
+    Run in parallel with run_minutes_subprocess: separate Tushare endpoints,
+    no rate-limit collision because TushareService throttles per-process.
+    """
+    _run_minute_subprocess("cb_minutes", "sync_cb_minutes_incremental.py", "sync_cb_minutes")

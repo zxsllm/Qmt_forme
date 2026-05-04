@@ -853,7 +853,9 @@ class MarketDataScheduler:
 
     def _run_daily_sync(self) -> None:
         """Post-market: run all data syncs in-process + minutes as subprocess."""
-        from app.execution.feed.data_sync import run_post_market_sync, run_minutes_subprocess
+        from app.execution.feed.data_sync import (
+            run_post_market_sync, run_minutes_subprocess, run_cb_minutes_subprocess,
+        )
 
         trade_date = datetime.now().strftime("%Y%m%d")
         logger.info("post-market sync: starting in-process for %s", trade_date)
@@ -861,7 +863,11 @@ class MarketDataScheduler:
         async def _sync():
             try:
                 await asyncio.to_thread(run_post_market_sync, trade_date)
+                # Both launchers are fire-and-forget Popen, so the two subprocesses
+                # run concurrently. They use independent Tushare clients (separate
+                # processes) so per-process RPM throttling does not collide.
                 await asyncio.to_thread(run_minutes_subprocess)
+                await asyncio.to_thread(run_cb_minutes_subprocess)
                 self._synced_today = True
                 logger.info("post-market sync completed for %s", trade_date)
             except Exception:

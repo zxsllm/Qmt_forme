@@ -136,30 +136,59 @@ async def data_health():
 async def search_stocks(
     q: str = Query("", min_length=1, description="code, name or pinyin"),
     include_index: bool = Query(False, description="also search indices"),
+    include_cb: bool = Query(True, description="also search convertible bonds"),
 ):
-    """Search stocks (and optionally indices) by ts_code, name prefix, or pinyin."""
-    if q.isascii() and q.replace(" ", "").isalpha():
-        from app.shared.data.pinyin_cache import search_by_pinyin
-        results = await search_by_pinyin(q.upper(), limit=20)
-        if results:
-            if include_index:
-                loader = DataLoader()
-                idx_df = await loader.search_index(q, limit=10)
-                idx_data = [{"ts_code": r["ts_code"], "name": r["name"],
-                             "industry": r.get("category", ""), "list_status": "INDEX",
-                             "type": "index"} for r in _df_to_records(idx_df)]
-                return {"count": len(results) + len(idx_data),
-                        "data": results + idx_data}
-            return {"count": len(results), "data": results}
+    """Search across stocks / indices / convertible bonds by ts_code, name, or pinyin.
+
+    Each result row carries a `type` field: 'stock' | 'index' | 'cb'.
+    """
     loader = DataLoader()
-    df = await loader.search_stocks(q, limit=20)
-    data = _df_to_records(df)
-    if include_index:
+
+    async def _idx_records() -> list[dict]:
+        if not include_index:
+            return []
         idx_df = await loader.search_index(q, limit=10)
-        idx_data = [{"ts_code": r["ts_code"], "name": r["name"],
-                     "industry": r.get("category", ""), "list_status": "INDEX",
-                     "type": "index"} for r in _df_to_records(idx_df)]
-        data = data + idx_data
+        return [{"ts_code": r["ts_code"], "name": r["name"],
+                 "industry": r.get("category", ""), "list_status": "INDEX",
+                 "type": "index"} for r in _df_to_records(idx_df)]
+
+    async def _cb_records() -> list[dict]:
+        if not include_cb:
+            return []
+        cb_df = await loader.search_cb(q, limit=15)
+        out = []
+        for r in _df_to_records(cb_df):
+            display = r.get("bond_short_name") or r.get("stk_short_name") or r["ts_code"]
+            out.append({
+                "ts_code": r["ts_code"],
+                "name": display,
+                # "行业"列借给"对应正股名+代码"展示
+                "industry": f"{r.get('stk_short_name', '')} {r.get('stk_code', '')}".strip(),
+                "list_status": "CB",
+                "type": "cb",
+            })
+        return out
+
+    # 中文 / 数字代码：直接打 SQL（pg ILIKE 索引 + LIMIT，毫秒级）
+    is_pinyin = q.isascii() and q.replace(" ", "").isalpha()
+    if not is_pinyin:
+        df = await loader.search_stocks(q, limit=20)
+        stock_data = [{**r, "type": "stock"} for r in _df_to_records(df)]
+        idx_data = await _idx_records()
+        cb_data = await _cb_records()
+        data = stock_data + cb_data + idx_data
+        return {"count": len(data), "data": data}
+
+    # 全字母：拼音缓存（已包含 stock + CB）
+    from app.shared.data.pinyin_cache import search_by_pinyin
+    results = await search_by_pinyin(q.upper(), limit=20)
+    idx_data = await _idx_records()
+    # 拼音命中为空时回退到 SQL（避免新上的标的还没进缓存）
+    if not results:
+        df = await loader.search_stocks(q, limit=20)
+        results = [{**r, "type": "stock"} for r in _df_to_records(df)]
+        results += await _cb_records()
+    data = results + idx_data
     return {"count": len(data), "data": data}
 
 
