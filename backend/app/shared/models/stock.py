@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import DateTime, Float, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import Boolean, DateTime, Float, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -1195,4 +1195,45 @@ class MonitorLargecapAlert(Base):
     __table_args__ = (
         UniqueConstraint("event_date", "event_ts", "ts_code",
                          name="uq_monitor_largecap"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 (前期): 题材主线人工标签 — 板块必读 / 韭研公社复盘
+# ---------------------------------------------------------------------------
+
+class DailySectorReview(Base):
+    """每日题材主线复盘人工标签（来源：板块必读 / 韭研公社）。
+
+    每行表示某一交易日、某一来源、某板块下的一只股票（或仅板块行：ts_code 为空）。
+    冲突时优先级：source='bankuai' > source='jiuyan'。
+    用作算法 B (concept_tagger) 的训练/校准标签。
+    """
+    __tablename__ = "daily_sector_review"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[str] = mapped_column(String(8), nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)  # 'bankuai' | 'jiuyan'
+    sector_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    sector_rank: Mapped[int | None] = mapped_column(Integer)  # 主线在当日的排序，1=最强
+    sector_size: Mapped[int | None] = mapped_column(Integer)  # 该板块当日涨停数
+    ts_code: Mapped[str | None] = mapped_column(String(16))
+    stock_name: Mapped[str | None] = mapped_column(String(32))
+    board_count: Mapped[int | None] = mapped_column(Integer)  # 当前连板高度
+    days_to_board: Mapped[int | None] = mapped_column(Integer)  # 几天N板的"几天"
+    limit_time: Mapped[str | None] = mapped_column(String(16))  # "13:34:42"
+    float_mv: Mapped[float | None] = mapped_column(Float)  # 流通市值（亿）
+    amount: Mapped[float | None] = mapped_column(Float)  # 成交额（亿）
+    keywords: Mapped[str | None] = mapped_column(Text)  # 涨停关键词原文
+    is_main_line: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    market_cap_tier: Mapped[str | None] = mapped_column(String(8))  # 'small' | 'large'（板块必读用）
+    raw_meta: Mapped[dict | None] = mapped_column(JSONB)  # OCR 原始字段、人工备注
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+    __table_args__ = (
+        Index("ix_dsr_date_source", "trade_date", "source"),
+        Index("ix_dsr_date_sector", "trade_date", "sector_name"),
+        Index("ix_dsr_date_tscode", "trade_date", "ts_code"),
     )

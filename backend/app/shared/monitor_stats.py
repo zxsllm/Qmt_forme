@@ -204,7 +204,8 @@ async def get_monitor_largecap(
                    entry_price, entry_time
             FROM monitor_largecap_alerts
             WHERE event_date = :d
-            ORDER BY event_ts DESC
+            ORDER BY (COALESCE(price_chg_pct,0) * COALESCE(vol_ratio,0)) DESC NULLS LAST,
+                     event_ts DESC
             LIMIT :lim
         """), {"d": date, "lim": limit})
 

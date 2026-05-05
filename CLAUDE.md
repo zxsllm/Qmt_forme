@@ -12,6 +12,7 @@ Phase 5.0 已完成 (自动化复盘与早盘计划) → 下一步: Phase 6 (QMT
 - **改后必验**: 未验证不得标记完成
 - **不重构无关模块**: 只改当前任务涉及的代码
 - **端口**: 后端 8000，前端 5173，启动前检查占用
+- **脚本归位**: 一次性 / 探针 / 临时文件不得堆 `scripts/` 或 `backend/scripts/` 根目录（详见 `.claude/rules/scripts-organization.md`）
 
 ## 隔离规则 (硬约束)
 
@@ -54,3 +55,6 @@ Tushare Pro (满权限) | venv `.venv/` | Windows 环境
 - Tushare API 参考: `.cursor/skills/skill-tushare-data/references/`
 - 数据管线注册表: `.cursor/rules/data-pipeline.mdc`
 - 前端 UI 规范: `frontend/CLAUDE.md`
+- 题材主线人工标签流程: `docs/sector_review_workflow.md` (用户贴板块必读/韭研截图时按此处理)
+- 题材主线判定链路: `docs/sector_main_line_pipeline.md` (LLM v2 主线判定，与 morning_plan/review 平级)
+- 脚本组织约定: `.claude/rules/scripts-organization.md` (新建脚本前必读)

@@ -60,12 +60,22 @@ function RiskAlertPanel() {
             </div>
             <div style={{ color: '#7a8ea0', fontSize: 12, marginTop: 2, wordBreak: 'break-all' }}>
               {item.detail}
-              {item.ann_url && (
-                <a href={item.ann_url} target="_blank" rel="noreferrer"
-                  style={{ color: '#6bc7ff', marginLeft: 6, fontSize: 11 }}>
-                  查看公告
-                </a>
-              )}
+              {item.ann_url && (() => {
+                const lt = item.link_type;
+                const label = lt === 'forecast' ? '查看预告'
+                  : lt === 'report' ? '年报披露'
+                  : lt === 'fallback' ? '公告主页'
+                  : '查看公告';
+                const color = lt === 'report' ? '#ffbf75'
+                  : lt === 'fallback' ? '#93a9bc'
+                  : '#6bc7ff';
+                return (
+                  <a href={item.ann_url} target="_blank" rel="noreferrer"
+                    style={{ color, marginLeft: 6, fontSize: 11 }}>
+                    {label}
+                  </a>
+                );
+              })()}
             </div>
           </div>
         </div>

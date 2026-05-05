@@ -614,6 +614,11 @@ function EventTimeline() {
               <Tag style={{ margin: 0, fontSize: 10, color: lc, border: `1px solid ${lc}33`, background: `${lc}15` }}>
                 {PATTERN_LABEL[ev.pattern] ?? ev.pattern}
               </Tag>
+              <Tooltip title="信号强度等级：触发时刻按 |涨跌幅| × 窗口权重 + 多指数共振 综合判定。后效分析里的「高等级信号是否更强」就是按它分组。">
+                <Tag style={{ margin: 0, fontSize: 10, color: lc, border: `1px solid ${lc}33`, background: `${lc}15`, cursor: 'help' }}>
+                  {LEVEL_LABEL[ev.level] ?? ev.level}
+                </Tag>
+              </Tooltip>
               <Tooltip title="综合评分：基于幅度、板块共振、观察池/持仓命中数加权计算">
                 <span style={{ color: lc, fontWeight: 700, fontSize: 11, flexShrink: 0 }}>
                   评分 {ev.event_score}
@@ -709,7 +714,7 @@ function LargecapTimeline() {
   const [sortMode, setSortMode] = useState<'time' | 'score'>('time');
   const { data, isLoading } = useQuery({
     queryKey: ['monitor-largecap'],
-    queryFn: () => api.monitorLargecap({ limit: 50 }),
+    queryFn: () => api.monitorLargecap({ limit: 200 }),
     staleTime: 60_000,
   });
 

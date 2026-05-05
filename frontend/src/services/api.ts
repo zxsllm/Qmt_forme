@@ -1352,6 +1352,7 @@ export interface RiskAlert {
   is_call?: string;
   call_date?: string;
   ann_url?: string;
+  link_type?: 'forecast' | 'report' | 'fallback';
 }
 
 export interface RiskAlertsResponse {

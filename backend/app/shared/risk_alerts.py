@@ -366,16 +366,55 @@ async def _forecast_alerts(session: AsyncSession) -> list[dict]:
     cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
 
     r = await session.execute(text("""
+        WITH forecast_url AS (
+            SELECT f.ts_code, f.ann_date, f.end_date,
+                   (SELECT sa.url FROM stock_anns sa
+                    WHERE sa.ts_code = f.ts_code
+                      AND ABS(sa.ann_date::bigint - f.ann_date::bigint) <= 3
+                      AND (sa.title LIKE '%%业绩预告%%' OR sa.title LIKE '%%业绩快报%%'
+                           OR sa.title LIKE '%%预增%%' OR sa.title LIKE '%%预减%%'
+                           OR sa.title LIKE '%%扭亏%%' OR sa.title LIKE '%%首亏%%'
+                           OR sa.title LIKE '%%续亏%%' OR sa.title LIKE '%%续盈%%'
+                           OR sa.title LIKE '%%略增%%' OR sa.title LIKE '%%略减%%')
+                    ORDER BY ABS(sa.ann_date::bigint - f.ann_date::bigint) ASC,
+                             sa.ann_date DESC
+                    LIMIT 1) AS forecast_url,
+                   (SELECT sa.url FROM stock_anns sa
+                    WHERE sa.ts_code = f.ts_code
+                      AND ABS(sa.ann_date::bigint - f.ann_date::bigint) <= 1
+                      AND (sa.title LIKE '%%年度报告%%' OR sa.title LIKE '%%季度报告%%'
+                           OR sa.title LIKE '%%半年度报告%%' OR sa.title LIKE '%%一季报%%'
+                           OR sa.title LIKE '%%三季报%%' OR sa.title LIKE '%%中报%%'
+                           OR sa.title LIKE '%%年报%%')
+                      AND sa.title NOT LIKE '%%摘要%%'
+                      AND sa.title NOT LIKE '%%审计%%'
+                      AND sa.title NOT LIKE '%%审核%%'
+                      AND sa.title NOT LIKE '%%专项说明%%'
+                    ORDER BY ABS(sa.ann_date::bigint - f.ann_date::bigint) ASC,
+                             sa.ann_date DESC
+                    LIMIT 1) AS report_url
+            FROM forecast f
+            WHERE f.ann_date >= :cutoff
+        )
         SELECT f.ts_code, b.name, f.type, f.ann_date, f.end_date,
                f.p_change_min, f.p_change_max, f.net_profit_min, f.net_profit_max,
                f.source,
-               (SELECT sa.url FROM stock_anns sa
-                WHERE sa.ts_code = f.ts_code AND sa.ann_date = f.ann_date
-                  AND (sa.title LIKE '%%业绩预告%%' OR sa.title LIKE '%%业绩快报%%')
-                LIMIT 1
-               ) AS ann_url
+               COALESCE(
+                   fu.forecast_url,
+                   fu.report_url,
+                   'http://www.cninfo.com.cn/new/disclosure/stock?stockCode='
+                       || split_part(f.ts_code, '.', 1) || '&orgId='
+               ) AS ann_url,
+               CASE
+                   WHEN fu.forecast_url IS NOT NULL THEN 'forecast'
+                   WHEN fu.report_url IS NOT NULL THEN 'report'
+                   ELSE 'fallback'
+               END AS link_type
         FROM forecast f
         JOIN stock_basic b ON f.ts_code = b.ts_code
+        JOIN forecast_url fu ON fu.ts_code = f.ts_code
+                            AND fu.ann_date = f.ann_date
+                            AND fu.end_date = f.end_date
         WHERE f.ann_date >= :cutoff
           AND NOT (f.source = 'anns_parsed'
                    AND EXISTS (SELECT 1 FROM forecast f2
@@ -383,7 +422,7 @@ async def _forecast_alerts(session: AsyncSession) -> list[dict]:
                                  AND f2.source = 'tushare'
                                  AND f2.ann_date >= :cutoff))
         ORDER BY f.ann_date DESC
-        LIMIT 100
+        LIMIT 300
     """), {"cutoff": cutoff})
 
     level_map = {
@@ -395,7 +434,7 @@ async def _forecast_alerts(session: AsyncSession) -> list[dict]:
         ts_code, name, ftype, ann_date, end_date = row[0], row[1], row[2], row[3], row[4]
         p_min, p_max = row[5], row[6]
         np_min, np_max = row[7], row[8]
-        source, ann_url = row[9], row[10]
+        source, ann_url, link_type = row[9], row[10], row[11]
 
         pct_range = ""
         if p_min is not None and p_max is not None:
@@ -423,6 +462,7 @@ async def _forecast_alerts(session: AsyncSession) -> list[dict]:
             "detail": ", ".join(detail_parts),
             "time": f"{ann_date[:4]}-{ann_date[4:6]}-{ann_date[6:]}" if ann_date and len(ann_date) == 8 else ann_date,
             "ann_url": ann_url,
+            "link_type": link_type,
         })
 
     return alerts

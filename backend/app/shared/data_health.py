@@ -472,7 +472,8 @@ async def run_health_check(session: AsyncSession, auto_repair: bool = True) -> d
         status = "ok"
         try:
             r_max = await session.execute(text(
-                f"SELECT to_char(max(trade_time), 'YYYYMMDD') FROM {table}"
+                f"SELECT to_char(max(trade_time), 'YYYYMMDD') FROM {table} "
+                f"WHERE trade_time >= now() - interval '35 days'"
             ))
             actual_date = r_max.scalar_one_or_none() or ""
 
@@ -490,10 +491,10 @@ async def run_health_check(session: AsyncSession, auto_repair: bool = True) -> d
                 status = "stale"
                 note = f"最新{actual_date}, 预期{expected_date}"
             else:
-                # 顺手报一下当天覆盖率
                 r_cnt = await session.execute(text(
                     f"SELECT COUNT(DISTINCT ts_code) FROM {table} "
-                    f"WHERE trade_time::date = to_date(:d, 'YYYYMMDD')"
+                    f"WHERE trade_time >= to_timestamp(:d, 'YYYYMMDD') "
+                    f"  AND trade_time <  to_timestamp(:d, 'YYYYMMDD') + interval '1 day'"
                 ), {"d": actual_date})
                 got = r_cnt.scalar_one_or_none() or 0
                 note = f"{actual_date}已写入 {got} 只"
@@ -566,7 +567,7 @@ async def run_health_check(session: AsyncSession, auto_repair: bool = True) -> d
         overall = "critical"
     elif important_bad >= 3:
         overall = "degraded"
-    elif important_bad >= 1 or not partition_ok:
+    elif important_bad >= 1:
         overall = "warning"
     else:
         overall = "healthy"
