@@ -58,3 +58,4 @@ Tushare Pro (满权限) | venv `.venv/` | Windows 环境
 - 题材主线人工标签流程: `docs/sector_review_workflow.md` (用户贴板块必读/韭研截图时按此处理)
 - 题材主线判定链路: `docs/sector_main_line_pipeline.md` (LLM v2 主线判定，与 morning_plan/review 平级)
 - 脚本组织约定: `.claude/rules/scripts-organization.md` (新建脚本前必读)
+- 时间与时区: `.claude/rules/time-and-timezone.md` (硬约束：本地 CST，禁 UTC 换算)
