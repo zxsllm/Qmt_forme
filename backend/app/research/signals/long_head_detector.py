@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -183,6 +183,48 @@ def _hhmmss_to_dt(td: str, hhmmss: str) -> datetime | None:
         return datetime.strptime(td + s, "%Y%m%d%H%M%S")
     except ValueError:
         return None
+
+
+async def count_sector_limit_state(
+    session: AsyncSession,
+    trade_date: str,
+    sector_codes: list[str],
+    at_hhmmss: str,
+) -> tuple[int, int]:
+    """截至 at_hhmmss 那一刻，板块内（已封板的票数, 已炸板的票数）。
+
+    用于 L_CB 升级隔夜判定：
+        - limit_count >= 3（板块涨停数共识）
+        - broken_count <= 1（板块没大面积炸板）
+        → 持有 L_CB 到 T+1 09:30；否则 T+0 立即卖
+
+    判定口径（事中可见简化）：
+        - 已封板数 = limit_stats 中 first_time <= at_hhmmss 的票数
+        - 已炸板数 = first_time <= at_hhmmss AND open_times > 0 的票数
+          （open_times 是当日累计字段，存在轻微未来函数风险——后续撮合层用
+           分钟线精化）
+    """
+    if not sector_codes or not at_hhmmss or len(at_hhmmss) < 6:
+        return 0, 0
+    try:
+        ft_time = time(int(at_hhmmss[:2]), int(at_hhmmss[2:4]), int(at_hhmmss[4:6]))
+    except (ValueError, TypeError):
+        return 0, 0
+
+    row = (await session.execute(text(
+        "SELECT "
+        "  COUNT(*) AS limit_count, "
+        "  SUM(CASE WHEN COALESCE(open_times, 0) > 0 THEN 1 ELSE 0 END) AS broken_count "
+        "FROM limit_stats "
+        "WHERE trade_date = :td "
+        "  AND ts_code = ANY(:codes) "
+        "  AND \"limit\" = 'U' "
+        "  AND first_time IS NOT NULL "
+        "  AND first_time <= :ft"
+    ), {"td": trade_date, "codes": sector_codes, "ft": ft_time})).fetchone()
+    if not row:
+        return 0, 0
+    return int(row[0] or 0), int(row[1] or 0)
 
 
 async def count_near_limit_at_minute(
