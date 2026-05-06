@@ -14,6 +14,7 @@ import sys
 from dataclasses import dataclass
 
 import pytest
+from sqlalchemy import text
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault(
@@ -24,6 +25,7 @@ os.environ.setdefault(
 from app.research.signals.long_head_detector import (
     LimitUpStock,
     count_near_limit_at_minute,
+    detect_emerging_sectors,
     find_entry_trigger,
 )
 from app.research.strategies.base_pattern import is_natural_limit, load_sectors
@@ -130,6 +132,34 @@ async def test_entry_trigger_advances_before_first_time(db):
     assert entry_close is not None and entry_close > 0
     # 入场价应明显低于涨停价（pre_close 约 4.9，涨停约 5.39，entry ≈ 5.31 = +8.4%）
     assert entry_close < 5.4, f"entry_close 应低于涨停价，得 {entry_close}"
+
+
+async def test_emerging_sectors_4_29_three_industries(db):
+    """4/29 09:45 前名单外涨停股按行业分组，应有 3 个 ≥3 只的行业."""
+    async with db() as s:
+        from app.research.strategies.base_pattern import load_sectors
+        sectors = await load_sectors(s, "20260429")
+        known = {c for cs in sectors.values() for c in cs}
+        emerging = await detect_emerging_sectors(s, "20260429", known, "094500", 3)
+    # 期望: 电气设备 4 / 食品 4 / 专用机械 3
+    assert "电气设备" in emerging and len(emerging["电气设备"]) >= 3
+    assert "食品" in emerging and len(emerging["食品"]) >= 3
+    assert "专用机械" in emerging and len(emerging["专用机械"]) >= 3
+
+
+async def test_emerging_sectors_excludes_known_codes(db):
+    """已在 known_codes 的票应被剔除，不计入萌芽."""
+    async with db() as s:
+        # 用一个超大 known_codes（包含全市场涨停股）应使 emerging 为空
+        all_codes_rows = (await s.execute(
+            text(
+                "SELECT DISTINCT ts_code FROM limit_stats "
+                "WHERE trade_date='20260429' AND \"limit\"='U'"
+            )
+        )).fetchall()
+        all_codes = {r[0] for r in all_codes_rows}
+        emerging = await detect_emerging_sectors(s, "20260429", all_codes, "094500", 3)
+    assert emerging == {}, f"全市场已知应无萌芽，得 {emerging}"
 
 
 async def test_entry_trigger_fallback_to_first_time_at_open(db):
