@@ -240,72 +240,6 @@ async def detect_emerging_sectors(
     return out
 
 
-async def find_entry_trigger(
-    session: AsyncSession,
-    trade_date: str,
-    self_code: str,
-    sector_codes: list[str],
-    first_time: str,
-    self_pct: float = 9.0,
-    sector_pct: float = 6.0,
-    sector_min: int = 3,
-    lookback_minutes: int = 5,
-) -> tuple[str, float | None]:
-    """从 first_time 往前 lookback_minutes 内找入场触发时刻（封板前夕、能买到）。
-
-    判定（双条件，事中可见）：
-        1. 该股自身涨幅 ≥ self_pct%（默认 9%）— 即将封板
-        2. 同板块 ≥ sector_min 只票涨幅 ≥ sector_pct%（默认 ≥3 只 ≥6%）— 共识形成
-
-    用户原话："板块龙头到 +9% 的同时，同板块跟风也到 +6%，这时候也许就是一个买点"
-
-    返回 (trigger_hhmmss, trigger_close)：
-        - 找到 → 触发时刻 + 那一分钟 close（通常 +9~+10%，未到涨停）
-        - 找不到 → fallback first_time + 那一分钟 close（涨停价，靠撮合层 skip 兜底）
-    """
-    target = _hhmmss_to_dt(trade_date, first_time)
-    if not target:
-        return first_time, None
-
-    # 扫描窗口下界：max(first_time - 5min, 09:30:00)
-    open_dt = datetime.strptime(trade_date, "%Y%m%d").replace(hour=9, minute=30)
-    start = max(target - timedelta(minutes=lookback_minutes), open_dt)
-    if start >= target:
-        # first_time = 09:30:00 这种边界 → 没有可用的前序窗口
-        rows = []
-    else:
-        rows = (await session.execute(text(
-            "SELECT m.trade_time, m.close, d.pre_close "
-            "FROM stock_min_kline m "
-            "LEFT JOIN stock_daily d ON d.trade_date=:td AND d.ts_code=:c "
-            "WHERE m.ts_code=:c AND m.trade_time >= :start AND m.trade_time < :end "
-            "  AND m.freq='1min' ORDER BY m.trade_time"
-        ), {"td": trade_date, "c": self_code, "start": start, "end": target})).fetchall()
-
-    self_threshold = 1 + self_pct / 100
-    for trade_time, close, pre_close in rows:
-        if not pre_close or pre_close <= 0 or close is None:
-            continue
-        if float(close) < float(pre_close) * self_threshold:
-            continue
-        # 自身 ≥ self_pct% 达标 → 检查那一分钟板块共识
-        hhmmss = trade_time.strftime("%H%M%S")
-        n, _, _ = await count_near_limit_at_minute(
-            session, trade_date, sector_codes, hhmmss, sector_pct
-        )
-        if n >= sector_min:
-            return hhmmss, float(close)
-
-    # 没找到合适触发 → fallback first_time（first_time 那分钟自身已涨停 + 共识达标）
-    # first_time 可能含秒（如 093136）但分钟线表按整分钟存（093100），截断到分钟匹配
-    target_minute = target.replace(second=0)
-    fallback_close = (await session.execute(text(
-        "SELECT close FROM stock_min_kline "
-        "WHERE ts_code=:c AND trade_time=:t AND freq='1min'"
-    ), {"c": self_code, "t": target_minute})).scalar()
-    return first_time, (float(fallback_close) if fallback_close is not None else None)
-
-
 async def count_sector_limit_state(
     session: AsyncSession,
     trade_date: str,
@@ -438,3 +372,196 @@ def format_result(r: LongHeadResult) -> str:
     for note in r.notes:
         lines.append(f"  ℹ {note}")
     return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 严格事中扫描工具函数（v6 模拟盘对齐）
+#
+# 用途：模拟盘里 rt_k 每秒推 1min K 线到内存；回测时一次预拉所有需要的分钟
+# 数据到内存替代流式推送。两套数据源、同一套事中扫描算法（不偷看未来）。
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+# 一根分钟线的精简快照
+@dataclass
+class MinuteQuote:
+    close: float
+    pre_close: float
+    pct: float          # 涨幅 %
+    is_limit: bool      # close >= pre × 1.099 即视为已封板
+
+
+# (ts_code, minute_dt) -> MinuteQuote
+QuoteMap = dict[tuple[str, datetime], MinuteQuote]
+
+
+def iter_trading_minutes(trade_date: str) -> list[datetime]:
+    """生成 T 日 A 股交易分钟时间戳序列。
+
+    上午 09:30 ~ 11:30 共 121 根（含 11:30 收盘那根）
+    下午 13:00 ~ 15:00 共 121 根
+    去重后返回 datetime 列表。
+
+    回测时按这个序列驱动主循环；模拟盘里 rt_k 推送的时间戳会落在这个集合内。
+    """
+    base = datetime.strptime(trade_date, "%Y%m%d")
+    minutes: list[datetime] = []
+    # 上午
+    cur = base.replace(hour=9, minute=30)
+    end_am = base.replace(hour=11, minute=30)
+    while cur <= end_am:
+        minutes.append(cur)
+        cur += timedelta(minutes=1)
+    # 下午
+    cur = base.replace(hour=13, minute=0)
+    end_pm = base.replace(hour=15, minute=0)
+    while cur <= end_pm:
+        minutes.append(cur)
+        cur += timedelta(minutes=1)
+    return minutes
+
+
+async def fetch_minute_quotes(
+    session: AsyncSession,
+    trade_date: str,
+    ts_codes: list[str],
+) -> QuoteMap:
+    """一次性预拉一批票全天 1min 行情 + pre_close → 事中扫描查询用。
+
+    回测专用，模拟盘不需要（rt_k 流式推送）。
+    扫描结束后调用方应 quote_map.clear() 释放内存。
+    """
+    if not ts_codes:
+        return {}
+    rows = (await session.execute(text(
+        "SELECT m.ts_code, m.trade_time, m.close, d.pre_close "
+        "FROM stock_min_kline m "
+        "LEFT JOIN stock_daily d ON d.trade_date=:td AND d.ts_code=m.ts_code "
+        "WHERE m.ts_code = ANY(:codes) "
+        "  AND m.trade_time >= :open_dt AND m.trade_time <= :close_dt "
+        "  AND m.freq='1min'"
+    ), {
+        "td": trade_date,
+        "codes": ts_codes,
+        "open_dt": datetime.strptime(trade_date, "%Y%m%d").replace(hour=9, minute=30),
+        "close_dt": datetime.strptime(trade_date, "%Y%m%d").replace(hour=15, minute=0),
+    })).fetchall()
+
+    out: QuoteMap = {}
+    for ts_code, trade_time, close, pre_close in rows:
+        if close is None or pre_close is None or pre_close <= 0:
+            continue
+        # 截断到分钟（DB 可能存秒数）
+        minute_dt = trade_time.replace(second=0, microsecond=0)
+        c = float(close)
+        p = float(pre_close)
+        pct = (c - p) / p * 100.0
+        is_limit = c >= p * 1.099   # A 股主板 +10%（容差 0.1%）
+        out[(ts_code, minute_dt)] = MinuteQuote(
+            close=c, pre_close=p, pct=pct, is_limit=is_limit,
+        )
+    return out
+
+
+def count_codes_above_pct_intraday(
+    quotes: QuoteMap, codes: list[str], minute_dt: datetime, pct_threshold: float,
+) -> int:
+    """事中：那一分钟板块内涨幅 ≥ pct_threshold% 的票数（替代 count_near_limit_at_minute）。
+
+    严格按 minute_dt 那一分钟的 close 算，不偷看后续。
+    """
+    n = 0
+    for code in codes:
+        q = quotes.get((code, minute_dt))
+        if q and q.pct >= pct_threshold:
+            n += 1
+    return n
+
+
+def count_sector_limit_state_intraday(
+    quotes: QuoteMap, codes: list[str], minute_dt: datetime,
+) -> tuple[int, int]:
+    """事中：截至 minute_dt 板块内（已封过板的票数, 已炸过板的票数）。
+
+    判定（用分钟线，严格事中无未来函数）:
+        - 已封过板 = 在 [09:30, minute_dt] 任意一分钟 close ≥ pre × 1.099
+        - 已炸过板 = 已封过板 且 minute_dt 当下 close < pre × 1.099
+
+    替代 count_sector_limit_state（旧版用 limit_stats.open_times，是当日累计字段
+    带 mild 未来风险）。
+    """
+    ever_limit = 0
+    broken = 0
+    for code in codes:
+        # 扫该票在 [09:30, minute_dt] 的所有分钟，看是否曾封板
+        had_limit = False
+        for (c, mt), q in quotes.items():
+            if c != code or mt > minute_dt:
+                continue
+            if q.is_limit:
+                had_limit = True
+                break
+        if not had_limit:
+            continue
+        ever_limit += 1
+        # 当下是否已炸（close < 涨停价）
+        cur = quotes.get((code, minute_dt))
+        if cur and not cur.is_limit:
+            broken += 1
+    return ever_limit, broken
+
+
+def compute_vwap_until(
+    quotes: QuoteMap, ts_code: str, minute_dt: datetime,
+) -> float | None:
+    """事中：截至 minute_dt 那一分钟（含），该票的简单分时均价（AVG close）。
+
+    简化版：用 close 累计平均代替成交量加权（vol 字段未拉，需要的话再加）。
+    A 股盘中"分时均线"实际是 VWAP，但 close 累计平均在涨停盘是足够近似的指标。
+    """
+    closes: list[float] = []
+    for (c, mt), q in quotes.items():
+        if c != ts_code or mt > minute_dt:
+            continue
+        closes.append(q.close)
+    if not closes:
+        return None
+    return sum(closes) / len(closes)
+
+
+async def fetch_industries(
+    session: AsyncSession, ts_codes: list[str],
+) -> dict[str, str]:
+    """批量取股票 → 中信行业映射（萌芽主线分组用）。"""
+    if not ts_codes:
+        return {}
+    rows = (await session.execute(text(
+        "SELECT ts_code, industry FROM stock_basic WHERE ts_code = ANY(:codes)"
+    ), {"codes": ts_codes})).fetchall()
+    return {r[0]: r[1] for r in rows if r[1]}
+
+
+async def fetch_first_limit_times(
+    session: AsyncSession, trade_date: str,
+) -> dict[str, datetime]:
+    """T 日全市场 first_time（事中可见的"封板时刻"）。
+
+    返回 {ts_code: first_time_datetime}（截到分钟）。
+    萌芽主线扫描用：每分钟检查"该分钟新增封板的票"。
+    """
+    rows = (await session.execute(text(
+        "SELECT ts_code, first_time FROM limit_stats "
+        "WHERE trade_date=:td AND \"limit\"='U' AND first_time IS NOT NULL"
+    ), {"td": trade_date})).fetchall()
+    base = datetime.strptime(trade_date, "%Y%m%d")
+    out: dict[str, datetime] = {}
+    for ts_code, ft in rows:
+        if not ft:
+            continue
+        s = ft.zfill(6)
+        try:
+            h, m = int(s[:2]), int(s[2:4])
+            out[ts_code] = base.replace(hour=h, minute=m, second=0, microsecond=0)
+        except (ValueError, TypeError):
+            continue
+    return out

@@ -25,8 +25,11 @@ os.environ.setdefault(
 from app.research.signals.long_head_detector import (
     LimitUpStock,
     count_near_limit_at_minute,
+    count_codes_above_pct_intraday,
+    count_sector_limit_state_intraday,
     detect_emerging_sectors,
-    find_entry_trigger,
+    fetch_minute_quotes,
+    iter_trading_minutes,
 )
 from app.research.strategies.base_pattern import is_natural_limit, load_sectors
 
@@ -111,27 +114,65 @@ async def test_load_sectors_unknown_date_raises(db):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 4. find_entry_trigger（4/29 真实数据回归）
+# 4. 事中扫描工具函数（v6 严格事中）
 # ══════════════════════════════════════════════════════════════════════════
 
-async def test_entry_trigger_advances_before_first_time(db):
-    """影子龙 first_time=09:48:09 时，entry_trigger 应提前到封板前的某分钟。
+async def test_iter_trading_minutes_count():
+    """A 股交易分钟应是 上午 121 + 下午 121 = 242 根（含 11:30 / 15:00）。"""
+    minutes = iter_trading_minutes("20260429")
+    assert len(minutes) == 242
+    assert minutes[0].strftime("%H%M") == "0930"
+    assert minutes[120].strftime("%H%M") == "1130"
+    assert minutes[121].strftime("%H%M") == "1300"
+    assert minutes[-1].strftime("%H%M") == "1500"
 
-    4/29 国产芯片影子龙 002081.SZ 金螳螂 first=09:48:09，
-    封板前 1 分钟（09:47）板块共识已达标，entry_trigger 应 < first_time。
-    """
+
+async def test_fetch_minute_quotes_4_29(db):
+    """4/29 国产芯片金螳螂应能取到全天 1min 数据 + 封板状态正确."""
+    async with db() as s:
+        quotes = await fetch_minute_quotes(s, "20260429", ["002081.SZ"])
+    assert len(quotes) > 200, f"全天 1min 应 > 200 根，得 {len(quotes)}"
+    from datetime import datetime
+    # 09:48 那根（first_time=09:48:09 那秒封板，但 09:48:00 那根 K 线 close
+    # 还未到涨停 5.39）— 验证 pct ≥ 9% 但 is_limit 可能为 False
+    key_948 = ("002081.SZ", datetime(2026, 4, 29, 9, 48))
+    assert key_948 in quotes
+    assert quotes[key_948].pct >= 9.0
+    # 09:49 那根应该已经封板了（前一分钟末已经封死）
+    key_949 = ("002081.SZ", datetime(2026, 4, 29, 9, 49))
+    assert key_949 in quotes
+    assert quotes[key_949].is_limit, f"09:49 应已封板，pct={quotes[key_949].pct:.2f}%"
+
+
+async def test_count_codes_above_pct_intraday(db):
+    """4/29 09:47 国产芯片板块应 ≥ 3 只 ≥ 6%（影子龙触发前夕共识）."""
     async with db() as s:
         sectors = await load_sectors(s, "20260429")
         codes = sectors.get("国产芯片", [])
         if not codes:
-            pytest.skip("国产芯片板块无成员（lookback 数据缺）")
-        entry_t, entry_close = await find_entry_trigger(
-            s, "20260429", "002081.SZ", codes, "094809",
-        )
-    assert entry_t < "094809", f"entry_trigger 应早于 first_time，得 {entry_t}"
-    assert entry_close is not None and entry_close > 0
-    # 入场价应明显低于涨停价（pre_close 约 4.9，涨停约 5.39，entry ≈ 5.31 = +8.4%）
-    assert entry_close < 5.4, f"entry_close 应低于涨停价，得 {entry_close}"
+            pytest.skip("国产芯片板块无成员")
+        quotes = await fetch_minute_quotes(s, "20260429", codes)
+    from datetime import datetime
+    n = count_codes_above_pct_intraday(
+        quotes, codes, datetime(2026, 4, 29, 9, 47), 6.0
+    )
+    assert n >= 3, f"4/29 09:47 国产芯片板块应 ≥3 只 ≥6%，得 {n}"
+
+
+async def test_count_sector_limit_state_intraday_4_29(db):
+    """4/29 09:48 国产芯片板块应 ≥ 1 只已封过板（金螳螂 09:48 首次封板）."""
+    async with db() as s:
+        sectors = await load_sectors(s, "20260429")
+        codes = sectors.get("国产芯片", [])
+        if not codes:
+            pytest.skip("国产芯片板块无成员")
+        quotes = await fetch_minute_quotes(s, "20260429", codes)
+    from datetime import datetime
+    ever_limit, broken = count_sector_limit_state_intraday(
+        quotes, codes, datetime(2026, 4, 29, 9, 48)
+    )
+    assert ever_limit >= 1, f"09:48 板块应至少 1 只封过板，得 {ever_limit}"
+    assert broken <= ever_limit, "炸板数不应超过封过板数"
 
 
 async def test_emerging_sectors_4_29_three_industries(db):
@@ -169,20 +210,3 @@ async def test_emerging_sectors_excludes_known_codes(db):
     assert emerging == {}, f"全市场已知应无萌芽，得 {emerging}"
 
 
-async def test_entry_trigger_fallback_to_first_time_at_open(db):
-    """龙1 first_time=09:31:36 时，前序窗口只有 09:30~09:31:35，
-    板块共识尚未形成 → fallback 到 first_time（涨停价）。
-
-    4/29 国产芯片龙1 002652.SZ 扬子新材 first=09:31:36，
-    entry_trigger 应等于 first_time（无前序触发分钟）。
-    """
-    async with db() as s:
-        sectors = await load_sectors(s, "20260429")
-        codes = sectors.get("国产芯片", [])
-        if not codes:
-            pytest.skip("国产芯片板块无成员")
-        entry_t, entry_close = await find_entry_trigger(
-            s, "20260429", "002652.SZ", codes, "093136",
-        )
-    assert entry_t == "093136", f"entry_trigger 应 fallback 到 first_time，得 {entry_t}"
-    assert entry_close is not None and entry_close > 0
