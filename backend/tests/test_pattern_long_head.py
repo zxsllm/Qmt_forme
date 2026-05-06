@@ -135,22 +135,29 @@ async def test_entry_trigger_advances_before_first_time(db):
 
 
 async def test_emerging_sectors_4_29_three_industries(db):
-    """4/29 09:45 前名单外涨停股按行业分组，应有 3 个 ≥3 只的行业."""
+    """4/29 11:30 前名单外涨停股按行业分组，应至少含 3 个 ≥3 只的行业.
+
+    返回 {industry: (codes, identification_time)}，
+    identification_time = 第 3 只票封板时刻（动态识别时刻）。
+    """
     async with db() as s:
         from app.research.strategies.base_pattern import load_sectors
         sectors = await load_sectors(s, "20260429")
         known = {c for cs in sectors.values() for c in cs}
-        emerging = await detect_emerging_sectors(s, "20260429", known, "094500", 3)
-    # 期望: 电气设备 4 / 食品 4 / 专用机械 3
-    assert "电气设备" in emerging and len(emerging["电气设备"]) >= 3
-    assert "食品" in emerging and len(emerging["食品"]) >= 3
-    assert "专用机械" in emerging and len(emerging["专用机械"]) >= 3
+        emerging = await detect_emerging_sectors(s, "20260429", known, "113000", 3)
+    # 期望至少含 09:45 前已确认的电气设备/食品/专用机械
+    for ind in ("电气设备", "食品", "专用机械"):
+        assert ind in emerging, f"行业 {ind} 应被识别为萌芽，得 {list(emerging)}"
+        codes, id_time = emerging[ind]
+        assert len(codes) >= 3
+        assert len(id_time) == 6, f"identification_time 应是 HHMMSS 6 位，得 {id_time}"
+        # 第 3 只票封板必然在 11:30 之前
+        assert id_time <= "113000"
 
 
 async def test_emerging_sectors_excludes_known_codes(db):
     """已在 known_codes 的票应被剔除，不计入萌芽."""
     async with db() as s:
-        # 用一个超大 known_codes（包含全市场涨停股）应使 emerging 为空
         all_codes_rows = (await s.execute(
             text(
                 "SELECT DISTINCT ts_code FROM limit_stats "
@@ -158,7 +165,7 @@ async def test_emerging_sectors_excludes_known_codes(db):
             )
         )).fetchall()
         all_codes = {r[0] for r in all_codes_rows}
-        emerging = await detect_emerging_sectors(s, "20260429", all_codes, "094500", 3)
+        emerging = await detect_emerging_sectors(s, "20260429", all_codes, "113000", 3)
     assert emerging == {}, f"全市场已知应无萌芽，得 {emerging}"
 
 

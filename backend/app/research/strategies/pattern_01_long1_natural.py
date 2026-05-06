@@ -9,9 +9,9 @@
 入口（**严格事中可见，无未来函数**）：
     - 龙1 自然涨停（盘中封板，非一字开盘）— 一字情况走模式 3
     - **共识检查（事中代理）**：在龙1/影子龙 first_time 那一分钟，板块成员中
-      涨幅 ≥ 阈值的票数 ≥ INTRADAY_CONSENSUS_MIN（默认 3）
-        L1 龙1 锚点：≥6%（盘中显著拉升即可）
-        L2 影子龙锚点：≥8%（影子龙时跟风已发酵，要求更硬的同步）
+      涨幅 ≥ 阈值的票数 ≥ MIN
+        L1 龙1 锚点：≥6% 的票 ≥ 2 只（9:31 早封板时跟风通常 1-2 只到位）
+        L2 影子龙锚点：≥8% 的票 ≥ 3 只（跟风应更硬同步）
     - **不用预测器过滤** — 实盘里事中无法可靠判断次日是否一字
 
 多腿信号（每个板块发若干腿，事后统计哪些腿稳）：
@@ -54,17 +54,18 @@ from app.research.strategies.base_pattern import (
 
 logger = logging.getLogger(__name__)
 
-# ── 共识阈值（分层）──
-INTRADAY_CONSENSUS_MIN = 3       # 事中共识最少票数（含龙1自己/影子龙自己）
-INTRADAY_CONSENSUS_PCT_L1 = 6.0  # L1 龙1 锚点阈值（盘中显著拉升即可）
-INTRADAY_CONSENSUS_PCT_L2 = 8.0  # L2 影子龙锚点阈值（跟风已发酵，要求更硬）
+# ── 共识阈值（分层，含龙1/影子龙自己）──
+INTRADAY_CONSENSUS_MIN_L1 = 2    # L1 龙1 锚点最少票数（9:31 早封板时跟风通常 1-2 只到位）
+INTRADAY_CONSENSUS_MIN_L2 = 3    # L2 影子龙锚点最少票数（影子龙时跟风应更硬同步）
+INTRADAY_CONSENSUS_PCT_L1 = 6.0  # L1 阈值（盘中显著拉升即可）
+INTRADAY_CONSENSUS_PCT_L2 = 8.0  # L2 阈值（影子龙时跟风已发酵，要求更硬）
 
 # ── L_CB 升级隔夜条件（影子龙 first_time 那分钟评估）──
 L_CB_OVERNIGHT_LIMIT_MIN = 3     # 板块累计涨停 ≥ 3 只（共识强）
 L_CB_OVERNIGHT_OPEN_MAX = 1      # 板块累计炸板 ≤ 1 只（情绪稳）
 
 # ── 萌芽主线（盘中按行业分组识别 T-1 名单外同步爆发，只发 L_CB 控风险）──
-EMERGING_CUTOFF_TIME = "094500"        # 09:45 前累积识别（事中可见）
+EMERGING_CUTOFF_TIME = "113000"        # 11:30 早盘结束前都监控（动态识别时刻 = 第 3 只票封板时刻）
 EMERGING_MIN_COUNT = 3                 # 同一行业名单外涨停 ≥ 3 只 → 萌芽
 EMERGING_SECTOR_PREFIX = "(萌芽-"      # 虚拟板块名前缀（如 "(萌芽-电气设备)"）
 
@@ -86,8 +87,9 @@ class Pattern01(BasePattern):
             logger.info("pattern_01 funnel %s: no sectors loaded", trade_date)
             return []
 
-        # ── 萌芽主线探测（T 日 09:45 前同一行业 ≥3 只名单外涨停 → 加虚拟板块）──
+        # ── 萌芽主线探测（T 日早盘 ≤ 11:30 内同一行业 ≥3 只名单外涨停 → 加虚拟板块）──
         # 按 stock_basic.industry 分组，避免把杂鱼涨停股混成一个伪板块
+        # 识别时刻 = 该行业第 3 只票封板时刻（事中可执行的最早时点）
         # 主循环对该类板块特殊处理：跳过 L1/L2 正股，只发 L_CB（风险控制）
         known_codes = {code for codes in sectors.values() for code in codes}
         emerging_map = await detect_emerging_sectors(
@@ -95,13 +97,16 @@ class Pattern01(BasePattern):
             cutoff_hhmmss=EMERGING_CUTOFF_TIME,
             min_count=EMERGING_MIN_COUNT,
         )
-        for industry, em_codes in emerging_map.items():
+        # 萌芽板块的识别时刻（行业 → identification_hhmmss），主循环用作 L_CB 最早买点
+        emerging_id_time: dict[str, str] = {}
+        for industry, (em_codes, id_time) in emerging_map.items():
             virtual_name = f"{EMERGING_SECTOR_PREFIX}{industry})"
             logger.info(
-                "pattern_01 funnel %s emerging detected: %s with %d codes",
-                trade_date, virtual_name, len(em_codes),
+                "pattern_01 funnel %s emerging detected: %s with %d codes id_time=%s",
+                trade_date, virtual_name, len(em_codes), id_time,
             )
             sectors[virtual_name] = em_codes
+            emerging_id_time[virtual_name] = id_time
 
         signals: list[PatternSignal] = []
         for sec_name, codes in sectors.items():
@@ -131,12 +136,12 @@ class Pattern01(BasePattern):
             l1_consensus_n, _, l1_coverage = await count_near_limit_at_minute(
                 session, trade_date, codes, long1.first_time, INTRADAY_CONSENSUS_PCT_L1
             )
-            l1_pass = l1_consensus_n >= INTRADAY_CONSENSUS_MIN
+            l1_pass = l1_consensus_n >= INTRADAY_CONSENSUS_MIN_L1
             logger.info(
                 "pattern_01 funnel %s sector=%s long1=%s ft=%s L1_consensus=%d/%d "
                 "(≥%.0f%%) coverage=%.2f decision=%s",
                 trade_date, sec_name, long1.ts_code, long1.first_time,
-                l1_consensus_n, INTRADAY_CONSENSUS_MIN, INTRADAY_CONSENSUS_PCT_L1,
+                l1_consensus_n, INTRADAY_CONSENSUS_MIN_L1, INTRADAY_CONSENSUS_PCT_L1,
                 l1_coverage, "L1_pass" if l1_pass else "L1_skip_no_consensus",
             )
 
@@ -192,12 +197,12 @@ class Pattern01(BasePattern):
                 sh_consensus_n, _, sh_coverage = await count_near_limit_at_minute(
                     session, trade_date, codes, shadow.first_time, INTRADAY_CONSENSUS_PCT_L2
                 )
-                sh_pass = sh_consensus_n >= INTRADAY_CONSENSUS_MIN
+                sh_pass = sh_consensus_n >= INTRADAY_CONSENSUS_MIN_L2
                 logger.info(
                     "pattern_01 funnel %s sector=%s shadow=%s ft=%s L2_consensus=%d/%d "
                     "(≥%.0f%%) coverage=%.2f decision=%s",
                     trade_date, sec_name, shadow.ts_code, shadow.first_time,
-                    sh_consensus_n, INTRADAY_CONSENSUS_MIN, INTRADAY_CONSENSUS_PCT_L2,
+                    sh_consensus_n, INTRADAY_CONSENSUS_MIN_L2, INTRADAY_CONSENSUS_PCT_L2,
                     sh_coverage, "L2_pass" if sh_pass else "L2_skip_no_consensus",
                 )
                 if not sh_pass:
@@ -232,62 +237,80 @@ class Pattern01(BasePattern):
                         buy_anchor_time=l2_entry_time,
                     ))
 
-                # ── L_CB 影子龙债 ──
-                # 买点：与 L1 同步在龙1 first_time（债流动性好能买到）
-                # 卖点：影子龙 first_time 那分钟评估升级条件
-                #   - 升级（板块涨停 ≥ 3 + 炸板 ≤ 1）→ 持有到 T+1 09:30
-                #   - 不升级（默认）→ T+0 影子龙 first_time 立即卖（情况 2 兜底）
-                cb_code = await find_cb_for_stock(session, shadow.ts_code, trade_date)
-                if cb_code:
-                    # 萌芽主线最早 09:45 才能识别，所以买点/升级判定都不能早于 09:45
-                    if is_emerging:
-                        cb_buy_time = EMERGING_CUTOFF_TIME
-                        cb_eval_time = EMERGING_CUTOFF_TIME
-                    else:
-                        cb_buy_time = l1_entry_time
-                        cb_eval_time = shadow.first_time
+                # ── L_CB 跟风债（影子龙 + 所有跟风都尝试，因为影子龙有债概率太低）──
+                # 老师课件原话："（1）龙头时间 B债低进  （2）跟风时间 B债低进
+                # （3）转债时间 b 低进可以拿到尾盘隔夜"——所有跟风的债都可买
+                # 买点：与 L1 同步（事中可执行）
+                # 卖点：影子龙 first_time 那分钟评估一次升级条件，所有 L_CB 共用
+                if is_emerging:
+                    # 萌芽主线最早只能在"第 3 只票封板时刻"识别出来，再早实盘不可执行
+                    id_time = emerging_id_time.get(sec_name, EMERGING_CUTOFF_TIME)
+                    cb_buy_time = max(id_time, l1_entry_time)
+                    cb_eval_time = max(id_time, shadow.first_time)
+                else:
+                    cb_buy_time = l1_entry_time
+                    cb_eval_time = shadow.first_time
 
-                    sec_limit_n, sec_broken_n = await count_sector_limit_state(
-                        session, trade_date, codes, cb_eval_time
+                sec_limit_n, sec_broken_n = await count_sector_limit_state(
+                    session, trade_date, codes, cb_eval_time
+                )
+                upgrade_overnight = (
+                    sec_limit_n >= L_CB_OVERNIGHT_LIMIT_MIN
+                    and sec_broken_n <= L_CB_OVERNIGHT_OPEN_MAX
+                )
+                logger.info(
+                    "pattern_01 funnel %s sector=%s L_CB eval=%s "
+                    "limits=%d/%d broken=%d/%d decision=%s",
+                    trade_date, sec_name, cb_eval_time,
+                    sec_limit_n, L_CB_OVERNIGHT_LIMIT_MIN,
+                    sec_broken_n, L_CB_OVERNIGHT_OPEN_MAX,
+                    "L_CB_overnight" if upgrade_overnight else "L_CB_T0",
+                )
+                role_prefix = "萌芽-" if is_emerging else ""
+                if upgrade_overnight:
+                    sell_anchor_kw = {"sell_anchor": "next_open"}
+                    cb_tag_suffix = "升级隔夜"
+                else:
+                    sell_anchor_kw = {
+                        "sell_anchor": "intraday_at",
+                        "sell_anchor_time": cb_eval_time,
+                    }
+                    cb_tag_suffix = "T+0 出"
+
+                # 候选名单：影子龙 + followers（已按 first_time 升序）
+                cb_candidates = [(shadow, "shadow_cb", "影子龙债")]
+                for f in lh.followers:
+                    cb_candidates.append((f, "follower_cb", "跟风债"))
+
+                cb_hit = 0
+                for cb_stock, role_name, role_label in cb_candidates:
+                    cb_code = await find_cb_for_stock(
+                        session, cb_stock.ts_code, trade_date
                     )
-                    upgrade_overnight = (
-                        sec_limit_n >= L_CB_OVERNIGHT_LIMIT_MIN
-                        and sec_broken_n <= L_CB_OVERNIGHT_OPEN_MAX
-                    )
-                    logger.info(
-                        "pattern_01 funnel %s sector=%s L_CB eval=%s "
-                        "limits=%d/%d broken=%d/%d decision=%s",
-                        trade_date, sec_name, cb_eval_time,
-                        sec_limit_n, L_CB_OVERNIGHT_LIMIT_MIN,
-                        sec_broken_n, L_CB_OVERNIGHT_OPEN_MAX,
-                        "L_CB_overnight" if upgrade_overnight else "L_CB_T0",
-                    )
-                    role_prefix = "萌芽-" if is_emerging else ""
-                    if upgrade_overnight:
-                        sell_anchor_kw = {"sell_anchor": "next_open"}
-                        cb_tag = f"[L_CB {role_prefix}影子龙债 升级隔夜]"
-                    else:
-                        sell_anchor_kw = {
-                            "sell_anchor": "intraday_at",
-                            "sell_anchor_time": cb_eval_time,
-                        }
-                        cb_tag = f"[L_CB {role_prefix}影子龙债 T+0 出]"
+                    if not cb_code:
+                        continue
+                    cb_hit += 1
                     cb_base = {**base, "sector_size": sh_consensus_n}
                     cb_base.pop("sell_anchor", None)
                     signals.append(PatternSignal(
                         **cb_base,
                         pick_code=cb_code,
-                        pick_name=f"{shadow.name}转债",
-                        pick_role="shadow_cb",
-                        pick_tag=shadow.tag or f"{shadow.limit_times}板",
+                        pick_name=f"{cb_stock.name}转债",
+                        pick_role=role_name,
+                        pick_tag=cb_stock.tag or f"{cb_stock.limit_times}板",
                         reason=(
                             f"龙头隔夜 板块涨停{sec_limit_n}只 炸板{sec_broken_n}只 "
-                            f"买{cb_buy_time[:2]}:{cb_buy_time[2:4]} {cb_tag}"
+                            f"买{cb_buy_time[:2]}:{cb_buy_time[2:4]} "
+                            f"[L_CB {role_prefix}{role_label} {cb_tag_suffix}]"
                         ),
                         pick_kind="cb",
-                        underlying_code=shadow.ts_code,
+                        underlying_code=cb_stock.ts_code,
                         buy_anchor="intraday_at",
                         buy_anchor_time=cb_buy_time,
                         **sell_anchor_kw,
                     ))
+                logger.info(
+                    "pattern_01 funnel %s sector=%s L_CB candidates=%d hit=%d",
+                    trade_date, sec_name, len(cb_candidates), cb_hit,
+                )
         return signals

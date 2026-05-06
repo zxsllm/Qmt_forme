@@ -189,13 +189,13 @@ async def detect_emerging_sectors(
     session: AsyncSession,
     trade_date: str,
     known_codes: set[str],
-    cutoff_hhmmss: str = "094500",
+    cutoff_hhmmss: str = "113000",
     min_count: int = 3,
-) -> dict[str, list[str]]:
+) -> dict[str, tuple[list[str], str]]:
     """T 日盘中萌芽主线探测（按 stock_basic.industry 分组，严格事中可见）。
 
     判定逻辑：
-        - T 日 first_time <= cutoff（默认 09:45）的涨停股
+        - T 日 first_time <= cutoff（默认 11:30 = 早盘结束）的涨停股
         - 剔除已在 known_codes（T-1 lookback 三源并集）的票
         - 按 stock_basic.industry 分组
         - 同一行业 >= min_count（默认 3）只 → 视为萌芽主线候选
@@ -204,14 +204,18 @@ async def detect_emerging_sectors(
     资新题材或壳概念漏光"）。industry 粗糙但确定可用，足以把"杂鱼涨停股"
     与"行业内同步爆发"区分开。
 
-    返回 {industry_name: [ts_codes]}（按 first_time 升序），上层用作虚拟板块。
+    返回 {industry: (ts_codes, identification_hhmmss)}：
+        - ts_codes 按 first_time 升序
+        - identification_hhmmss = 第 min_count 只票的 first_time（即该行业满足
+          ≥3 只条件的最早时刻），上层用作 L_CB 最早买点（事中可执行）
     """
     if not cutoff_hhmmss or len(cutoff_hhmmss) < 6:
         return {}
     cutoff_str = cutoff_hhmmss.zfill(6)
 
     rows = (await session.execute(text(
-        "SELECT ls.ts_code, sb.industry FROM limit_stats ls "
+        "SELECT ls.ts_code, sb.industry, LPAD(ls.first_time, 6, '0') AS ft "
+        "FROM limit_stats ls "
         "LEFT JOIN stock_basic sb ON sb.ts_code = ls.ts_code "
         "WHERE ls.trade_date=:td AND ls.\"limit\"='U' "
         "  AND ls.first_time IS NOT NULL "
@@ -219,12 +223,21 @@ async def detect_emerging_sectors(
         "ORDER BY LPAD(ls.first_time, 6, '0')"
     ), {"td": trade_date, "cutoff": cutoff_str})).fetchall()
 
-    by_industry: dict[str, list[str]] = {}
-    for ts_code, industry in rows:
+    by_industry: dict[str, list[tuple[str, str]]] = {}
+    for ts_code, industry, ft in rows:
         if not industry or ts_code in known_codes:
             continue
-        by_industry.setdefault(industry, []).append(ts_code)
-    return {ind: codes for ind, codes in by_industry.items() if len(codes) >= min_count}
+        by_industry.setdefault(industry, []).append((ts_code, ft))
+
+    out: dict[str, tuple[list[str], str]] = {}
+    for industry, items in by_industry.items():
+        if len(items) < min_count:
+            continue
+        codes = [c for c, _ in items]
+        # 第 min_count 只票封板的时刻 = 该行业达成共识的最早时刻
+        identification_time = items[min_count - 1][1]
+        out[industry] = (codes, identification_time)
+    return out
 
 
 async def find_entry_trigger(
