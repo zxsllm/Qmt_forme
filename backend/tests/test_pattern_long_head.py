@@ -24,6 +24,7 @@ os.environ.setdefault(
 from app.research.signals.long_head_detector import (
     LimitUpStock,
     count_near_limit_at_minute,
+    find_entry_trigger,
 )
 from app.research.strategies.base_pattern import is_natural_limit, load_sectors
 
@@ -105,3 +106,46 @@ async def test_load_sectors_unknown_date_raises(db):
     async with db() as s:
         with pytest.raises(ValueError, match="不是交易日"):
             await load_sectors(s, "21000101")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 4. find_entry_trigger（4/29 真实数据回归）
+# ══════════════════════════════════════════════════════════════════════════
+
+async def test_entry_trigger_advances_before_first_time(db):
+    """影子龙 first_time=09:48:09 时，entry_trigger 应提前到封板前的某分钟。
+
+    4/29 国产芯片影子龙 002081.SZ 金螳螂 first=09:48:09，
+    封板前 1 分钟（09:47）板块共识已达标，entry_trigger 应 < first_time。
+    """
+    async with db() as s:
+        sectors = await load_sectors(s, "20260429")
+        codes = sectors.get("国产芯片", [])
+        if not codes:
+            pytest.skip("国产芯片板块无成员（lookback 数据缺）")
+        entry_t, entry_close = await find_entry_trigger(
+            s, "20260429", "002081.SZ", codes, "094809",
+        )
+    assert entry_t < "094809", f"entry_trigger 应早于 first_time，得 {entry_t}"
+    assert entry_close is not None and entry_close > 0
+    # 入场价应明显低于涨停价（pre_close 约 4.9，涨停约 5.39，entry ≈ 5.31 = +8.4%）
+    assert entry_close < 5.4, f"entry_close 应低于涨停价，得 {entry_close}"
+
+
+async def test_entry_trigger_fallback_to_first_time_at_open(db):
+    """龙1 first_time=09:31:36 时，前序窗口只有 09:30~09:31:35，
+    板块共识尚未形成 → fallback 到 first_time（涨停价）。
+
+    4/29 国产芯片龙1 002652.SZ 扬子新材 first=09:31:36，
+    entry_trigger 应等于 first_time（无前序触发分钟）。
+    """
+    async with db() as s:
+        sectors = await load_sectors(s, "20260429")
+        codes = sectors.get("国产芯片", [])
+        if not codes:
+            pytest.skip("国产芯片板块无成员")
+        entry_t, entry_close = await find_entry_trigger(
+            s, "20260429", "002652.SZ", codes, "093136",
+        )
+    assert entry_t == "093136", f"entry_trigger 应 fallback 到 first_time，得 {entry_t}"
+    assert entry_close is not None and entry_close > 0

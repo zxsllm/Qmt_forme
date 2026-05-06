@@ -77,6 +77,20 @@ async def fetch_stock_open(td: str, code: str) -> float | None:
         return row[0] if row else None
 
 
+async def fetch_stock_pre_close(s, td: str, code: str) -> float | None:
+    """T 日的 pre_close（= T-1 日 close 复权后），用于涨停价判定。"""
+    r = await s.execute(text(
+        "SELECT pre_close FROM stock_daily WHERE trade_date=:d AND ts_code=:c"
+    ), {"d": td, "c": code})
+    row = r.fetchone()
+    return row[0] if row else None
+
+
+# 涨停封单判定阈值：A 股主板 +10%，buy_price ≥ pre_close × 1.099 视为已封板，
+# 散户挂单排队靠后，事中无法成交 → skip 标 unfillable_limit（参考 .claude/rules/backtest.md）
+LIMIT_UP_FILL_THRESHOLD = 1.099
+
+
 ANCHOR_TIME_MAP = {
     "today_close": "145500",   # 散户能下单的最后实际可控时刻
     "today_open": "093000",
@@ -104,6 +118,16 @@ async def execute_signal(sig: PatternSignal) -> PatternTrade:
         else:
             return PatternTrade(signal=sig, next_date="", buy_price=None, sell_price=None,
                                 skip_reason=f"unknown buy_anchor={sig.buy_anchor}")
+
+        # ---- 涨停封单判定（仅正股，CB 流动性好不卡）----
+        if not is_cb and buy_price is not None and buy_price > 0:
+            pre_close = await fetch_stock_pre_close(s, sig.trade_date, sig.pick_code)
+            if pre_close and buy_price >= pre_close * LIMIT_UP_FILL_THRESHOLD:
+                return PatternTrade(
+                    signal=sig, next_date="", buy_price=buy_price, sell_price=None,
+                    skip_reason=f"unfillable_limit: buy={buy_price:.2f} ≥ "
+                                f"pre×1.099={pre_close * LIMIT_UP_FILL_THRESHOLD:.2f}"
+                )
 
         # ---- 卖出价（分钟线）----
         if sig.sell_anchor == "next_open":

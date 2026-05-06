@@ -185,6 +185,72 @@ def _hhmmss_to_dt(td: str, hhmmss: str) -> datetime | None:
         return None
 
 
+async def find_entry_trigger(
+    session: AsyncSession,
+    trade_date: str,
+    self_code: str,
+    sector_codes: list[str],
+    first_time: str,
+    self_pct: float = 9.0,
+    sector_pct: float = 6.0,
+    sector_min: int = 3,
+    lookback_minutes: int = 5,
+) -> tuple[str, float | None]:
+    """从 first_time 往前 lookback_minutes 内找入场触发时刻（封板前夕、能买到）。
+
+    判定（双条件，事中可见）：
+        1. 该股自身涨幅 ≥ self_pct%（默认 9%）— 即将封板
+        2. 同板块 ≥ sector_min 只票涨幅 ≥ sector_pct%（默认 ≥3 只 ≥6%）— 共识形成
+
+    用户原话："板块龙头到 +9% 的同时，同板块跟风也到 +6%，这时候也许就是一个买点"
+
+    返回 (trigger_hhmmss, trigger_close)：
+        - 找到 → 触发时刻 + 那一分钟 close（通常 +9~+10%，未到涨停）
+        - 找不到 → fallback first_time + 那一分钟 close（涨停价，靠撮合层 skip 兜底）
+    """
+    target = _hhmmss_to_dt(trade_date, first_time)
+    if not target:
+        return first_time, None
+
+    # 扫描窗口下界：max(first_time - 5min, 09:30:00)
+    open_dt = datetime.strptime(trade_date, "%Y%m%d").replace(hour=9, minute=30)
+    start = max(target - timedelta(minutes=lookback_minutes), open_dt)
+    if start >= target:
+        # first_time = 09:30:00 这种边界 → 没有可用的前序窗口
+        rows = []
+    else:
+        rows = (await session.execute(text(
+            "SELECT m.trade_time, m.close, d.pre_close "
+            "FROM stock_min_kline m "
+            "LEFT JOIN stock_daily d ON d.trade_date=:td AND d.ts_code=:c "
+            "WHERE m.ts_code=:c AND m.trade_time >= :start AND m.trade_time < :end "
+            "  AND m.freq='1min' ORDER BY m.trade_time"
+        ), {"td": trade_date, "c": self_code, "start": start, "end": target})).fetchall()
+
+    self_threshold = 1 + self_pct / 100
+    for trade_time, close, pre_close in rows:
+        if not pre_close or pre_close <= 0 or close is None:
+            continue
+        if float(close) < float(pre_close) * self_threshold:
+            continue
+        # 自身 ≥ self_pct% 达标 → 检查那一分钟板块共识
+        hhmmss = trade_time.strftime("%H%M%S")
+        n, _, _ = await count_near_limit_at_minute(
+            session, trade_date, sector_codes, hhmmss, sector_pct
+        )
+        if n >= sector_min:
+            return hhmmss, float(close)
+
+    # 没找到合适触发 → fallback first_time（first_time 那分钟自身已涨停 + 共识达标）
+    # first_time 可能含秒（如 093136）但分钟线表按整分钟存（093100），截断到分钟匹配
+    target_minute = target.replace(second=0)
+    fallback_close = (await session.execute(text(
+        "SELECT close FROM stock_min_kline "
+        "WHERE ts_code=:c AND trade_time=:t AND freq='1min'"
+    ), {"c": self_code, "t": target_minute})).scalar()
+    return first_time, (float(fallback_close) if fallback_close is not None else None)
+
+
 async def count_sector_limit_state(
     session: AsyncSession,
     trade_date: str,

@@ -41,6 +41,7 @@ from app.research.signals.long_head_detector import (
     count_near_limit_at_minute,
     count_sector_limit_state,
     detect_long_head,
+    find_entry_trigger,
 )
 from app.research.strategies.base_pattern import (
     BasePattern,
@@ -133,7 +134,17 @@ class Pattern01(BasePattern):
                 f"龙1首封{long1.first_time[:2]}:{long1.first_time[2:4]}"
             )
 
-            # L1 龙1 正股（共识达标才发）
+            # L1 龙1 正股（共识达标才发；买入用 entry_trigger 替代 first_time，
+            # 触发时刻通常在封板前 1~5 分钟，价格 +9% 左右未到涨停 → 能买到）
+            l1_entry_time, l1_entry_close = await find_entry_trigger(
+                session, trade_date, long1.ts_code, codes, long1.first_time
+            )
+            logger.info(
+                "pattern_01 funnel %s sector=%s long1=%s entry=%s (vs first=%s) "
+                "entry_close=%s",
+                trade_date, sec_name, long1.ts_code, l1_entry_time, long1.first_time,
+                f"{l1_entry_close:.2f}" if l1_entry_close else "None",
+            )
             if l1_pass:
                 signals.append(PatternSignal(
                     **base,
@@ -141,10 +152,10 @@ class Pattern01(BasePattern):
                     pick_name=long1.name,
                     pick_role="long1",
                     pick_tag=long1.tag or f"{long1.limit_times}板",
-                    reason=reason_base + " [L1 龙1正股]",
+                    reason=reason_base + f" [L1 龙1正股 触发{l1_entry_time[:2]}:{l1_entry_time[2:4]}]",
                     pick_kind="stock",
                     buy_anchor="intraday_at",
-                    buy_anchor_time=long1.first_time,
+                    buy_anchor_time=l1_entry_time,
                 ))
 
             # L2 / L_CB：影子龙正股 + 影子龙债
@@ -167,7 +178,16 @@ class Pattern01(BasePattern):
                 if not sh_pass:
                     continue
 
-                # L2 影子龙正股
+                # L2 影子龙正股 — 入场用 entry_trigger（封板前夕能买到的价格）
+                l2_entry_time, l2_entry_close = await find_entry_trigger(
+                    session, trade_date, shadow.ts_code, codes, shadow.first_time
+                )
+                logger.info(
+                    "pattern_01 funnel %s sector=%s shadow=%s entry=%s (vs first=%s) "
+                    "entry_close=%s",
+                    trade_date, sec_name, shadow.ts_code, l2_entry_time, shadow.first_time,
+                    f"{l2_entry_close:.2f}" if l2_entry_close else "None",
+                )
                 signals.append(PatternSignal(
                     **{**base, "sector_size": sh_consensus_n},
                     pick_code=shadow.ts_code,
@@ -177,11 +197,12 @@ class Pattern01(BasePattern):
                     reason=(
                         f"龙头隔夜 L2共识{sh_consensus_n}只≥{INTRADAY_CONSENSUS_PCT_L2:.0f}% "
                         f"影子龙首封{shadow.first_time[:2]}:{shadow.first_time[2:4]} "
+                        f"触发{l2_entry_time[:2]}:{l2_entry_time[2:4]} "
                         f"[L2 影子龙正股 上车窗口{window_tag}]"
                     ),
                     pick_kind="stock",
                     buy_anchor="intraday_at",
-                    buy_anchor_time=shadow.first_time,
+                    buy_anchor_time=l2_entry_time,
                 ))
 
                 # ── L_CB 影子龙债 ──
@@ -225,12 +246,12 @@ class Pattern01(BasePattern):
                         pick_tag=shadow.tag or f"{shadow.limit_times}板",
                         reason=(
                             f"龙头隔夜 板块涨停{sec_limit_n}只 炸板{sec_broken_n}只 "
-                            f"{cb_tag}"
+                            f"触发{l1_entry_time[:2]}:{l1_entry_time[2:4]} {cb_tag}"
                         ),
                         pick_kind="cb",
                         underlying_code=shadow.ts_code,
                         buy_anchor="intraday_at",
-                        buy_anchor_time=long1.first_time,  # 与 L1 同步
+                        buy_anchor_time=l1_entry_time,  # 与 L1 同步用 entry_trigger
                         **sell_anchor_kw,
                     ))
         return signals
