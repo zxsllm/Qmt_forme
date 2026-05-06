@@ -184,8 +184,20 @@ async def load_sectors(
 
     N 日滚动并集 = 老主线 T 日仍然抓得到（昨日已识别），新主线 T 日漏掉
     （要等 T+1 进入名单），代价用户接受。
+
+    Raises:
+        ValueError: trade_date 非交易日（避免静默退化到错误的 lookback 窗口）
     """
     from app.research.signals.theme_taxonomy import SUB_TO_THEME
+
+    is_open = (await session.execute(text(
+        "SELECT is_open FROM trade_cal WHERE cal_date=:td"
+    ), {"td": trade_date})).scalar()
+    if is_open != 1:
+        raise ValueError(
+            f"load_sectors: trade_date={trade_date} 不是交易日（is_open={is_open}），"
+            "拒绝静默退化到 lookback 数据"
+        )
 
     cal_rows = (await session.execute(text(
         "SELECT cal_date FROM trade_cal "
@@ -197,19 +209,19 @@ async def load_sectors(
     dates = [r[0] for r in cal_rows]
 
     rows = (await session.execute(text(
-        "SELECT sector_name, array_agg(DISTINCT ts_code) "
+        "SELECT sector_name, ts_code "
         "FROM daily_sector_review "
         "WHERE trade_date = ANY(:dates) "
         "AND source IN ('bankuai','jiuyan','llm_v2') "
-        "AND ts_code IS NOT NULL "
-        "AND sector_name NOT IN ('一季报预增','反弹','公告','其他') "
-        "GROUP BY sector_name"
+        "AND ts_code IS NOT NULL AND ts_code <> '' "
+        "AND sector_name NOT IN ('一季报预增','反弹','公告','其他')"
     ), {"dates": dates})).fetchall()
 
+    # 多源 / 多日 / 多 sub 板块合并到 canonical 主线，按 (sector, ts_code) 去重
     merged: dict[str, set[str]] = {}
-    for sec_name, codes in rows:
+    for sec_name, ts_code in rows:
         canonical = SUB_TO_THEME.get(sec_name, sec_name)
-        merged.setdefault(canonical, set()).update(codes)
+        merged.setdefault(canonical, set()).add(ts_code)
     return {sec: sorted(codes) for sec, codes in merged.items()}
 
 

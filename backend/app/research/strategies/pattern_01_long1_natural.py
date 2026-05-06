@@ -33,11 +33,14 @@ from app.research.data.cb_resolver import find_cb_for_stock
 from app.research.signals.long_head_detector import (
     LongHeadResult,
     count_near_limit_at_minute,
+    detect_long_head,
 )
 from app.research.strategies.base_pattern import (
     BasePattern,
     PatternSignal,
+    fetch_daily_ohlc,
     is_natural_limit,
+    load_sectors,
 )
 
 logger = logging.getLogger(__name__)
@@ -58,18 +61,19 @@ class Pattern01(BasePattern):
         trade_date: str,
         source: str = "bankuai",
     ) -> list[PatternSignal]:
-        from app.research.strategies.base_pattern import (
-            detect_long_head, fetch_daily_ohlc, load_sectors,
-        )
-
         sectors = await load_sectors(session, trade_date, source)
         if not sectors:
+            logger.info("pattern_01 funnel %s: no sectors loaded", trade_date)
             return []
 
         signals: list[PatternSignal] = []
         for sec_name, codes in sectors.items():
             lh = await detect_long_head(session, trade_date, codes, sector_name=sec_name)
             if not lh.long1:
+                logger.info(
+                    "pattern_01 funnel %s sector=%s size=%d has_long1=False decision=skip_no_long1",
+                    trade_date, sec_name, len(codes),
+                )
                 continue
 
             check_codes = [lh.long1.ts_code]
@@ -79,22 +83,25 @@ class Pattern01(BasePattern):
 
             long1 = lh.long1
             if not is_natural_limit(long1, ohlc_map.get(long1.ts_code)):
+                logger.info(
+                    "pattern_01 funnel %s sector=%s long1=%s decision=skip_yizi",
+                    trade_date, sec_name, long1.ts_code,
+                )
                 continue  # 一字 → 模式 3
 
             # ── 事中共识检查（替代原全天 sector_size）──
             # 在龙1 first_time 那一分钟，板块内涨幅 ≥ PCT% 的票数 ≥ MIN
-            l1_consensus_n, l1_consensus_detail = await count_near_limit_at_minute(
+            l1_consensus_n, _, l1_coverage = await count_near_limit_at_minute(
                 session, trade_date, codes, long1.first_time, INTRADAY_CONSENSUS_PCT
             )
-            if l1_consensus_n < INTRADAY_CONSENSUS_MIN:
-                logger.info(
-                    "pattern_01 skip %s L1: consensus %d<%d at %s",
-                    sec_name, l1_consensus_n, INTRADAY_CONSENSUS_MIN, long1.first_time
-                )
-                # L1 共识不足，但影子龙时可能仍然成立 — 继续检查
-                l1_pass = False
-            else:
-                l1_pass = True
+            l1_pass = l1_consensus_n >= INTRADAY_CONSENSUS_MIN
+            logger.info(
+                "pattern_01 funnel %s sector=%s long1=%s ft=%s consensus=%d/%d "
+                "coverage=%.2f decision=%s",
+                trade_date, sec_name, long1.ts_code, long1.first_time,
+                l1_consensus_n, INTRADAY_CONSENSUS_MIN, l1_coverage,
+                "L1_pass" if l1_pass else "L1_skip_no_consensus",
+            )
 
             base = dict(
                 trade_date=trade_date,
@@ -132,14 +139,18 @@ class Pattern01(BasePattern):
             if lh.shadow:
                 shadow = lh.shadow
                 window_tag = "≤15min" if lh.shadow_within_15min else ">15min"
-                sh_consensus_n, _ = await count_near_limit_at_minute(
+                sh_consensus_n, _, sh_coverage = await count_near_limit_at_minute(
                     session, trade_date, codes, shadow.first_time, INTRADAY_CONSENSUS_PCT
                 )
-                if sh_consensus_n < INTRADAY_CONSENSUS_MIN:
-                    logger.info(
-                        "pattern_01 skip %s L2: consensus %d<%d at %s",
-                        sec_name, sh_consensus_n, INTRADAY_CONSENSUS_MIN, shadow.first_time
-                    )
+                sh_pass = sh_consensus_n >= INTRADAY_CONSENSUS_MIN
+                logger.info(
+                    "pattern_01 funnel %s sector=%s shadow=%s ft=%s consensus=%d/%d "
+                    "coverage=%.2f decision=%s",
+                    trade_date, sec_name, shadow.ts_code, shadow.first_time,
+                    sh_consensus_n, INTRADAY_CONSENSUS_MIN, sh_coverage,
+                    "L2_pass" if sh_pass else "L2_skip_no_consensus",
+                )
+                if not sh_pass:
                     continue
 
                 # L2 影子龙正股
