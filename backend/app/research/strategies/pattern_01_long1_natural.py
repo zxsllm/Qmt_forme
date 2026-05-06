@@ -48,6 +48,7 @@ from app.research.signals.long_head_detector import (
     fetch_first_limit_times,
     fetch_industries,
     fetch_minute_quotes,
+    fetch_stock_meta,
     iter_trading_minutes,
 )
 from app.research.strategies.base_pattern import (
@@ -153,6 +154,8 @@ class Pattern01(BasePattern):
         first_limit_times = await fetch_first_limit_times(session, trade_date)
         # 萌芽 fallback：股票→行业映射（用于扫描时归类新增封板）
         industries = await fetch_industries(session, all_codes)
+        # 展示元数据：中文名 / 板数标签 / 真实 first_time / 炸板数（仅输出用，不影响决策）
+        meta = await fetch_stock_meta(session, trade_date, all_codes)
 
         # 4. 状态机
         # 每个板块: {"l1": (code, minute) | None, "l2": (code, minute) | None}
@@ -178,7 +181,7 @@ class Pattern01(BasePattern):
                     # L1 检查：板块第一次触发
                     triggered = await self._check_and_trigger_l1(
                         session, trade_date, sec_name, codes, minute_dt,
-                        quotes, signals, cb_holdings, is_emerging,
+                        quotes, meta, signals, cb_holdings, is_emerging,
                     )
                     if triggered:
                         state["l1"] = triggered  # (code, minute)
@@ -186,7 +189,7 @@ class Pattern01(BasePattern):
                     # L2 检查（萌芽不发 L2 正股）
                     l1_code = state["l1"][0]
                     triggered = await self._check_and_trigger_l2(
-                        sec_name, codes, l1_code, minute_dt, quotes, signals,
+                        sec_name, codes, l1_code, minute_dt, quotes, meta, signals,
                     )
                     if triggered:
                         state["l2"] = triggered
@@ -273,6 +276,7 @@ class Pattern01(BasePattern):
         quotes.clear()
         first_limit_times.clear()
         industries.clear()
+        meta.clear()
 
         return signals
 
@@ -288,6 +292,7 @@ class Pattern01(BasePattern):
         codes: list[str],
         minute_dt: datetime,
         quotes: QuoteMap,
+        meta: dict[str, dict],
         signals: list[PatternSignal],
         cb_holdings: list[_CbHolding],
         is_emerging: bool,
@@ -311,15 +316,20 @@ class Pattern01(BasePattern):
                 q.pct, consensus_n, INTRADAY_CONSENSUS_MIN_L1,
             )
             buy_time_str = _hhmmss(minute_dt)
+            l1_meta = meta.get(cand, {})
+            l1_name = l1_meta.get("name") or cand
+            l1_tag = l1_meta.get("tag") or f"{q.pct:.1f}%"
+            l1_first_time = l1_meta.get("first_time") or buy_time_str
+            l1_open_times = l1_meta.get("open_times", 0)
             base = dict(
                 trade_date=trade_date,
                 pattern=self.pattern_id,
                 sector=sec_name,
                 long1_code=cand,
-                long1_name=cand,         # 事中没有 name，用 code 占位（撮合层会改）
-                long1_tag=f"{q.pct:.1f}%",
-                long1_first_time=buy_time_str,
-                long1_open_times=0,
+                long1_name=l1_name,
+                long1_tag=l1_tag,
+                long1_first_time=l1_first_time,
+                long1_open_times=l1_open_times,
                 sector_size=consensus_n,
                 holding="overnight",
                 sell_anchor="next_open",
@@ -329,9 +339,9 @@ class Pattern01(BasePattern):
                 signals.append(PatternSignal(
                     **base,
                     pick_code=cand,
-                    pick_name=cand,
+                    pick_name=l1_name,
                     pick_role="long1",
-                    pick_tag=f"{q.pct:.1f}%",
+                    pick_tag=l1_tag,
                     reason=(
                         f"事中L1 自身{q.pct:.1f}%≥9% 板块共识{consensus_n}只≥6% "
                         f"触发{_hhmm_label(minute_dt)} [L1 正股]"
@@ -348,15 +358,18 @@ class Pattern01(BasePattern):
                 cb_code = await find_cb_for_stock(session, follower_code, trade_date)
                 if not cb_code:
                     continue
+                f_meta = meta.get(follower_code, {})
+                f_name = f_meta.get("name") or follower_code
+                f_tag = f_meta.get("tag") or "未涨停"
                 cb_sig = PatternSignal(
                     **{**base, "sell_anchor": "next_open"},  # placeholder，主循环回填
                     pick_code=cb_code,
-                    pick_name=f"{follower_code}转债",
+                    pick_name=f"{f_name}转债",
                     pick_role="follower_cb",
-                    pick_tag=f"{role_prefix}事中L1同步",
+                    pick_tag=f_tag,
                     reason=(
                         f"事中L1同步发债 板块共识{consensus_n}只≥6% "
-                        f"买{_hhmm_label(minute_dt)} underlying={follower_code} "
+                        f"买{_hhmm_label(minute_dt)} underlying={f_name}({follower_code}) "
                         f"[L_CB {role_prefix}跟风债]"
                     ),
                     pick_kind="cb",
@@ -386,6 +399,7 @@ class Pattern01(BasePattern):
         l1_code: str,
         minute_dt: datetime,
         quotes: QuoteMap,
+        meta: dict[str, dict],
         signals: list[PatternSignal],
     ) -> tuple[str, datetime] | None:
         consensus_n = count_codes_above_pct_intraday(
@@ -406,23 +420,30 @@ class Pattern01(BasePattern):
                 q.pct, consensus_n, INTRADAY_CONSENSUS_MIN_L2,
             )
             buy_time_str = _hhmmss(minute_dt)
+            l1_meta = meta.get(l1_code, {})
+            cand_meta = meta.get(cand, {})
+            cand_name = cand_meta.get("name") or cand
+            cand_tag = cand_meta.get("tag") or f"{q.pct:.1f}%"
+            cand_first = cand_meta.get("first_time") or buy_time_str
+            cand_open = cand_meta.get("open_times", 0)
             signals.append(PatternSignal(
                 trade_date=minute_dt.strftime("%Y%m%d"),
                 pattern=self.pattern_id,
                 sector=sec_name,
                 long1_code=l1_code,
-                long1_name=l1_code,
-                long1_tag="",
-                long1_first_time="",
-                long1_open_times=0,
+                long1_name=l1_meta.get("name") or l1_code,
+                long1_tag=l1_meta.get("tag") or "",
+                long1_first_time=l1_meta.get("first_time") or "",
+                long1_open_times=l1_meta.get("open_times", 0),
                 sector_size=consensus_n,
                 pick_code=cand,
-                pick_name=cand,
+                pick_name=cand_name,
                 pick_role="shadow",
-                pick_tag=f"{q.pct:.1f}%",
+                pick_tag=cand_tag,
                 reason=(
                     f"事中L2 自身{q.pct:.1f}%≥9% 板块共识{consensus_n}只≥8% "
-                    f"触发{_hhmm_label(minute_dt)} [L2 正股]"
+                    f"触发{_hhmm_label(minute_dt)} 首封{cand_first[:2]}:{cand_first[2:4]} "
+                    f"炸{cand_open}次 [L2 正股]"
                 ),
                 pick_kind="stock",
                 buy_anchor="intraday_at",

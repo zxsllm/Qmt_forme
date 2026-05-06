@@ -541,6 +541,57 @@ async def fetch_industries(
     return {r[0]: r[1] for r in rows if r[1]}
 
 
+async def fetch_stock_meta(
+    session: AsyncSession, trade_date: str, ts_codes: list[str],
+) -> dict[str, dict]:
+    """批量取候选票的展示元数据（仅用于回测/UI 输出，不影响策略决策）。
+
+    返回 {ts_code: {"name": ..., "tag": ..., "first_time": ..., "open_times": ...}}
+        - name: 中文名（stock_basic.name 优先，limit_stats.name fallback）
+        - tag: 同花顺板数标签（如 "2天2板"，limit_list_ths.tag）
+        - first_time: limit_stats.first_time（HHMMSS 格式，如 "093136"）
+        - open_times: 当日炸板次数
+
+    严格说 first_time / open_times / tag 都是事后字段，但仅在信号生成后填回
+    PatternSignal 给输出展示用，事中扫描的决策逻辑不依赖这些值。
+    """
+    if not ts_codes:
+        return {}
+    rows = (await session.execute(text(
+        "SELECT ls.ts_code, "
+        "       COALESCE(sb.name, ls.name) AS name, "
+        "       lt.tag, "
+        "       LPAD(ls.first_time, 6, '0') AS ft, "
+        "       COALESCE(ls.open_times, 0) AS ot "
+        "FROM limit_stats ls "
+        "LEFT JOIN stock_basic sb ON sb.ts_code = ls.ts_code "
+        "LEFT JOIN limit_list_ths lt ON lt.trade_date=ls.trade_date "
+        "       AND lt.ts_code=ls.ts_code AND lt.limit_type='涨停池' "
+        "WHERE ls.trade_date=:td AND ls.ts_code = ANY(:codes) AND ls.\"limit\"='U'"
+    ), {"td": trade_date, "codes": ts_codes})).fetchall()
+    out = {
+        r[0]: {
+            "name": (r[1] or "").replace(" ", ""),
+            "tag": r[2],
+            "first_time": r[3],
+            "open_times": int(r[4]),
+        }
+        for r in rows
+    }
+    # 没有涨停记录的票（候选但当日未涨停）也补 name
+    missing = [c for c in ts_codes if c not in out]
+    if missing:
+        rows2 = (await session.execute(text(
+            "SELECT ts_code, name FROM stock_basic WHERE ts_code = ANY(:codes)"
+        ), {"codes": missing})).fetchall()
+        for r in rows2:
+            out[r[0]] = {
+                "name": (r[1] or "").replace(" ", ""),
+                "tag": None, "first_time": None, "open_times": 0,
+            }
+    return out
+
+
 async def fetch_first_limit_times(
     session: AsyncSession, trade_date: str,
 ) -> dict[str, datetime]:
