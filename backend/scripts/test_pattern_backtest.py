@@ -24,25 +24,11 @@ from app.research.data.cb_resolver import (
 )
 from app.research.strategies.base_pattern import PatternSignal, PatternTrade
 from app.research.strategies.pattern_01_long1_natural import Pattern01
-from app.research.strategies.pattern_03_yizi_relay import Pattern03
-from app.research.strategies.pattern_04_yizi_break import Pattern04
-from app.research.strategies.pattern_05_yizi_down_bounce import Pattern05
-from app.research.strategies.pattern_06_double_break import Pattern06
-from app.research.strategies.pattern_07_down_open_buy import Pattern07
-from app.research.strategies.pattern_08_panic_bounce import Pattern08
-from app.research.strategies.pattern_10_new_theme_day1 import Pattern10
-from app.research.strategies.pattern_11_divergence_pullback import Pattern11
-from app.research.strategies.pattern_12_ambush_volume import Pattern12
 from sqlalchemy import text
 
 
-# 模式 9 不实现（依赖新闻系统 + 做空向操作，超出当前回测能力范围）
 PATTERNS = {
-    "1": Pattern01(),  # 龙头隔夜模式（合并原 1/2）
-    "3": Pattern03(), "4": Pattern04(),
-    "5": Pattern05(), "6": Pattern06(), "7": Pattern07(),
-    "8": Pattern08(),
-    "10": Pattern10(), "11": Pattern11(), "12": Pattern12(),
+    "1": Pattern01(),  # 龙头隔夜模式（合并原 1/2，事中共识 ≥3 只 ≥6%）
 }
 
 
@@ -217,28 +203,33 @@ async def fetch_sector_followers(
 ) -> dict:
     """拉同板块当日涨停股明细。
 
+    sector 是归一后的主线名（如"国产芯片"），SQL 用 THEME_TO_SUBS 反向展开
+    匹配 daily 行里所有 sub-name（如"芯片"/"洁净室"/"半导体"等）。
+
     返回 dict 含:
         followers: list[dict]   — 跟风列表（去 exclude_codes，按 first_time 排）
         max_board: int          — 板块最高板数
         max_stock: (name, tag)  — 板块最高板对应的票
         at_long1_count: int     — 龙1 封板时刻 (first_time <= long1_ft) 已经封板的跟风数
     """
+    from app.research.signals.theme_taxonomy import THEME_TO_SUBS
     if not sector or sector.startswith("("):
         return {"followers": [], "max_board": 0, "max_stock": None, "at_long1_count": 0}
+    sub_names = list({sector, *THEME_TO_SUBS.get(sector, [])})
     async with async_session() as s:
         rows = (await s.execute(text(
-            "SELECT ls.ts_code, ls.name, ls.first_time, ls.open_times, "
+            "SELECT DISTINCT ls.ts_code, ls.name, ls.first_time, ls.open_times, "
             "       lt.tag, COALESCE(ls.limit_times, 1) as lt_times "
             "FROM limit_stats ls "
             "JOIN daily_sector_review dsr ON dsr.ts_code=ls.ts_code "
             "     AND dsr.trade_date=ls.trade_date "
             "LEFT JOIN limit_list_ths lt ON lt.trade_date=ls.trade_date "
             "     AND lt.ts_code=ls.ts_code AND lt.limit_type='涨停池' "
-            "WHERE ls.trade_date=:d AND dsr.sector_name=:s "
-            "  AND dsr.source='bankuai' AND dsr.raw_meta->>'scope'='daily' "
+            "WHERE ls.trade_date=:d AND dsr.sector_name = ANY(:names) "
+            "  AND dsr.source IN ('bankuai','jiuyan','llm_v2') "
             "  AND ls.\"limit\"='U' "
             "ORDER BY ls.first_time"
-        ), {"d": trade_date, "s": sector})).fetchall()
+        ), {"d": trade_date, "names": sub_names})).fetchall()
 
     max_board, max_stock = 0, None
     out: list[dict] = []

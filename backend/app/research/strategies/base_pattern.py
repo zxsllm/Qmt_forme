@@ -170,28 +170,47 @@ def is_natural_limit(stock: LimitUpStock, ohlc: dict | None) -> bool:
 # ---------------------------------------------------------------------------
 
 async def load_sectors(
-    session: AsyncSession, trade_date: str, source: str = "bankuai"
+    session: AsyncSession,
+    trade_date: str,
+    source: str = "bankuai",
+    lookback_days: int = 5,
 ) -> dict[str, list[str]]:
-    """拉当日板块 → 成员映射。默认用板块必读 daily 标签。"""
-    if source == "bankuai":
-        sql = (
-            "SELECT sector_name, array_agg(ts_code ORDER BY board_count DESC) "
-            "FROM daily_sector_review "
-            "WHERE trade_date=:d AND source='bankuai' "
-            "AND raw_meta->>'scope'='daily' "
-            "AND sector_name NOT IN ('一季报预增','反弹','公告','其他') "
-            "AND ts_code IS NOT NULL "
-            "GROUP BY sector_name"
-        )
-    else:
-        sql = (
-            "SELECT sector_name, array_agg(ts_code) "
-            "FROM daily_sector_review "
-            "WHERE trade_date=:d AND source=:s AND ts_code IS NOT NULL "
-            "GROUP BY sector_name"
-        )
-    rows = (await session.execute(text(sql), {"d": trade_date, "s": source})).fetchall()
-    return {r[0]: list(r[1]) for r in rows}
+    """T 日盘前可知的板块成员名单 = 最近 N 个交易日（≤T-1）人工标签的并集。
+
+    源：bankuai + jiuyan + llm_v2 全部合并（盘前你能看到的题材股池都算进来）。
+    过滤：剔除"一季报预增/反弹/公告/其他"这类基本面属性 / 无主线归类。
+    归一：板块名通过 theme_taxonomy.SUB_TO_THEME 映射到主线
+         （芯片→国产芯片 / 锂电→电池产业链 / 钨/稀土→稀有金属 / PCB→PCB板 等）。
+
+    N 日滚动并集 = 老主线 T 日仍然抓得到（昨日已识别），新主线 T 日漏掉
+    （要等 T+1 进入名单），代价用户接受。
+    """
+    from app.research.signals.theme_taxonomy import SUB_TO_THEME
+
+    cal_rows = (await session.execute(text(
+        "SELECT cal_date FROM trade_cal "
+        "WHERE cal_date < :td AND is_open=1 "
+        "ORDER BY cal_date DESC LIMIT :n"
+    ), {"td": trade_date, "n": lookback_days})).fetchall()
+    if not cal_rows:
+        return {}
+    dates = [r[0] for r in cal_rows]
+
+    rows = (await session.execute(text(
+        "SELECT sector_name, array_agg(DISTINCT ts_code) "
+        "FROM daily_sector_review "
+        "WHERE trade_date = ANY(:dates) "
+        "AND source IN ('bankuai','jiuyan','llm_v2') "
+        "AND ts_code IS NOT NULL "
+        "AND sector_name NOT IN ('一季报预增','反弹','公告','其他') "
+        "GROUP BY sector_name"
+    ), {"dates": dates})).fetchall()
+
+    merged: dict[str, set[str]] = {}
+    for sec_name, codes in rows:
+        canonical = SUB_TO_THEME.get(sec_name, sec_name)
+        merged.setdefault(canonical, set()).update(codes)
+    return {sec: sorted(codes) for sec, codes in merged.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -199,57 +218,20 @@ async def load_sectors(
 # ---------------------------------------------------------------------------
 
 class BasePattern(ABC):
-    """所有模式策略的基类。"""
+    """模式策略基类 — 子类必须自己实现 find_signals。
+
+    基类只提供：
+    - 类属性（pattern_id / description / 等）
+    - 可复用辅助函数（load_sectors / detect_long_head / fetch_daily_ohlc / is_natural_limit / is_yizi 等）
+    都在本模块内 import 即用。
+    """
     pattern_id: str = ""
     description: str = ""
-    sector_min_size: int = 3      # 板块至少几只涨停才参与
-    needs_predictor: bool = False  # 是否需要"龙1次日一字预测"
+    sector_min_size: int = 1
+    needs_predictor: bool = False
 
+    @abstractmethod
     async def find_signals(
         self, session: AsyncSession, trade_date: str, source: str = "bankuai"
     ) -> list[PatternSignal]:
-        sectors = await load_sectors(session, trade_date, source)
-        if not sectors:
-            logger.warning("%s %s: no sectors", self.pattern_id, trade_date)
-            return []
-
-        signals: list[PatternSignal] = []
-        for sec_name, codes in sectors.items():
-            lh = await detect_long_head(session, trade_date, codes, sector_name=sec_name)
-            if not lh.long1:
-                continue
-            sector_size = len(lh.long1_group) + (1 if lh.long2 else 0) + len(lh.followers)
-            if sector_size < self.sector_min_size:
-                continue
-            # 拉龙1群组 + 龙2 + 影子龙的 OHLC（一字判定要用）
-            check_codes = list({s.ts_code for s in lh.long1_group})
-            if lh.long2 and lh.long2.ts_code not in check_codes:
-                check_codes.append(lh.long2.ts_code)
-            if lh.shadow and lh.shadow.ts_code not in check_codes:
-                check_codes.append(lh.shadow.ts_code)
-            ohlc_map = await fetch_daily_ohlc(session, trade_date, check_codes)
-
-            # 跑预测器（仅当模式声明需要）
-            prediction = None
-            if self.needs_predictor:
-                from app.research.signals.long1_yizi_predictor import predict_long1_yizi
-                prediction = await predict_long1_yizi(session, trade_date, codes, lh)
-
-            sig = await self._check(lh, sector_size, ohlc_map, trade_date, prediction=prediction)
-            if sig:
-                signals.append(sig)
-        return signals
-
-    @abstractmethod
-    async def _check(
-        self,
-        lh: LongHeadResult,
-        sector_size: int,
-        ohlc_map: dict[str, dict],
-        trade_date: str,
-        prediction=None,
-    ) -> PatternSignal | None:
-        """返回触发信号，或 None。
-
-        prediction: YiziPrediction 或 None（仅当 needs_predictor=True 时传入）
-        """
+        """返回 T 日触发的信号列表。"""

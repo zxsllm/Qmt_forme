@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -118,11 +119,9 @@ async def detect_long_head(
     stocks: list[LimitUpStock] = []
     for r in rows:
         ts_code, name, ft, lt_, consec, lt_times, ot, ths_tag, lamt, fmv, amt = r
-        board_count = max(
-            _parse_board_count(ths_tag, fallback=0),
-            int(consec),
-            int(lt_times),
-        )
+        # 板数优先取 ths_tag 解析（"X天Y板"的 Y），缺失时退回 lt_times。
+        # 不和 consec 取 max — consec 可能是连板天数（X），与板数(Y) 口径不一致。
+        board_count = _parse_board_count(ths_tag, fallback=int(lt_times))
         stocks.append(LimitUpStock(
             ts_code=ts_code, name=(name or "").replace(" ", ""),
             first_time=_parse_time(ft), last_time=_parse_time(lt_),
@@ -166,6 +165,62 @@ async def detect_long_head(
     result.followers = [s for s in stocks if s.ts_code not in exclude]
 
     return result
+
+
+def _hhmmss_to_dt(td: str, hhmmss: str) -> datetime | None:
+    if not td or not hhmmss:
+        return None
+    s = hhmmss.zfill(6)[:6]
+    try:
+        return datetime.strptime(td + s, "%Y%m%d%H%M%S")
+    except ValueError:
+        return None
+
+
+async def count_near_limit_at_minute(
+    session: AsyncSession,
+    trade_date: str,
+    sector_codes: list[str],
+    at_hhmmss: str,
+    threshold_pct: float = 9.0,
+) -> tuple[int, list[tuple[str, float]]]:
+    """事中共识代理：T 日 at_hhmmss 那一分钟，板块成员中涨幅 ≥ threshold_pct% 的票数。
+
+    实现：
+    - 用 stock_min_kline 一次 SQL 取每个 ts_code 在 target 时刻或之后的最早一根分钟线 close
+    - join stock_daily.pre_close 算涨幅 = (close - pre_close) / pre_close * 100
+    - 阈值默认 9.0%（接近涨停 / 已封板都算）
+
+    返回 (count, [(ts_code, pct), ...])。
+    """
+    if not sector_codes or not at_hhmmss:
+        return 0, []
+    target = _hhmmss_to_dt(trade_date, at_hhmmss)
+    if not target:
+        return 0, []
+    end = datetime.strptime(trade_date, "%Y%m%d").replace(hour=15, minute=0)
+
+    rows = (await session.execute(text(
+        "SELECT m.ts_code, m.close, d.pre_close FROM ("
+        "  SELECT DISTINCT ON (ts_code) ts_code, close "
+        "  FROM stock_min_kline "
+        "  WHERE ts_code = ANY(:codes) "
+        "    AND trade_time >= :target AND trade_time <= :end "
+        "    AND freq = '1min' "
+        "  ORDER BY ts_code, trade_time"
+        ") m "
+        "LEFT JOIN stock_daily d ON d.trade_date=:td AND d.ts_code=m.ts_code"
+    ), {"codes": sector_codes, "target": target, "end": end, "td": trade_date})).fetchall()
+
+    detail: list[tuple[str, float]] = []
+    for ts_code, close, pre_close in rows:
+        if not pre_close or pre_close <= 0 or close is None:
+            continue
+        pct = (float(close) - float(pre_close)) / float(pre_close) * 100.0
+        if pct >= threshold_pct:
+            detail.append((ts_code, pct))
+    detail.sort(key=lambda x: -x[1])
+    return len(detail), detail
 
 
 def _fmt_tag(s: LimitUpStock) -> str:

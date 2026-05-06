@@ -1207,7 +1207,7 @@ class DailySectorReview(Base):
 
     每行表示某一交易日、某一来源、某板块下的一只股票（或仅板块行：ts_code 为空）。
     冲突时优先级：source='bankuai' > source='jiuyan'。
-    用作算法 B (concept_tagger) 的训练/校准标签。
+    用作 LLM 主线判定（source='llm_v2'）的训练/校准真值标签。
     """
     __tablename__ = "daily_sector_review"
 

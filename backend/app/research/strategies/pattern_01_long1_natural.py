@@ -6,9 +6,11 @@
     （3）转债时间: b:低进，可以拿到尾盘隔夜
     "如果跟风没法涨停，低进赢面大，尾盘回落/第二天低开 程度小（龙一跨一字可以带）"
 
-入口（事中可见信号，不用未来函数）：
+入口（**严格事中可见，无未来函数**）：
     - 龙1 自然涨停（盘中封板，非一字开盘）— 一字情况走模式 3
-    - 板块涨停 ≥ 3 只
+    - **共识检查（事中代理）**：在龙1/影子龙 first_time 那一分钟，板块成员中
+      涨幅 ≥ INTRADAY_CONSENSUS_PCT（默认 6%）的票数 ≥ INTRADAY_CONSENSUS_MIN（默认 3）
+      → 替代原"全天涨停 ≥ 3 只"（那个回测时是回看，实盘当时根本不可能知道）
     - **不用预测器过滤** — 实盘里事中无法可靠判断次日是否一字
 
 多腿信号（每个板块发若干腿，事后统计哪些腿稳）：
@@ -28,7 +30,10 @@ import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.research.data.cb_resolver import find_cb_for_stock
-from app.research.signals.long_head_detector import LongHeadResult
+from app.research.signals.long_head_detector import (
+    LongHeadResult,
+    count_near_limit_at_minute,
+)
 from app.research.strategies.base_pattern import (
     BasePattern,
     PatternSignal,
@@ -37,15 +42,15 @@ from app.research.strategies.base_pattern import (
 
 logger = logging.getLogger(__name__)
 
+INTRADAY_CONSENSUS_MIN = 3       # 事中共识最少票数（含龙1自己/影子龙自己）
+INTRADAY_CONSENSUS_PCT = 6.0     # 阈值（盘中显著拉升即可，不要求接近涨停）
+
 
 class Pattern01(BasePattern):
     pattern_id = "pattern_01"
-    description = "龙头隔夜模式 — 龙1正股+影子龙正股+影子龙债（不预测次日）"
-    sector_min_size = 3
-    needs_predictor = False  # 不再用预测器分流
-
-    async def _check(self, lh, sector_size, ohlc_map, trade_date, prediction=None):
-        return None  # 多腿信号在 find_signals 里组装
+    description = "龙头隔夜模式 — 事中共识 + 龙1/影子龙正股 +（影子龙债）"
+    sector_min_size = 1              # 占位（事中共识替代），保留为基类兼容字段
+    needs_predictor = False
 
     async def find_signals(
         self,
@@ -66,13 +71,6 @@ class Pattern01(BasePattern):
             lh = await detect_long_head(session, trade_date, codes, sector_name=sec_name)
             if not lh.long1:
                 continue
-            sector_size = (
-                len(lh.long1_group)
-                + (1 if lh.long2 else 0)
-                + len(lh.followers)
-            )
-            if sector_size < self.sector_min_size:
-                continue
 
             check_codes = [lh.long1.ts_code]
             if lh.shadow and lh.shadow.ts_code not in check_codes:
@@ -83,6 +81,21 @@ class Pattern01(BasePattern):
             if not is_natural_limit(long1, ohlc_map.get(long1.ts_code)):
                 continue  # 一字 → 模式 3
 
+            # ── 事中共识检查（替代原全天 sector_size）──
+            # 在龙1 first_time 那一分钟，板块内涨幅 ≥ PCT% 的票数 ≥ MIN
+            l1_consensus_n, l1_consensus_detail = await count_near_limit_at_minute(
+                session, trade_date, codes, long1.first_time, INTRADAY_CONSENSUS_PCT
+            )
+            if l1_consensus_n < INTRADAY_CONSENSUS_MIN:
+                logger.info(
+                    "pattern_01 skip %s L1: consensus %d<%d at %s",
+                    sec_name, l1_consensus_n, INTRADAY_CONSENSUS_MIN, long1.first_time
+                )
+                # L1 共识不足，但影子龙时可能仍然成立 — 继续检查
+                l1_pass = False
+            else:
+                l1_pass = True
+
             base = dict(
                 trade_date=trade_date,
                 pattern=self.pattern_id,
@@ -92,41 +105,55 @@ class Pattern01(BasePattern):
                 long1_tag=long1.tag or f"{long1.limit_times}板",
                 long1_first_time=long1.first_time,
                 long1_open_times=long1.open_times,
-                sector_size=sector_size,
+                sector_size=l1_consensus_n,   # 改为事中共识数
                 holding="overnight",
                 sell_anchor="next_open",
             )
             reason_base = (
-                f"龙头隔夜 板块{sector_size}只 龙1首封"
-                f"{long1.first_time[:2]}:{long1.first_time[2:4]}"
+                f"龙头隔夜 事中共识{l1_consensus_n}只≥{INTRADAY_CONSENSUS_PCT:.0f}% "
+                f"龙1首封{long1.first_time[:2]}:{long1.first_time[2:4]}"
             )
 
-            # L1 龙1 正股
-            signals.append(PatternSignal(
-                **base,
-                pick_code=long1.ts_code,
-                pick_name=long1.name,
-                pick_role="long1",
-                pick_tag=long1.tag or f"{long1.limit_times}板",
-                reason=reason_base + " [L1 龙1正股]",
-                pick_kind="stock",
-                buy_anchor="intraday_at",
-                buy_anchor_time=long1.first_time,
-            ))
+            # L1 龙1 正股（共识达标才发）
+            if l1_pass:
+                signals.append(PatternSignal(
+                    **base,
+                    pick_code=long1.ts_code,
+                    pick_name=long1.name,
+                    pick_role="long1",
+                    pick_tag=long1.tag or f"{long1.limit_times}板",
+                    reason=reason_base + " [L1 龙1正股]",
+                    pick_kind="stock",
+                    buy_anchor="intraday_at",
+                    buy_anchor_time=long1.first_time,
+                ))
 
-            # L2 / L_CB：影子龙正股 + 影子龙债
+            # L2 / L_CB：影子龙正股 + 影子龙债（影子龙 first_time 时再做一次共识检查）
             if lh.shadow:
                 shadow = lh.shadow
                 window_tag = "≤15min" if lh.shadow_within_15min else ">15min"
+                sh_consensus_n, _ = await count_near_limit_at_minute(
+                    session, trade_date, codes, shadow.first_time, INTRADAY_CONSENSUS_PCT
+                )
+                if sh_consensus_n < INTRADAY_CONSENSUS_MIN:
+                    logger.info(
+                        "pattern_01 skip %s L2: consensus %d<%d at %s",
+                        sec_name, sh_consensus_n, INTRADAY_CONSENSUS_MIN, shadow.first_time
+                    )
+                    continue
 
-                # L2 影子龙正股 — 在影子龙 first_time 那分钟买
+                # L2 影子龙正股
                 signals.append(PatternSignal(
-                    **base,
+                    **{**base, "sector_size": sh_consensus_n},
                     pick_code=shadow.ts_code,
                     pick_name=shadow.name,
                     pick_role="shadow",
                     pick_tag=shadow.tag or f"{shadow.limit_times}板",
-                    reason=reason_base + f" [L2 影子龙正股 上车窗口{window_tag}]",
+                    reason=(
+                        f"龙头隔夜 事中共识{sh_consensus_n}只≥{INTRADAY_CONSENSUS_PCT:.0f}% "
+                        f"影子龙首封{shadow.first_time[:2]}:{shadow.first_time[2:4]} "
+                        f"[L2 影子龙正股 上车窗口{window_tag}]"
+                    ),
                     pick_kind="stock",
                     buy_anchor="intraday_at",
                     buy_anchor_time=shadow.first_time,
@@ -136,12 +163,15 @@ class Pattern01(BasePattern):
                 cb_code = await find_cb_for_stock(session, shadow.ts_code, trade_date)
                 if cb_code:
                     signals.append(PatternSignal(
-                        **base,
+                        **{**base, "sector_size": sh_consensus_n},
                         pick_code=cb_code,
                         pick_name=f"{shadow.name}转债",
                         pick_role="shadow_cb",
                         pick_tag=shadow.tag or f"{shadow.limit_times}板",
-                        reason=reason_base + " [L_CB 影子龙债 尾盘隔夜]",
+                        reason=(
+                            f"龙头隔夜 事中共识{sh_consensus_n}只≥{INTRADAY_CONSENSUS_PCT:.0f}% "
+                            f"[L_CB 影子龙债 尾盘隔夜]"
+                        ),
                         pick_kind="cb",
                         underlying_code=shadow.ts_code,
                         buy_anchor="today_close",

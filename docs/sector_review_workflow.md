@@ -107,24 +107,17 @@ INSERT INTO daily_sector_review (
 
 ---
 
-## 五、与算法 B 的对照
+## 五、入库后的下一步
 
-每日入库后，触发：
+人工标签（bankuai/jiuyan）入库后：
 
-```python
-# backend/app/research/signals/sector_main_line.py
-from app.research.signals.concept_tagger import compute_main_line
-auto = await compute_main_line(trade_date)  # 算法 B 输出
-manual = await load_manual_review(trade_date, source='bankuai')
+1. **跑 LLM 主线判定**（`scripts/llm_main_line.py YYYYMMDD`）→ source='llm_v2'
+2. **跑龙头隔夜回测**（`backend/scripts/test_pattern_backtest.py YYYYMMDD --pattern 1`）
+   - `load_sectors` 默认 source='bankuai'，用人工标签作板块成分输入
+   - 也可传 source='llm_v2' 看 LLM 标签作输入时的信号差异
 
-diff = compare(auto, manual)
-# 落 diff 表 / 前端面板，作为算法调参依据
-```
-
-差异指标：
-- 主线漏标率 = 人工有 / 算法没识别的板块占比
-- 主线错标率 = 算法识别 / 人工没列入的板块占比
-- 龙头错位率 = 人工主线下 top1 票 ≠ 算法龙1 占比
+**注**：算法 B (concept_tagger) 与 LLM v1 已淘汰。命中率/对照工具已删除。
+当前主要的"对照"是：把 LLM v2 / bankuai 分别作为 `load_sectors` 输入，看信号差。
 
 ---
 
