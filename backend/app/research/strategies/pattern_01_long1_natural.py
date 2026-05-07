@@ -63,7 +63,8 @@ from app.research.strategies.base_pattern import (
 logger = logging.getLogger(__name__)
 
 # ── 共识阈值（分层）──
-INTRADAY_CONSENSUS_MIN_L1 = 2    # L1 板块第一次触发最少票数
+INTRADAY_CONSENSUS_MIN_L1 = 2    # L1 板块第一次触发最少票数（已知主线）
+INTRADAY_CONSENSUS_MIN_L1_EMERGING = 3  # 萌芽板块 L1 加严：≥3 只 ≥6%（避免板块未真共振就触发）
 INTRADAY_CONSENSUS_MIN_L2 = 3    # L2 板块第二次触发最少票数
 INTRADAY_CONSENSUS_PCT_L1 = 6.0  # L1 共识阈值（不按板块缩放，"普涨"语义跨板块统一）
 INTRADAY_CONSENSUS_PCT_L2 = 8.0  # L2 共识阈值
@@ -358,11 +359,15 @@ class Pattern01(BasePattern):
         is_emerging: bool,
         t1_one_word: set[str],
     ) -> tuple[str, datetime] | None:
-        # 板块共识：≥6% 票数
+        # 板块共识：≥6% 票数（萌芽板块 ≥3 只 / 已知主线 ≥2 只）
+        min_required = (
+            INTRADAY_CONSENSUS_MIN_L1_EMERGING if is_emerging
+            else INTRADAY_CONSENSUS_MIN_L1
+        )
         consensus_n = count_codes_above_pct_intraday(
             quotes, codes, minute_dt, INTRADAY_CONSENSUS_PCT_L1
         )
-        if consensus_n < INTRADAY_CONSENSUS_MIN_L1:
+        if consensus_n < min_required:
             return None
         # 找第一个满足"自身 ≥ 涨停限制×0.9"的票（C 规则：T-1 严格一字票剔除）
         for cand in codes:
@@ -380,7 +385,7 @@ class Pattern01(BasePattern):
                 "pattern_01 funnel %s sector=%s L1 trigger at=%s code=%s "
                 "self_pct=%.2f%%≥%.1f%% consensus=%d/%d",
                 trade_date, sec_name, _hhmm_label(minute_dt), cand,
-                q.pct, self_threshold, consensus_n, INTRADAY_CONSENSUS_MIN_L1,
+                q.pct, self_threshold, consensus_n, min_required,
             )
             buy_time_str = _hhmmss(minute_dt)
             l1_meta = meta.get(cand, {})
