@@ -162,17 +162,20 @@ class Pattern01(BasePattern):
         # 展示元数据：中文名 / 板数标签 / 真实 first_time / 炸板数（仅输出用，不影响决策）
         meta = await fetch_stock_meta(session, trade_date, all_codes)
 
-        # ── B 规则：板块级闸门（开盘 09:30 板块内任何成员封板 → 板块当日整体作废）──
+        # ── B 规则：板块级闸门（开盘 09:30 板块内任何成员"开盘瞬间"封板 → 板块作废）──
+        # 用 is_limit_at_open（基于 9:30 那根的 open 字段）而不是 close —— 集合竞价封死
+        # 后秒级炸开的票（如 5/7 博敏电子 open=18.76=涨停 / close=18.68）也会被正确识别
         open_minute = datetime.strptime(trade_date, "%Y%m%d").replace(hour=9, minute=30)
         invalidated: set[str] = set()
         for sec_name, codes in sectors.items():
             for code in codes:
                 q = quotes.get((code, open_minute))
-                if q and q.is_limit:
+                if q and q.is_limit_at_open:
                     invalidated.add(sec_name)
                     logger.info(
-                        "pattern_01 funnel %s sector=%s INVALIDATED: %s 09:30 已封板（一字/秒板启动）",
-                        trade_date, sec_name, code,
+                        "pattern_01 funnel %s sector=%s INVALIDATED: %s 09:30 一字/秒板启动 "
+                        "(open=%.2f≥涨停%.2f)",
+                        trade_date, sec_name, code, q.open, q.up_limit,
                     )
                     break
 
@@ -191,14 +194,15 @@ class Pattern01(BasePattern):
                 sorted(t1_one_word)[:20],
             )
         # D 规则：从每个板块的 codes 里剔除"T-1 一字 + T 日 09:30 没一字开"的票
+        # 同样用 is_limit_at_open 判定"一字开" — 与 B 规则口径一致
         for sec_name in list(sectors.keys()):
             original = list(sectors[sec_name])
             kept = []
             for code in original:
                 if code in t1_one_word:
                     q = quotes.get((code, open_minute))
-                    if q is None or not q.is_limit:
-                        # T-1 一字接力但 T 日没一字开 → 整个剔除
+                    if q is None or not q.is_limit_at_open:
+                        # T-1 一字接力但 T 日 9:30 open 没到涨停 → 整个剔除
                         logger.info(
                             "pattern_01 funnel %s sector=%s 剔除 %s (T-1 一字 + T 日 09:30 未一字开)",
                             trade_date, sec_name, code,

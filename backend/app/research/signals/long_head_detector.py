@@ -385,11 +385,13 @@ def format_result(r: LongHeadResult) -> str:
 # 一根分钟线的精简快照
 @dataclass
 class MinuteQuote:
+    open: float         # 那一分钟的开盘价（9:30 那根 = 集合竞价撮合价）
     close: float
     pre_close: float
     up_limit: float     # 当日真实涨停价（含主板10%/创业科创20%/北交所30%/ST 5%）
-    pct: float          # 涨幅 %
-    is_limit: bool      # close >= up_limit - 0.005（容差 0.5 分）
+    pct: float          # 涨幅 %（基于 close）
+    is_limit: bool      # close >= up_limit - 0.005（持续封板判定，给 D/升级用）
+    is_limit_at_open: bool  # open >= up_limit - 0.005（开盘瞬间封板判定，给 B/D 用）
 
 
 # (ts_code, minute_dt) -> MinuteQuote
@@ -435,7 +437,7 @@ async def fetch_minute_quotes(
     if not ts_codes:
         return {}
     rows = (await session.execute(text(
-        "SELECT m.ts_code, m.trade_time, m.close, d.pre_close, l.up_limit "
+        "SELECT m.ts_code, m.trade_time, m.open, m.close, d.pre_close, l.up_limit "
         "FROM stock_min_kline m "
         "LEFT JOIN stock_daily d ON d.trade_date=:td AND d.ts_code=m.ts_code "
         "LEFT JOIN stock_limit l ON l.trade_date=:td AND l.ts_code=m.ts_code "
@@ -450,19 +452,22 @@ async def fetch_minute_quotes(
     })).fetchall()
 
     out: QuoteMap = {}
-    for ts_code, trade_time, close, pre_close, up_limit in rows:
+    for ts_code, trade_time, open_, close, pre_close, up_limit in rows:
         if close is None or pre_close is None or pre_close <= 0:
             continue
         # 截断到分钟（DB 可能存秒数）
         minute_dt = trade_time.replace(second=0, microsecond=0)
+        o = float(open_) if open_ is not None else float(close)
         c = float(close)
         p = float(pre_close)
         # up_limit 缺失时回退到主板 10%（容差 0.1%）
         ul = float(up_limit) if up_limit is not None else round(p * 1.10, 2)
         pct = (c - p) / p * 100.0
-        is_limit = c >= ul - 0.005   # 容差 0.5 分（处理浮点抖动）
+        is_limit = c >= ul - 0.005          # 容差 0.5 分（持续封板）
+        is_limit_at_open = o >= ul - 0.005  # 开盘瞬间封板（识别集合竞价封死后炸开）
         out[(ts_code, minute_dt)] = MinuteQuote(
-            close=c, pre_close=p, up_limit=ul, pct=pct, is_limit=is_limit,
+            open=o, close=c, pre_close=p, up_limit=ul, pct=pct,
+            is_limit=is_limit, is_limit_at_open=is_limit_at_open,
         )
     return out
 
