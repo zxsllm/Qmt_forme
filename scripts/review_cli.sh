@@ -199,6 +199,10 @@ try:
     risk_raw = json.load(open(tmp / "risk_alerts.json"))
 except (json.JSONDecodeError, FileNotFoundError):
     risk_raw = {}
+try:
+    review_data = json.load(open(tmp / "data.json"))
+except (json.JSONDecodeError, FileNotFoundError):
+    review_data = {}
 
 sent_data = sentiment.get("data", sentiment)
 
@@ -206,8 +210,28 @@ sc = core.get("strategy_conclusion", {})
 if isinstance(sc, dict):
     sc = json.dumps(sc, ensure_ascii=False)
 
+# 从 review_data.index_summary 取三大指数收盘价（000001.SH=上证 / 399001.SZ=深证成指 / 399006.SZ=创业板）
+idx_map = {row.get("ts_code"): row for row in (review_data.get("index_summary") or [])
+           if isinstance(row, dict)}
+sh, sz, cy = idx_map.get("000001.SH", {}), idx_map.get("399001.SZ", {}), idx_map.get("399006.SZ", {})
+
+# 市场宽度：成交额(亿)、涨跌家数
+breadth = review_data.get("market_breadth") or {}
+up_n, down_n = breadth.get("up_count"), breadth.get("down_count")
+ud_ratio = (up_n / down_n) if (up_n is not None and down_n) else None
+
 payload = {
     "trade_date": trade_date,
+    "sh_close": sh.get("close"),
+    "sh_pct_chg": sh.get("pct_chg"),
+    "sz_close": sz.get("close"),
+    "sz_pct_chg": sz.get("pct_chg"),
+    "cy_close": cy.get("close"),
+    "cy_pct_chg": cy.get("pct_chg"),
+    "total_amount": breadth.get("total_amount_yi"),
+    "up_count": up_n,
+    "down_count": down_n,
+    "up_down_ratio": ud_ratio,
     "temperature": sent_data.get("temperature"),
     "limit_up_count": sent_data.get("limit_up"),
     "limit_down_count": sent_data.get("limit_down"),

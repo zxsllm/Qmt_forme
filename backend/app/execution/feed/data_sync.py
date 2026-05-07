@@ -1328,44 +1328,100 @@ def run_post_market_sync(trade_date: str) -> dict[str, bool]:
     return results
 
 
-def _run_minute_subprocess(label: str, script_name: str, log_prefix: str) -> None:
-    """Generic launcher for a minute-data sync subprocess.
+# 防重入锁：scheduler 的 _run_minute_sync 和 health 自动修复的 subprocess_repairs
+# 都会调 run_minutes_subprocess / run_cb_minutes_subprocess。如果两边同一时刻触发，
+# 会起两个子进程同时写入 stock_min_kline，且 sync_tracker 状态被互相覆盖。
+import threading as _threading
+_min_subprocess_locks: dict[str, _threading.Lock] = {}
+_min_subprocess_locks_guard = _threading.Lock()
 
-    Sync status is not tracked via sync_tracker (subprocess exits asynchronously);
-    health check infers freshness from MAX(trade_time) on the target table.
+
+def _get_min_subprocess_lock(tracker_table: str) -> _threading.Lock:
+    with _min_subprocess_locks_guard:
+        lock = _min_subprocess_locks.get(tracker_table)
+        if lock is None:
+            lock = _threading.Lock()
+            _min_subprocess_locks[tracker_table] = lock
+        return lock
+
+
+def _run_minute_subprocess(label: str, script_name: str, log_prefix: str,
+                           tracker_table: str) -> None:
+    """Run a minute-data sync subprocess and report status to sync_tracker.
+
+    阻塞等待子进程退出，按 returncode 区分成功/失败。sanity check 失败 (exit=2)
+    会在 sync_tracker 上写 fail，data_health 据此触发自动修复。本函数自身被
+    asyncio.to_thread 包裹调用，不阻塞主事件循环；同时持有 module-level 锁，
+    防止 scheduler 主链路与健康自修复同时拉起两个子进程。
     """
     from datetime import date
 
-    script = SCRIPTS_DIR / script_name
-    if not script.exists():
-        logger.error("%s script not found: %s", label, script)
+    from app.shared.sync_tracker import sync_tracker
+
+    lock = _get_min_subprocess_lock(tracker_table)
+    if not lock.acquire(blocking=False):
+        logger.warning("%s subprocess already running, skip duplicate trigger", label)
         return
+
     try:
+        today_str = date.today().strftime("%Y%m%d")
+        sync_tracker.begin(tracker_table, trade_date=today_str)
+
+        script = SCRIPTS_DIR / script_name
+        if not script.exists():
+            logger.error("%s script not found: %s", label, script)
+            sync_tracker.fail(tracker_table, FileNotFoundError(f"{script} not found"))
+            return
         log_dir = SCRIPTS_DIR.parent / "logs"
         log_dir.mkdir(exist_ok=True)
-        log_file = log_dir / f"{log_prefix}_{date.today().strftime('%Y%m%d')}.log"
-        fh = open(log_file, "a", encoding="utf-8")
-        proc = subprocess.Popen(
-            [sys.executable, str(script)],
-            cwd=str(SCRIPTS_DIR.parent),
-            stdout=fh,
-            stderr=subprocess.STDOUT,
-        )
-        logger.info("%s subprocess started (PID=%d), log=%s", label, proc.pid, log_file)
-    except Exception:
-        logger.exception("failed to start %s subprocess", label)
+        log_file = log_dir / f"{log_prefix}_{today_str}.log"
+        try:
+            with open(log_file, "a", encoding="utf-8") as fh:
+                proc = subprocess.Popen(
+                    [sys.executable, str(script)],
+                    cwd=str(SCRIPTS_DIR.parent),
+                    stdout=fh,
+                    stderr=subprocess.STDOUT,
+                )
+                logger.info("%s subprocess started (PID=%d), log=%s", label, proc.pid, log_file)
+                rc = proc.wait()
+        except Exception as e:
+            logger.exception("failed to run %s subprocess", label)
+            sync_tracker.fail(tracker_table, e)
+            return
+
+        if rc == 0:
+            sync_tracker.success(tracker_table)
+            logger.info("%s subprocess completed OK (rc=0)", label)
+        elif rc == 2:
+            err = RuntimeError(
+                f"{label} sanity check failed (rc=2): "
+                f"target date coverage <95%, Tushare data likely not yet published"
+            )
+            sync_tracker.fail(tracker_table, err)
+            logger.warning("%s sanity FAIL (rc=2) — health check may auto-repair", label)
+        else:
+            err = RuntimeError(f"{label} subprocess exited with rc={rc}")
+            sync_tracker.fail(tracker_table, err)
+            logger.warning("%s subprocess exited with rc=%d", label, rc)
+    finally:
+        lock.release()
 
 
 def run_minutes_subprocess() -> None:
-    """Launch sync_minutes_incremental.py as isolated subprocess (stocks)."""
-    _run_minute_subprocess("minutes", "sync_minutes_incremental.py", "sync_minutes")
+    """Run sync_minutes_incremental.py and track status (stocks 1min)."""
+    _run_minute_subprocess(
+        "minutes", "sync_minutes_incremental.py", "sync_minutes",
+        tracker_table="stock_min_kline",
+    )
 
 
 def run_cb_minutes_subprocess() -> None:
-    """Launch sync_cb_minutes_incremental.py as isolated subprocess (convertible bonds).
+    """Run sync_cb_minutes_incremental.py and track status (convertible bonds 1min).
 
     CB universe is ~370 bonds (vs ~5300 stocks), so this finishes in 5-10 min.
-    Run in parallel with run_minutes_subprocess: separate Tushare endpoints,
-    no rate-limit collision because TushareService throttles per-process.
     """
-    _run_minute_subprocess("cb_minutes", "sync_cb_minutes_incremental.py", "sync_cb_minutes")
+    _run_minute_subprocess(
+        "cb_minutes", "sync_cb_minutes_incremental.py", "sync_cb_minutes",
+        tracker_table="cb_min_kline",
+    )

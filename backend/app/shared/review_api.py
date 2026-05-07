@@ -344,6 +344,8 @@ async def aggregate_review_data(session: AsyncSession, trade_date: str) -> dict:
             "risk_summary": nrow[5],
         }
 
+    readiness = await check_review_readiness(session, trade_date)
+
     return {
         "trade_date": trade_date,
         "index_summary": index_summary,
@@ -358,6 +360,73 @@ async def aggregate_review_data(session: AsyncSession, trade_date: str) -> dict:
         "intraday_news": intraday_news,
         "dragon_tiger": dragon_tiger,
         "saved_narrative": saved_narrative,
+        "data_readiness": readiness,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Helper: 复盘启动前的数据就绪度预检
+# ---------------------------------------------------------------------------
+
+# 必须项（这些缺，复盘不应启动；17:30 等到 19:30 就强制启动并标记 missing）
+_REQUIRED_TABLES: list[tuple[str, str, int]] = [
+    # (table, time_col, min_count_for_ready)
+    ("stock_daily", "trade_date", 5000),  # 全市场至少 5000 只入库
+    ("index_daily", "trade_date", 6),     # 至少 6 个核心指数
+    ("sw_daily",    "trade_date", 1),     # 申万行业至少 1 行
+]
+
+# 重要项（缺也启动，但 LLM 通过 data_readiness 知道哪些维度未就绪，prompt 会要求显式标注）
+_IMPORTANT_TABLES: list[tuple[str, str, int]] = [
+    ("top_list",        "trade_date", 1),
+    ("hm_detail",       "trade_date", 1),
+    ("limit_cpt_list",  "trade_date", 1),
+    ("moneyflow_dc",    "trade_date", 1),
+    ("limit_list_ths",  "trade_date", 1),
+    ("margin",          "trade_date", 1),
+]
+
+
+async def check_review_readiness(session: AsyncSession, trade_date: str) -> dict:
+    """检查复盘所需各张表当日是否就绪。
+
+    返回结构供两个调用点使用：
+      - scheduler 主循环：判断 17:30 复盘是否可启动（看 all_required_ready）
+      - LLM prompt：知道哪些维度数据缺失，避免编造（看 tables 子字典）
+    """
+    tables: dict[str, dict] = {}
+    missing_required: list[str] = []
+    missing_important: list[str] = []
+
+    async def _check(level: str, table: str, col: str, min_count: int) -> None:
+        try:
+            r = await session.execute(
+                text(f"SELECT COUNT(*) FROM {table} WHERE {col} = :td"),
+                {"td": trade_date},
+            )
+            count = int(r.scalar() or 0)
+        except Exception:
+            count = 0
+        ready = count >= min_count
+        tables[table] = {
+            "level": level,
+            "ready": ready,
+            "count": count,
+            "min_count": min_count,
+        }
+        if not ready:
+            (missing_required if level == "required" else missing_important).append(table)
+
+    for table, col, mc in _REQUIRED_TABLES:
+        await _check("required", table, col, mc)
+    for table, col, mc in _IMPORTANT_TABLES:
+        await _check("important", table, col, mc)
+
+    return {
+        "all_required_ready": len(missing_required) == 0,
+        "missing_required": missing_required,
+        "missing_important": missing_important,
+        "tables": tables,
     }
 
 

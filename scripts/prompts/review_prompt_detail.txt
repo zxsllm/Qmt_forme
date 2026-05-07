@@ -27,6 +27,7 @@
 - 6个字段全部必填，每个至少引用3个具体数据点（代码、数字），与核心判断保持一致
 - 所有数字精确引用数据原值，禁止四舍五入或近似
 - 指数收盘价/涨跌幅以 index_summary 为准，新闻中的盘中数据仅作背景参考，不可作为收盘结论
+- **数据可用性硬约束**：检查输入数据中的 `data_readiness.tables` 字段。若某张表 ready=false，对应章节必须明确标注"该数据 Tushare 端尚未发布"，禁止编造或用其他维度替代。例如 top_list 未就绪 → board_play_summary 不得编造龙虎榜资金性质；hm_detail 未就绪 → sentiment_narrative 不得编造游资动向；limit_cpt_list 未就绪 → board_play_summary 不得给出涨停题材统计。
 - JSON字符串内引用文本用中文引号「」，确保输出是合法JSON
 
 ## 今日市场数据

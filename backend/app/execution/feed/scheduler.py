@@ -32,11 +32,12 @@ AFTERNOON_CLOSE = dtime(15, 0)
 POLL_INTERVAL = 1.2  # 50 calls/min extreme rate
 FULL_MARKET_PATTERN = "6*.SH,0*.SZ,3*.SZ,9*.BJ"
 
-SETTLEMENT_TIME = dtime(15, 1)
-SYNC_TIME = dtime(15, 30)
-REVIEW_TIME = dtime(16, 0)       # generate daily review after sync completes
-VERIFY_TIME = dtime(16, 5)       # auto-verify morning plan after review + sync
-BACKFILL_TIME = dtime(16, 10)    # backfill monitor event returns after sync
+SETTLEMENT_TIME = dtime(15, 1)   # 实时收盘指数快照持久化（Tushare 兜底）
+SYNC_TIME = dtime(17, 0)         # daily/财务/资金流等慢的 Tushare 接口
+MIN_SYNC_TIME = dtime(17, 0)     # 分钟数据独立子进程（与 daily-sync 并行）
+REVIEW_TIME = dtime(17, 30)      # daily-sync 完成后生成日复盘
+VERIFY_TIME = dtime(17, 35)      # 复盘后自动验证早盘计划
+BACKFILL_TIME = dtime(18, 0)     # 监控事件回填（依赖分钟同步完成）
 PLAN_TIME = dtime(8, 0)          # generate morning plan before market open
 
 
@@ -231,7 +232,9 @@ class MarketDataScheduler:
         self._last_check_date: date | None = None
         self._settled_today = False
         self._sync_started_today = False
-        self._synced_today = False
+        self._synced_today = False         # daily-sync 完成（不含分钟）
+        self._min_sync_started_today = False
+        self._min_sync_done_today = False  # 分钟同步完成（独立轨道）
         self._last_news_pull: float = 0
         self._last_mins_pull: float = 0
         self._last_alert_pull: float = 0
@@ -605,6 +608,8 @@ class MarketDataScheduler:
                     self._settled_today = False
                     self._sync_started_today = False
                     self._synced_today = False
+                    self._min_sync_started_today = False
+                    self._min_sync_done_today = False
                     self._review_generated_today = False
                     self._plan_generated_today = False
                     self._plan_verified_today = False
@@ -685,20 +690,33 @@ class MarketDataScheduler:
                     if not self._sync_started_today and t >= SYNC_TIME:
                         self._run_daily_sync()
                         self._sync_started_today = True
-                        # _synced_today 在 _sync 完成后由回调设 True，
-                        # 防止 review 在 sync 未完成时就开始生成
+                        # _synced_today 在 daily-sync 完成后由回调设 True，
+                        # 不含分钟同步（分钟同步走独立轨道）
+                    if not self._min_sync_started_today and t >= MIN_SYNC_TIME:
+                        self._run_minute_sync()
+                        self._min_sync_started_today = True
+                        # _min_sync_done_today 在子进程退出后由回调设 True
+                    # 复盘启动门槛：daily-sync 完成 + 关键数据就绪。
+                    # daily-sync "完成" 不等于"数据齐"——run_post_market_sync 内部用 _run 包子任务，
+                    # 任一接口失败仍会标记 _synced_today=True；龙虎榜/行业等 Tushare 端发布慢时，
+                    # 表里依然空。预检按表实际行数判定，缺必须项就等下一轮 tick；
+                    # 19:30 强制兜底，防止 Tushare 当天瘫导致复盘永远不出。
                     if not self._review_generated_today and t >= REVIEW_TIME and self._synced_today:
-                        self._run_review_generation()
-                        self._review_generated_today = True
+                        ready, missing = await self._check_review_ready_or_force(t)
+                        if ready:
+                            self._run_review_generation()
+                            self._review_generated_today = True
+                            if missing:
+                                logger.warning("review forced at 19:30 with missing data: %s", missing)
                     if not self._plan_verified_today and t >= VERIFY_TIME and self._synced_today:
                         self._run_plan_verification()
                         self._plan_verified_today = True
-                    # backfill 不依赖 _synced_today：daily-sync 哪怕失败，
-                    # 16:10 一到也跑一次，能补多少补多少；下次 tick 还会重试，
-                    # 直到 _backfill_done_today=True。
+                    # backfill 优先等分钟同步完成（_min_sync_done_today=True），
+                    # 18:30 仍未完成则强制跑一次（能补多少补多少，避免分钟同步永远卡死时回填永远不跑）。
                     if not self._backfill_done_today and t >= BACKFILL_TIME:
-                        self._run_monitor_backfill()
-                        self._backfill_done_today = True
+                        if self._min_sync_done_today or t >= dtime(18, 30):
+                            self._run_monitor_backfill()
+                            self._backfill_done_today = True
                     await asyncio.sleep(self.NEWS_REFRESH_INTERVAL)
 
                 else:
@@ -852,28 +870,54 @@ class MarketDataScheduler:
         )
 
     def _run_daily_sync(self) -> None:
-        """Post-market: run all data syncs in-process + minutes as subprocess."""
-        from app.execution.feed.data_sync import (
-            run_post_market_sync, run_minutes_subprocess, run_cb_minutes_subprocess,
-        )
+        """Post-market daily sync: 日K/财务/资金流/新闻/龙虎榜等（不含分钟数据）。
+
+        分钟数据走独立轨道（_run_minute_sync），由 MIN_SYNC_TIME 单独触发，
+        避免分钟同步耗时长拖累 daily-sync 完成时间，进而推迟 REVIEW。
+        """
+        from app.execution.feed.data_sync import run_post_market_sync
 
         trade_date = datetime.now().strftime("%Y%m%d")
-        logger.info("post-market sync: starting in-process for %s", trade_date)
+        logger.info("post-market daily-sync: starting for %s", trade_date)
 
         async def _sync():
             try:
                 await asyncio.to_thread(run_post_market_sync, trade_date)
-                # Both launchers are fire-and-forget Popen, so the two subprocesses
-                # run concurrently. They use independent Tushare clients (separate
-                # processes) so per-process RPM throttling does not collide.
-                await asyncio.to_thread(run_minutes_subprocess)
-                await asyncio.to_thread(run_cb_minutes_subprocess)
                 self._synced_today = True
-                logger.info("post-market sync completed for %s", trade_date)
+                logger.info("post-market daily-sync completed for %s", trade_date)
             except Exception:
-                logger.exception("post-market sync failed")
+                logger.exception("post-market daily-sync failed")
 
         asyncio.ensure_future(_sync())
+
+    def _run_minute_sync(self) -> None:
+        """Independent minute-data sync track: stocks + convertible bonds.
+
+        独立于 daily-sync 触发，便于 REVIEW 在 daily-sync 完成后立刻跑，
+        而不必等待耗时 30 分钟的全市场分钟同步。
+        """
+        from app.execution.feed.data_sync import (
+            run_minutes_subprocess, run_cb_minutes_subprocess,
+        )
+
+        trade_date = datetime.now().strftime("%Y%m%d")
+        logger.info("post-market min-sync: launching subprocesses for %s", trade_date)
+
+        async def _msync():
+            try:
+                # 两个子进程并行跑（独立 Tushare 客户端，无 RPM 冲突）。
+                # gather 等到两边都退出再置 _min_sync_done_today，
+                # 给 backfill 提供"分钟同步已完成"的依据。
+                await asyncio.gather(
+                    asyncio.to_thread(run_minutes_subprocess),
+                    asyncio.to_thread(run_cb_minutes_subprocess),
+                )
+                self._min_sync_done_today = True
+                logger.info("post-market min-sync completed for %s", trade_date)
+            except Exception:
+                logger.exception("post-market min-sync failed")
+
+        asyncio.ensure_future(_msync())
 
     NEWS_RETENTION_DAYS = 30
 
@@ -1015,6 +1059,35 @@ class MarketDataScheduler:
     # ------------------------------------------------------------------
     # Review & plan generation
     # ------------------------------------------------------------------
+
+    REVIEW_FORCE_TIME = dtime(19, 30)  # 必须项就绪超时强制启动复盘
+
+    async def _check_review_ready_or_force(self, t: dtime) -> tuple[bool, list[str]]:
+        """复盘启动预检：必须项就绪则放行，未就绪则等下一轮，19:30 强制启动。
+
+        返回 (是否可启动, 缺失的必须项列表)。
+        缺失列表非空仅在强制启动时返回，正常情况返回 ([] 或 [缺的列表], False)。
+        """
+        from app.shared.review_api import check_review_readiness
+        from app.core.database import async_session
+
+        trade_date = datetime.now().strftime("%Y%m%d")
+        try:
+            async with async_session() as session:
+                readiness = await check_review_readiness(session, trade_date)
+        except Exception:
+            logger.exception("review readiness check failed; forcing review start to avoid deadlock")
+            return True, ["readiness_check_failed"]
+
+        missing = readiness.get("missing_required", []) or []
+        if readiness.get("all_required_ready"):
+            return True, []
+        if t >= self.REVIEW_FORCE_TIME:
+            return True, missing
+        # 节流日志：每 5 分钟整点附近输出一次"还在等什么"，避免刷屏
+        if t.minute % 5 == 0 and t.second < 10:
+            logger.info("review waiting for required tables: %s", missing)
+        return False, missing
 
     def _run_review_generation(self) -> None:
         """Post-market: generate daily review via CLI subprocess.

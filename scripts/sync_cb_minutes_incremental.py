@@ -86,13 +86,25 @@ def get_latest_per_code() -> dict[str, str]:
 
 
 def get_latest_trade_date() -> str:
-    today = datetime.now().strftime("%Y%m%d")
+    """跨 0 点后但今天尚未收盘（< 15:00）时返回上一交易日，避免 sanity check 误报。
+    详见 sync_minutes_incremental.py 同名函数注释。"""
+    from datetime import time as _time
+    now = datetime.now()
+    today = now.strftime("%Y%m%d")
+    closed_today = now.time() >= _time(15, 0)
     with engine.connect() as conn:
-        result = conn.execute(text(
-            "SELECT cal_date FROM trade_cal "
-            "WHERE is_open = 1 AND cal_date <= :td "
-            "ORDER BY cal_date DESC LIMIT 1"
-        ), {"td": today})
+        if closed_today:
+            result = conn.execute(text(
+                "SELECT cal_date FROM trade_cal "
+                "WHERE is_open = 1 AND cal_date <= :td "
+                "ORDER BY cal_date DESC LIMIT 1"
+            ), {"td": today})
+        else:
+            result = conn.execute(text(
+                "SELECT cal_date FROM trade_cal "
+                "WHERE is_open = 1 AND cal_date < :td "
+                "ORDER BY cal_date DESC LIMIT 1"
+            ), {"td": today})
         row = result.fetchone()
         return row[0] if row else today
 

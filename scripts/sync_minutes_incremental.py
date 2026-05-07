@@ -74,14 +74,29 @@ def get_latest_per_stock() -> dict[str, str]:
 
 
 def get_latest_trade_date() -> str:
-    """Get the most recent trading day from trade_cal."""
-    today = datetime.now().strftime("%Y%m%d")
+    """Get the most recent FULLY-CLOSED trading day from trade_cal.
+
+    跨 0 点后但今天尚未收盘（< 15:00）时，必须返回上一交易日。否则会要求一个
+    Tushare 端尚未发布的 target_date，sanity check 误报 0% 覆盖率失败。
+    示例：5-7 00:01 启动应返回 20260506（昨日已收盘），而非 20260507（今日未开盘）。
+    """
+    from datetime import time as _time
+    now = datetime.now()
+    today = now.strftime("%Y%m%d")
+    closed_today = now.time() >= _time(15, 0)
     with engine.connect() as conn:
-        result = conn.execute(text(
-            "SELECT cal_date FROM trade_cal "
-            "WHERE is_open = 1 AND cal_date <= :td "
-            "ORDER BY cal_date DESC LIMIT 1"
-        ), {"td": today})
+        if closed_today:
+            result = conn.execute(text(
+                "SELECT cal_date FROM trade_cal "
+                "WHERE is_open = 1 AND cal_date <= :td "
+                "ORDER BY cal_date DESC LIMIT 1"
+            ), {"td": today})
+        else:
+            result = conn.execute(text(
+                "SELECT cal_date FROM trade_cal "
+                "WHERE is_open = 1 AND cal_date < :td "
+                "ORDER BY cal_date DESC LIMIT 1"
+            ), {"td": today})
         row = result.fetchone()
         return row[0] if row else today
 

@@ -38,9 +38,9 @@ PHASES = [
     ("morning",      dtime(9, 30),  dtime(11, 30)),
     ("lunch",        dtime(11, 30), dtime(13, 0)),
     ("afternoon",    dtime(13, 0),  dtime(15, 0)),
-    ("settlement",   dtime(15, 0),  dtime(15, 30)),
-    ("post_sync",    dtime(15, 30), dtime(17, 0)),
-    ("evening",      dtime(17, 0),  dtime(23, 59, 59)),
+    ("settlement",   dtime(15, 0),  dtime(17, 0)),     # 收盘到同步触发前
+    ("post_sync",    dtime(17, 0),  dtime(18, 30)),    # daily-sync + min-sync 窗口
+    ("evening",      dtime(18, 30), dtime(23, 59, 59)),
 ]
 
 PHASE_LABELS = {
@@ -76,6 +76,8 @@ CHECKS: list[CheckDef] = [
     CheckDef("stk_auction",      "集合竞价",   "console", "trade_date", "daily",     "minor",     "stk_auction"),
     CheckDef("eco_cal",          "财经日历",   "console", "date",       "event",     "minor",     "eco_cal"),
     CheckDef("moneyflow_ind_ths","行业资金流", "console", "trade_date", "daily",     "minor",     "moneyflow_ind"),
+    CheckDef("stock_min_kline",  "全市场分钟", "console", "trade_time", "daily",     "important", "stock_min_kline"),
+    CheckDef("cb_min_kline",     "可转债分钟", "console", "trade_time", "daily",     "minor",     "cb_min_kline"),
 
     # ── /trading 交易中心 ──
     CheckDef("sim_account",  "模拟账户", "trading", "", "static", "minor", ""),
@@ -141,10 +143,23 @@ def get_market_phase(now: datetime | None = None) -> str:
 
 
 async def _max_date(session: AsyncSession, table: str, col: str) -> str:
+    """Return MAX(col) normalized to YYYYMMDD.
+
+    支持三种字段类型：
+      - String 'YYYYMMDD'（如 trade_date）：直接返回
+      - DATE / TIMESTAMP（如 trade_time）：strftime 成 YYYYMMDD
+      - 其他字符串（如 'YYYY-MM-DD HH:MM:SS'）：去掉非数字字符后取前 8 位
+    """
     try:
         r = await session.execute(text(f"SELECT max({col}) FROM {table}"))
         val = r.scalar_one_or_none()
-        return str(val) if val else ""
+        if val is None:
+            return ""
+        if hasattr(val, "strftime"):
+            return val.strftime("%Y%m%d")
+        s = str(val)
+        digits = "".join(ch for ch in s if ch.isdigit())
+        return digits[:8] if len(digits) >= 8 else s
     except Exception:
         return ""
 
@@ -193,9 +208,11 @@ def _diagnose(table: str, actual: str, expected: str, phase: str, is_trade_day: 
         return {"reason": "non_trade_day", "detail": "非交易日无新数据", "action": "无需操作", "repairable": False}
 
     if table in ("top_list", "dc_hot", "hm_detail", "top_inst"):
-        if phase in ("morning", "afternoon", "lunch", "call_auction"):
+        # settlement (15:00-17:00) 期间 Tushare 龙虎榜/游资类数据通常 16:00-17:00 才发布，
+        # 不应让健康检查在 15:00 立即触发自动修复（一定空跑）。
+        if phase in ("morning", "afternoon", "lunch", "call_auction", "settlement"):
             return {"reason": "tushare_delay", "detail": "盘后数据，交易时段尚未发布", "action": "收盘后自动同步", "repairable": False}
-        elif phase in ("evening", "post_sync", "pre_market", "settlement"):
+        elif phase in ("evening", "post_sync", "pre_market"):
             return {"reason": "not_synced", "detail": f"盘后同步未成功拉取到{expected}数据", "action": "自动重新同步", "repairable": True}
 
     if not effective or effective.last_attempt == 0:
@@ -279,7 +296,23 @@ def _trigger_repair_async(tables: list[str], trade_date: str):
                 if sn:
                     sync_groups.add(sn)
 
+            # 子进程类（分钟数据）特判：调 run_minutes_subprocess / run_cb_minutes_subprocess。
+            # 这些函数内部已经写 sync_tracker.begin/success/fail，并按子进程 returncode 区分。
+            subprocess_repairs = {
+                "stock_min_kline": data_sync.run_minutes_subprocess,
+                "cb_min_kline":    data_sync.run_cb_minutes_subprocess,
+            }
+
             for group in sync_groups:
+                if group in subprocess_repairs:
+                    try:
+                        subprocess_repairs[group]()  # 内部已写 sync_tracker
+                        logger.info("auto-repair: %s subprocess finished", group)
+                    except Exception as exc:
+                        sync_tracker.fail(group, exc)
+                        logger.warning("auto-repair: %s subprocess failed: %s", group, exc)
+                    continue
+
                 sync_tracker.begin(group, trade_date)
                 try:
                     with psycopg2.connect(db_url) as conn:
