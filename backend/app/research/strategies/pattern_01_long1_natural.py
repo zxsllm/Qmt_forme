@@ -38,6 +38,8 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import text
+
 from app.research.data.cb_resolver import find_cb_for_stock
 from app.research.signals.long_head_detector import (
     QuoteMap,
@@ -49,6 +51,7 @@ from app.research.signals.long_head_detector import (
     fetch_industries,
     fetch_minute_quotes,
     fetch_stock_meta,
+    fetch_t1_solid_one_word_limits,
     iter_trading_minutes,
 )
 from app.research.strategies.base_pattern import (
@@ -62,9 +65,11 @@ logger = logging.getLogger(__name__)
 # ── 共识阈值（分层）──
 INTRADAY_CONSENSUS_MIN_L1 = 2    # L1 板块第一次触发最少票数
 INTRADAY_CONSENSUS_MIN_L2 = 3    # L2 板块第二次触发最少票数
-INTRADAY_CONSENSUS_PCT_L1 = 6.0  # L1 阈值
-INTRADAY_CONSENSUS_PCT_L2 = 8.0  # L2 阈值
-SELF_TRIGGER_PCT = 9.0           # 自身涨幅触发线（封板前夕）
+INTRADAY_CONSENSUS_PCT_L1 = 6.0  # L1 共识阈值（不按板块缩放，"普涨"语义跨板块统一）
+INTRADAY_CONSENSUS_PCT_L2 = 8.0  # L2 共识阈值
+# 自身涨幅触发线："接近封板"语义，按板块涨停限制按比例缩放：
+#   主板 ±10% → 9%   创业/科创 ±20% → 18%   北交所 ±30% → 27%   ST ±5% → 4.5%
+SELF_TRIGGER_RATIO = 0.9         # = up_limit_pct × 0.9
 
 # ── L_CB 升级隔夜条件（持仓 underlying 首次封板时评估）──
 L_CB_OVERNIGHT_LIMIT_MIN = 3     # 板块累计涨停 ≥ 3 只（共识强）
@@ -113,7 +118,7 @@ def _set_sell_today_close(hold: _CbHolding) -> None:
 
 class Pattern01(BasePattern):
     pattern_id = "pattern_01"
-    description = "龙头隔夜模式 v6 — 严格事中扫描（与模拟盘对齐）"
+    description = "自然涨停启动的龙头隔夜模式（事中）"
     sector_min_size = 1
     needs_predictor = False
 
@@ -157,6 +162,51 @@ class Pattern01(BasePattern):
         # 展示元数据：中文名 / 板数标签 / 真实 first_time / 炸板数（仅输出用，不影响决策）
         meta = await fetch_stock_meta(session, trade_date, all_codes)
 
+        # ── B 规则：板块级闸门（开盘 09:30 板块内任何成员封板 → 板块当日整体作废）──
+        open_minute = datetime.strptime(trade_date, "%Y%m%d").replace(hour=9, minute=30)
+        invalidated: set[str] = set()
+        for sec_name, codes in sectors.items():
+            for code in codes:
+                q = quotes.get((code, open_minute))
+                if q and q.is_limit:
+                    invalidated.add(sec_name)
+                    logger.info(
+                        "pattern_01 funnel %s sector=%s INVALIDATED: %s 09:30 已封板（一字/秒板启动）",
+                        trade_date, sec_name, code,
+                    )
+                    break
+
+        # ── C/D 规则：T-1 严格一字票名单 ──
+        # C：T-1 一字 + T 日一字开 → 归模式 3、4（B 规则已作废板块）
+        # D：T-1 一字 + T 日没一字开（09:30 close < up_limit）→ 从板块剔除，
+        #    不参与共识、不作 L1/L2 候选、不发跟风债
+        t1_date = await self._prev_trade_date(session, trade_date)
+        t1_one_word = (
+            await fetch_t1_solid_one_word_limits(session, t1_date) if t1_date else set()
+        )
+        if t1_one_word:
+            logger.info(
+                "pattern_01 funnel %s T-1=%s 严格一字 %d 只: %s",
+                trade_date, t1_date, len(t1_one_word),
+                sorted(t1_one_word)[:20],
+            )
+        # D 规则：从每个板块的 codes 里剔除"T-1 一字 + T 日 09:30 没一字开"的票
+        for sec_name in list(sectors.keys()):
+            original = list(sectors[sec_name])
+            kept = []
+            for code in original:
+                if code in t1_one_word:
+                    q = quotes.get((code, open_minute))
+                    if q is None or not q.is_limit:
+                        # T-1 一字接力但 T 日没一字开 → 整个剔除
+                        logger.info(
+                            "pattern_01 funnel %s sector=%s 剔除 %s (T-1 一字 + T 日 09:30 未一字开)",
+                            trade_date, sec_name, code,
+                        )
+                        continue
+                kept.append(code)
+            sectors[sec_name] = kept
+
         # 4. 状态机
         # 每个板块: {"l1": (code, minute) | None, "l2": (code, minute) | None}
         sector_state: dict[str, dict] = {sec: {"l1": None, "l2": None} for sec in sectors}
@@ -174,6 +224,8 @@ class Pattern01(BasePattern):
         for minute_dt in minutes:
             # ── 板块 L1 / L2 触发检查 ──
             for sec_name, codes in sectors.items():
+                if sec_name in invalidated:
+                    continue   # B 规则：板块开盘已封板 → 整体作废
                 state = sector_state[sec_name]
                 is_emerging = sec_name.startswith(EMERGING_SECTOR_PREFIX)
 
@@ -182,6 +234,7 @@ class Pattern01(BasePattern):
                     triggered = await self._check_and_trigger_l1(
                         session, trade_date, sec_name, codes, minute_dt,
                         quotes, meta, signals, cb_holdings, is_emerging,
+                        t1_one_word,
                     )
                     if triggered:
                         state["l1"] = triggered  # (code, minute)
@@ -190,6 +243,7 @@ class Pattern01(BasePattern):
                     l1_code = state["l1"][0]
                     triggered = await self._check_and_trigger_l2(
                         sec_name, codes, l1_code, minute_dt, quotes, meta, signals,
+                        t1_one_word,
                     )
                     if triggered:
                         state["l2"] = triggered
@@ -197,6 +251,8 @@ class Pattern01(BasePattern):
             # ── 萌芽主线：检查这一分钟是否有新增封板的萌芽票 ──
             for industry, em_codes in emerging_codes_by_industry.items():
                 virtual_name = f"{EMERGING_SECTOR_PREFIX}{industry})"
+                if virtual_name in invalidated:
+                    continue   # B 规则同样作用于萌芽板块
                 if virtual_name in emerging_triggered:
                     continue
                 # 看哪些萌芽票在这一分钟首次封板
@@ -296,6 +352,7 @@ class Pattern01(BasePattern):
         signals: list[PatternSignal],
         cb_holdings: list[_CbHolding],
         is_emerging: bool,
+        t1_one_word: set[str],
     ) -> tuple[str, datetime] | None:
         # 板块共识：≥6% 票数
         consensus_n = count_codes_above_pct_intraday(
@@ -303,17 +360,23 @@ class Pattern01(BasePattern):
         )
         if consensus_n < INTRADAY_CONSENSUS_MIN_L1:
             return None
-        # 找第一个满足"自身 ≥9%"的票
+        # 找第一个满足"自身 ≥ 涨停限制×0.9"的票（C 规则：T-1 严格一字票剔除）
         for cand in codes:
+            if cand in t1_one_word:
+                continue   # T-1 一字接力，不买它本身
             q = quotes.get((cand, minute_dt))
-            if q is None or q.pct < SELF_TRIGGER_PCT:
+            if q is None:
+                continue
+            up_limit_pct = (q.up_limit / q.pre_close - 1) * 100
+            self_threshold = up_limit_pct * SELF_TRIGGER_RATIO
+            if q.pct < self_threshold:
                 continue
             # 触发！
             logger.info(
                 "pattern_01 funnel %s sector=%s L1 trigger at=%s code=%s "
-                "self_pct=%.2f%% consensus=%d/%d",
+                "self_pct=%.2f%%≥%.1f%% consensus=%d/%d",
                 trade_date, sec_name, _hhmm_label(minute_dt), cand,
-                q.pct, consensus_n, INTRADAY_CONSENSUS_MIN_L1,
+                q.pct, self_threshold, consensus_n, INTRADAY_CONSENSUS_MIN_L1,
             )
             buy_time_str = _hhmmss(minute_dt)
             l1_meta = meta.get(cand, {})
@@ -401,6 +464,7 @@ class Pattern01(BasePattern):
         quotes: QuoteMap,
         meta: dict[str, dict],
         signals: list[PatternSignal],
+        t1_one_word: set[str],
     ) -> tuple[str, datetime] | None:
         consensus_n = count_codes_above_pct_intraday(
             quotes, codes, minute_dt, INTRADAY_CONSENSUS_PCT_L2
@@ -408,16 +472,20 @@ class Pattern01(BasePattern):
         if consensus_n < INTRADAY_CONSENSUS_MIN_L2:
             return None
         for cand in codes:
-            if cand == l1_code:
-                continue
+            if cand == l1_code or cand in t1_one_word:
+                continue   # 排除 L1 + C 规则 T-1 一字
             q = quotes.get((cand, minute_dt))
-            if q is None or q.pct < SELF_TRIGGER_PCT:
+            if q is None:
+                continue
+            up_limit_pct = (q.up_limit / q.pre_close - 1) * 100
+            self_threshold = up_limit_pct * SELF_TRIGGER_RATIO
+            if q.pct < self_threshold:
                 continue
             logger.info(
                 "pattern_01 funnel sector=%s L2 trigger at=%s code=%s "
-                "self_pct=%.2f%% consensus=%d/%d",
+                "self_pct=%.2f%%≥%.1f%% consensus=%d/%d",
                 sec_name, _hhmm_label(minute_dt), cand,
-                q.pct, consensus_n, INTRADAY_CONSENSUS_MIN_L2,
+                q.pct, self_threshold, consensus_n, INTRADAY_CONSENSUS_MIN_L2,
             )
             buy_time_str = _hhmmss(minute_dt)
             l1_meta = meta.get(l1_code, {})
@@ -453,3 +521,16 @@ class Pattern01(BasePattern):
             ))
             return (cand, minute_dt)
         return None
+
+    # ───────────────────────────────────────────────────────────────────────
+    # 工具：取 T-1 交易日（用于拉一字票名单）
+    # ───────────────────────────────────────────────────────────────────────
+    @staticmethod
+    async def _prev_trade_date(session: AsyncSession, td: str) -> str | None:
+        r = await session.execute(text(
+            "SELECT cal_date FROM trade_cal "
+            "WHERE cal_date < :d AND is_open=1 "
+            "ORDER BY cal_date DESC LIMIT 1"
+        ), {"d": td})
+        row = r.fetchone()
+        return row[0] if row else None

@@ -387,8 +387,9 @@ def format_result(r: LongHeadResult) -> str:
 class MinuteQuote:
     close: float
     pre_close: float
+    up_limit: float     # 当日真实涨停价（含主板10%/创业科创20%/北交所30%/ST 5%）
     pct: float          # 涨幅 %
-    is_limit: bool      # close >= pre × 1.099 即视为已封板
+    is_limit: bool      # close >= up_limit - 0.005（容差 0.5 分）
 
 
 # (ts_code, minute_dt) -> MinuteQuote
@@ -434,9 +435,10 @@ async def fetch_minute_quotes(
     if not ts_codes:
         return {}
     rows = (await session.execute(text(
-        "SELECT m.ts_code, m.trade_time, m.close, d.pre_close "
+        "SELECT m.ts_code, m.trade_time, m.close, d.pre_close, l.up_limit "
         "FROM stock_min_kline m "
         "LEFT JOIN stock_daily d ON d.trade_date=:td AND d.ts_code=m.ts_code "
+        "LEFT JOIN stock_limit l ON l.trade_date=:td AND l.ts_code=m.ts_code "
         "WHERE m.ts_code = ANY(:codes) "
         "  AND m.trade_time >= :open_dt AND m.trade_time <= :close_dt "
         "  AND m.freq='1min'"
@@ -448,17 +450,19 @@ async def fetch_minute_quotes(
     })).fetchall()
 
     out: QuoteMap = {}
-    for ts_code, trade_time, close, pre_close in rows:
+    for ts_code, trade_time, close, pre_close, up_limit in rows:
         if close is None or pre_close is None or pre_close <= 0:
             continue
         # 截断到分钟（DB 可能存秒数）
         minute_dt = trade_time.replace(second=0, microsecond=0)
         c = float(close)
         p = float(pre_close)
+        # up_limit 缺失时回退到主板 10%（容差 0.1%）
+        ul = float(up_limit) if up_limit is not None else round(p * 1.10, 2)
         pct = (c - p) / p * 100.0
-        is_limit = c >= p * 1.099   # A 股主板 +10%（容差 0.1%）
+        is_limit = c >= ul - 0.005   # 容差 0.5 分（处理浮点抖动）
         out[(ts_code, minute_dt)] = MinuteQuote(
-            close=c, pre_close=p, pct=pct, is_limit=is_limit,
+            close=c, pre_close=p, up_limit=ul, pct=pct, is_limit=is_limit,
         )
     return out
 
@@ -590,6 +594,26 @@ async def fetch_stock_meta(
                 "tag": None, "first_time": None, "open_times": 0,
             }
     return out
+
+
+async def fetch_t1_solid_one_word_limits(
+    session: AsyncSession, t1_date: str,
+) -> set[str]:
+    """T-1 严格一字板名单：open=high=low=close=up_limit。
+
+    用于 C 规则：T 日扫描 L1/L2 时直接剔除这些票本身（防接力炸板，如 5/6 越剑智能 -13%）。
+    严格一字（必须四点重合在涨停价）— 丰元股份 4/30（low<涨停的秒板）不命中。
+    """
+    rows = (await session.execute(text(
+        "SELECT d.ts_code FROM stock_daily d "
+        "JOIN stock_limit l ON l.ts_code=d.ts_code AND l.trade_date=d.trade_date "
+        "WHERE d.trade_date=:td "
+        "  AND ABS(d.open  - l.up_limit) < 0.005 "
+        "  AND ABS(d.high  - l.up_limit) < 0.005 "
+        "  AND ABS(d.low   - l.up_limit) < 0.005 "
+        "  AND ABS(d.close - l.up_limit) < 0.005"
+    ), {"td": t1_date})).fetchall()
+    return {r[0] for r in rows}
 
 
 async def fetch_first_limit_times(
