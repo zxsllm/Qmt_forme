@@ -75,6 +75,9 @@ SELF_TRIGGER_RATIO = 0.9         # = up_limit_pct × 0.9
 # ── L_CB 升级隔夜条件（持仓 underlying 首次封板时评估）──
 L_CB_OVERNIGHT_LIMIT_MIN = 3     # 板块累计涨停 ≥ 3 只（共识强）
 L_CB_OVERNIGHT_OPEN_MAX = 1      # 板块累计炸板 ≤ 1 只（情绪稳）
+# ── 漏① 修复（思路 B）：升级隔夜后不锁死，每分钟复查板块炸板 ──
+# 升级时阈值是 broken ≤ 1，后续累计炸板再增加到 ≥ 3 即"题材开始崩" → 回退 T+0
+L_CB_RECHECK_BROKEN_MAX = 3
 
 # ── 萌芽主线 ──
 EMERGING_CUTOFF = "113000"             # 早盘结束前都监控
@@ -303,13 +306,30 @@ class Pattern01(BasePattern):
                         trade_date, hold.sector, hold.underlying, _hhmm_label(minute_dt),
                         sec_limit_n, L_CB_OVERNIGHT_LIMIT_MIN,
                         sec_broken_n, L_CB_OVERNIGHT_OPEN_MAX,
-                        "overnight" if upgrade else "T+0",
+                        "overnight (待复查)" if upgrade else "T+0",
                     )
                     if upgrade:
                         _set_sell_overnight(hold)
+                        # 漏① 修复：暂定隔夜，不锁死 evaluated，每分钟继续监控板块
                     else:
                         _set_sell_t0(hold, minute_dt)
-                    hold.evaluated = True
+                        hold.evaluated = True
+                elif hold.ever_limit and not hold.evaluated:
+                    # 漏① 修复：A 分支已暂定隔夜，每分钟复查板块炸板
+                    # 累计炸板 ≥ L_CB_RECHECK_BROKEN_MAX → 题材开始崩 → 回退 T+0
+                    sec_limit_n, sec_broken_n = count_sector_limit_state_intraday(
+                        quotes, hold.sector_codes, minute_dt,
+                    )
+                    if sec_broken_n >= L_CB_RECHECK_BROKEN_MAX:
+                        logger.info(
+                            "pattern_01 L_CB recheck-fallback %s sector=%s underlying=%s "
+                            "at=%s limits=%d broken=%d≥%d → 回退 T+0",
+                            trade_date, hold.sector, hold.underlying,
+                            _hhmm_label(minute_dt),
+                            sec_limit_n, sec_broken_n, L_CB_RECHECK_BROKEN_MAX,
+                        )
+                        _set_sell_t0(hold, minute_dt)
+                        hold.evaluated = True
                 elif not hold.ever_limit:
                     # 还没封板 → 检查止损：close 跌破当日均价
                     vwap = compute_vwap_until(quotes, hold.underlying, minute_dt)
@@ -323,15 +343,26 @@ class Pattern01(BasePattern):
                         _set_sell_t0(hold, minute_dt)
                         hold.evaluated = True
 
-        # 6. 收尾：未 evaluated 的 L_CB 默认按 close T+0 出（保守）
+        # 6. 收尾：未 evaluated 的 L_CB
+        #   - ever_limit=True：A 分支暂定隔夜后板块没崩到回退阈值 → 维持 next_open
+        #   - ever_limit=False：全天没封过板也没跌破 VWAP → 保守 today_close
         for hold in cb_holdings:
-            if not hold.evaluated:
+            if hold.evaluated:
+                continue
+            if hold.ever_limit:
+                logger.info(
+                    "pattern_01 L_CB confirm-overnight %s sector=%s underlying=%s "
+                    "→ 板块未崩，维持 next_open",
+                    trade_date, hold.sector, hold.underlying,
+                )
+                # sell_anchor 已在 A 分支设为 next_open，不动
+            else:
                 logger.info(
                     "pattern_01 L_CB default %s sector=%s underlying=%s → today_close",
                     trade_date, hold.sector, hold.underlying,
                 )
                 _set_sell_today_close(hold)
-                hold.evaluated = True
+            hold.evaluated = True
 
         # 7. 释放预拉数据（用户原话："回测预拉可以，后面释放掉就行"）
         quotes.clear()
@@ -369,96 +400,113 @@ class Pattern01(BasePattern):
         )
         if consensus_n < min_required:
             return None
-        # 找第一个满足"自身 ≥ 涨停限制×0.9"的票（C 规则：T-1 严格一字票剔除）
-        for cand in codes:
-            if cand in t1_one_word:
+        # 收集所有满足"自身 ≥ 涨停限制×0.9"的候选（C 规则：T-1 严格一字票剔除）
+        candidates = []
+        for cand_code in codes:
+            if cand_code in t1_one_word:
                 continue   # T-1 一字接力，不买它本身
-            q = quotes.get((cand, minute_dt))
-            if q is None:
+            q_cand = quotes.get((cand_code, minute_dt))
+            if q_cand is None:
                 continue
-            up_limit_pct = (q.up_limit / q.pre_close - 1) * 100
-            self_threshold = up_limit_pct * SELF_TRIGGER_RATIO
-            if q.pct < self_threshold:
+            up_limit_pct_cand = (q_cand.up_limit / q_cand.pre_close - 1) * 100
+            self_threshold_cand = up_limit_pct_cand * SELF_TRIGGER_RATIO
+            if q_cand.pct < self_threshold_cand:
                 continue
-            # 触发！
-            logger.info(
-                "pattern_01 funnel %s sector=%s L1 trigger at=%s code=%s "
-                "self_pct=%.2f%%≥%.1f%% consensus=%d/%d",
-                trade_date, sec_name, _hhmm_label(minute_dt), cand,
-                q.pct, self_threshold, consensus_n, min_required,
-            )
-            buy_time_str = _hhmmss(minute_dt)
-            l1_meta = meta.get(cand, {})
-            l1_name = l1_meta.get("name") or cand
-            l1_tag = l1_meta.get("tag") or f"{q.pct:.1f}%"
-            l1_first_time = l1_meta.get("first_time") or buy_time_str
-            l1_open_times = l1_meta.get("open_times", 0)
-            base = dict(
-                trade_date=trade_date,
-                pattern=self.pattern_id,
-                sector=sec_name,
-                long1_code=cand,
-                long1_name=l1_name,
-                long1_tag=l1_tag,
-                long1_first_time=l1_first_time,
-                long1_open_times=l1_open_times,
-                sector_size=consensus_n,
-                holding="overnight",
-                sell_anchor="next_open",
-            )
-            # L1 信号（萌芽主线不发 L1 正股）
-            if not is_emerging:
-                signals.append(PatternSignal(
-                    **base,
-                    pick_code=cand,
-                    pick_name=l1_name,
-                    pick_role="long1",
-                    pick_tag=l1_tag,
-                    reason=(
-                        f"事中L1 自身{q.pct:.1f}%≥9% 板块共识{consensus_n}只≥6% "
-                        f"触发{_hhmm_label(minute_dt)} [L1 正股]"
-                    ),
-                    pick_kind="stock",
-                    buy_anchor="intraday_at",
-                    buy_anchor_time=buy_time_str,
-                ))
-            # L_CB 同步：板块所有跟风（除 L1 自己外）的债
-            role_prefix = "萌芽-" if is_emerging else ""
-            for follower_code in codes:
-                if follower_code == cand:
-                    continue
-                cb_code = await find_cb_for_stock(session, follower_code, trade_date)
-                if not cb_code:
-                    continue
-                f_meta = meta.get(follower_code, {})
-                f_name = f_meta.get("name") or follower_code
-                f_tag = f_meta.get("tag") or "未涨停"
-                cb_sig = PatternSignal(
-                    **{**base, "sell_anchor": "next_open"},  # placeholder，主循环回填
-                    pick_code=cb_code,
-                    pick_name=f"{f_name}转债",
-                    pick_role="follower_cb",
-                    pick_tag=f_tag,
-                    reason=(
-                        f"事中L1同步发债 板块共识{consensus_n}只≥6% "
-                        f"买{_hhmm_label(minute_dt)} underlying={f_name}({follower_code}) "
-                        f"[L_CB {role_prefix}跟风债]"
-                    ),
-                    pick_kind="cb",
-                    underlying_code=follower_code,
-                    buy_anchor="intraday_at",
-                    buy_anchor_time=buy_time_str,
+            candidates.append((cand_code, q_cand))
+        if not candidates:
+            return None
+        # 按"龙1度"排序（老师"龙1=第一只涨停"的事中代理）：
+        #   1) 当前已封板的优先（is_limit=True）— 事中可见的"已涨停"事实
+        #   2) 涨幅高的优先 — tie-breaker
+        # 不引入 open_times（当日累计字段，避免未来函数风险；炸板"扣分"逻辑预留）
+        candidates.sort(key=lambda x: (0 if x[1].is_limit else 1, -x[1].pct))
+        cand, q = candidates[0]
+        # 触发！
+        logger.info(
+            "pattern_01 funnel %s sector=%s L1 trigger at=%s code=%s "
+            "self_pct=%.2f%% is_limit=%s consensus=%d/%d candidates=%d",
+            trade_date, sec_name, _hhmm_label(minute_dt), cand,
+            q.pct, q.is_limit, consensus_n, min_required, len(candidates),
+        )
+        buy_time_str = _hhmmss(minute_dt)
+        l1_meta = meta.get(cand, {})
+        l1_name = l1_meta.get("name") or cand
+        l1_tag = l1_meta.get("tag") or f"{q.pct:.1f}%"
+        l1_first_time = l1_meta.get("first_time") or buy_time_str
+        l1_open_times = l1_meta.get("open_times", 0)
+        base = dict(
+            trade_date=trade_date,
+            pattern=self.pattern_id,
+            sector=sec_name,
+            long1_code=cand,
+            long1_name=l1_name,
+            long1_tag=l1_tag,
+            long1_first_time=l1_first_time,
+            long1_open_times=l1_open_times,
+            sector_size=consensus_n,
+            holding="overnight",
+            sell_anchor="next_open",
+        )
+        # L1 信号（萌芽主线不发 L1 正股）
+        if not is_emerging:
+            signals.append(PatternSignal(
+                **base,
+                pick_code=cand,
+                pick_name=l1_name,
+                pick_role="long1",
+                pick_tag=l1_tag,
+                reason=(
+                    f"事中L1 自身{q.pct:.1f}%≥9% 板块共识{consensus_n}只≥6% "
+                    f"触发{_hhmm_label(minute_dt)} [L1 正股]"
+                ),
+                pick_kind="stock",
+                buy_anchor="intraday_at",
+                buy_anchor_time=buy_time_str,
+            ))
+        # L_CB 同步：板块所有跟风（除 L1 自己外）的债
+        role_prefix = "萌芽-" if is_emerging else ""
+        for follower_code in codes:
+            if follower_code == cand:
+                continue
+            # 错①修复：跟风当前已涨停 = 老师"卖点"，不能在卖点买它的债
+            f_q = quotes.get((follower_code, minute_dt))
+            if f_q is not None and f_q.is_limit:
+                logger.info(
+                    "pattern_01 funnel %s sector=%s skip cb of %s (已涨停=卖点)",
+                    trade_date, sec_name, follower_code,
                 )
-                signals.append(cb_sig)
-                cb_holdings.append(_CbHolding(
-                    signal=cb_sig,
-                    underlying=follower_code,
-                    sector=sec_name,
-                    sector_codes=codes,
-                    buy_minute=minute_dt,
-                ))
-            return (cand, minute_dt)
-        return None
+                continue
+            cb_code = await find_cb_for_stock(session, follower_code, trade_date)
+            if not cb_code:
+                continue
+            f_meta = meta.get(follower_code, {})
+            f_name = f_meta.get("name") or follower_code
+            f_tag = f_meta.get("tag") or "未涨停"
+            cb_sig = PatternSignal(
+                **{**base, "sell_anchor": "next_open"},  # placeholder，主循环回填
+                pick_code=cb_code,
+                pick_name=f"{f_name}转债",
+                pick_role="follower_cb",
+                pick_tag=f_tag,
+                reason=(
+                    f"事中L1同步发债 板块共识{consensus_n}只≥6% "
+                    f"买{_hhmm_label(minute_dt)} underlying={f_name}({follower_code}) "
+                    f"[L_CB {role_prefix}跟风债]"
+                ),
+                pick_kind="cb",
+                underlying_code=follower_code,
+                buy_anchor="intraday_at",
+                buy_anchor_time=buy_time_str,
+            )
+            signals.append(cb_sig)
+            cb_holdings.append(_CbHolding(
+                signal=cb_sig,
+                underlying=follower_code,
+                sector=sec_name,
+                sector_codes=codes,
+                buy_minute=minute_dt,
+            ))
+        return (cand, minute_dt)
 
     # ───────────────────────────────────────────────────────────────────────
     # L2 触发：板块第二次（不同票）"≥9% + 板块 ≥3 只 ≥8%"
@@ -480,56 +528,63 @@ class Pattern01(BasePattern):
         )
         if consensus_n < INTRADAY_CONSENSUS_MIN_L2:
             return None
-        for cand in codes:
-            if cand == l1_code or cand in t1_one_word:
-                continue   # 排除 L1 + C 规则 T-1 一字
-            q = quotes.get((cand, minute_dt))
-            if q is None:
+        # 收集 L2 候选（排除 L1 + C 规则 T-1 一字）
+        candidates = []
+        for cand_code in codes:
+            if cand_code == l1_code or cand_code in t1_one_word:
                 continue
-            up_limit_pct = (q.up_limit / q.pre_close - 1) * 100
-            self_threshold = up_limit_pct * SELF_TRIGGER_RATIO
-            if q.pct < self_threshold:
+            q_cand = quotes.get((cand_code, minute_dt))
+            if q_cand is None:
                 continue
-            logger.info(
-                "pattern_01 funnel sector=%s L2 trigger at=%s code=%s "
-                "self_pct=%.2f%%≥%.1f%% consensus=%d/%d",
-                sec_name, _hhmm_label(minute_dt), cand,
-                q.pct, self_threshold, consensus_n, INTRADAY_CONSENSUS_MIN_L2,
-            )
-            buy_time_str = _hhmmss(minute_dt)
-            l1_meta = meta.get(l1_code, {})
-            cand_meta = meta.get(cand, {})
-            cand_name = cand_meta.get("name") or cand
-            cand_tag = cand_meta.get("tag") or f"{q.pct:.1f}%"
-            cand_first = cand_meta.get("first_time") or buy_time_str
-            cand_open = cand_meta.get("open_times", 0)
-            signals.append(PatternSignal(
-                trade_date=minute_dt.strftime("%Y%m%d"),
-                pattern=self.pattern_id,
-                sector=sec_name,
-                long1_code=l1_code,
-                long1_name=l1_meta.get("name") or l1_code,
-                long1_tag=l1_meta.get("tag") or "",
-                long1_first_time=l1_meta.get("first_time") or "",
-                long1_open_times=l1_meta.get("open_times", 0),
-                sector_size=consensus_n,
-                pick_code=cand,
-                pick_name=cand_name,
-                pick_role="shadow",
-                pick_tag=cand_tag,
-                reason=(
-                    f"事中L2 自身{q.pct:.1f}%≥9% 板块共识{consensus_n}只≥8% "
-                    f"触发{_hhmm_label(minute_dt)} 首封{cand_first[:2]}:{cand_first[2:4]} "
-                    f"炸{cand_open}次 [L2 正股]"
-                ),
-                pick_kind="stock",
-                buy_anchor="intraday_at",
-                buy_anchor_time=buy_time_str,
-                holding="overnight",
-                sell_anchor="next_open",
-            ))
-            return (cand, minute_dt)
-        return None
+            up_limit_pct_cand = (q_cand.up_limit / q_cand.pre_close - 1) * 100
+            self_threshold_cand = up_limit_pct_cand * SELF_TRIGGER_RATIO
+            if q_cand.pct < self_threshold_cand:
+                continue
+            candidates.append((cand_code, q_cand))
+        if not candidates:
+            return None
+        # 按"龙2度"排序：1) 已封板优先；2) 涨幅高的 tie-breaker
+        candidates.sort(key=lambda x: (0 if x[1].is_limit else 1, -x[1].pct))
+        cand, q = candidates[0]
+        logger.info(
+            "pattern_01 funnel sector=%s L2 trigger at=%s code=%s "
+            "self_pct=%.2f%% is_limit=%s consensus=%d/%d candidates=%d",
+            sec_name, _hhmm_label(minute_dt), cand,
+            q.pct, q.is_limit, consensus_n, INTRADAY_CONSENSUS_MIN_L2, len(candidates),
+        )
+        buy_time_str = _hhmmss(minute_dt)
+        l1_meta = meta.get(l1_code, {})
+        cand_meta = meta.get(cand, {})
+        cand_name = cand_meta.get("name") or cand
+        cand_tag = cand_meta.get("tag") or f"{q.pct:.1f}%"
+        cand_first = cand_meta.get("first_time") or buy_time_str
+        cand_open = cand_meta.get("open_times", 0)
+        signals.append(PatternSignal(
+            trade_date=minute_dt.strftime("%Y%m%d"),
+            pattern=self.pattern_id,
+            sector=sec_name,
+            long1_code=l1_code,
+            long1_name=l1_meta.get("name") or l1_code,
+            long1_tag=l1_meta.get("tag") or "",
+            long1_first_time=l1_meta.get("first_time") or "",
+            long1_open_times=l1_meta.get("open_times", 0),
+            sector_size=consensus_n,
+            pick_code=cand,
+            pick_name=cand_name,
+            pick_role="shadow",
+            pick_tag=cand_tag,
+            reason=(
+                f"事中L2 自身{q.pct:.1f}%≥9% 板块共识{consensus_n}只≥8% "
+                f"触发{_hhmm_label(minute_dt)} 首封{cand_first[:2]}:{cand_first[2:4]} "
+                f"炸{cand_open}次 [L2 正股]"
+            ),
+            pick_kind="stock",
+            buy_anchor="intraday_at",
+            buy_anchor_time=buy_time_str,
+            holding="overnight",
+            sell_anchor="next_open",
+        ))
+        return (cand, minute_dt)
 
     # ───────────────────────────────────────────────────────────────────────
     # 工具：取 T-1 交易日（用于拉一字票名单）
