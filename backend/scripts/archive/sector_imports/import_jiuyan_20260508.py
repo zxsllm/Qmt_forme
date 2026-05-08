@@ -4,6 +4,43 @@ source='jiuyan'  scope='daily'
 
 注：5/8 板块必读漏发（用户告知），仅入韭研一份。主线按韭研为准。
 统计：涨停 98 / 跌停 18 / 连板 18 / 涨停 9 次 14.90%
+
+OCR 校对补丁（跑完此脚本后必须执行，否则数据有错）：
+
+  -- 1) 板块名校正
+  UPDATE daily_sector_review SET sector_name='美伊战争'
+   WHERE trade_date='20260508' AND source='jiuyan' AND sector_name='美伊产业';
+
+  -- 2) 删除 OCR 完全错读的条目（AI应用 002390 微水年 — 5/8 实际未涨停，原图无法确定真票）
+  DELETE FROM daily_sector_review
+   WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='002390.SZ';
+
+  -- 3) ts_code 整条错（11 处）— 按 stock_basic.name 反查的真实 ts_code
+  UPDATE daily_sector_review SET ts_code='000863.SZ' WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='000035.SZ' AND stock_name='三湘印象';
+  UPDATE daily_sector_review SET ts_code='600530.SH' WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='000530.SZ' AND stock_name='交大昂立';
+  UPDATE daily_sector_review SET ts_code='600076.SH' WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='002076.SZ' AND stock_name='康欣新材';
+  UPDATE daily_sector_review SET ts_code='000582.SZ' WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='002640.SZ' AND stock_name='北部湾港';
+  UPDATE daily_sector_review SET ts_code='600545.SH' WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='600555.SH' AND stock_name='卓郎智能';
+  UPDATE daily_sector_review SET ts_code='600984.SH' WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='600981.SH' AND stock_name='建设机械';
+  UPDATE daily_sector_review SET ts_code='603311.SH' WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='603011.SH' AND stock_name='金海高科';
+  UPDATE daily_sector_review SET ts_code='603878.SH' WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='603678.SH' AND stock_name='武进不锈';
+  UPDATE daily_sector_review SET ts_code='002965.SZ' WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='605256.SH' AND stock_name='祥鑫科技';
+  UPDATE daily_sector_review SET ts_code='301183.SZ', stock_name='东田微' WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='301180.SZ';
+
+  -- 4) ts_code 对、名字 OCR 错（8 处）— 按 stock_basic.name 校准
+  UPDATE daily_sector_review SET stock_name='瑞鹄模具' WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='002997.SZ';
+  UPDATE daily_sector_review SET stock_name='泰坦股份' WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='003036.SZ';
+  UPDATE daily_sector_review SET stock_name='鼎熔岩'   WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='301028.SZ';
+  UPDATE daily_sector_review SET stock_name='富春染织' WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='605189.SH';
+  UPDATE daily_sector_review SET stock_name='福莱蒽特' WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='605566.SH';
+  UPDATE daily_sector_review SET stock_name='昀冢科技' WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='688260.SH';
+  UPDATE daily_sector_review SET stock_name='天铭科技' WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='920270.BJ';
+  UPDATE daily_sector_review SET stock_name='北投科技' WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='600936.SH';
+
+  -- 5) ts_code 与名字均 OCR 错（3 处，需按 5/8 limit_stats 真实涨停反查）
+  UPDATE daily_sector_review SET ts_code='603937.SH', stock_name='丽岛新材' WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='603987.SH';  -- 8天5板 last=14:12:25
+  UPDATE daily_sector_review SET ts_code='300258.SZ', stock_name='精锻科技' WHERE trade_date='20260508' AND source='jiuyan' AND ts_code='300260.SZ';  -- 14:02:12
+  -- (002613 北玻股份这条已在 #3 中错改成 002613，#4 校准为 600936 北投科技)
 """
 import asyncio
 import json
