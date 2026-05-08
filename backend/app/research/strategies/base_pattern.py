@@ -172,12 +172,12 @@ def is_natural_limit(stock: LimitUpStock, ohlc: dict | None) -> bool:
 async def load_sectors(
     session: AsyncSession,
     trade_date: str,
-    source: str = "bankuai",
     lookback_days: int = 5,
 ) -> dict[str, list[str]]:
-    """T 日盘前可知的板块成员名单 = 最近 N 个交易日（≤T-1）人工标签的并集。
+    """T 日盘前可知的板块成员名单 = 最近 N 个交易日（≤T-1）三源标签的并集。
 
-    源：bankuai + jiuyan + llm_v2 全部合并（盘前你能看到的题材股池都算进来）。
+    源：bankuai（板块必读，主源） + jiuyan（韭研公社） + llm_v2（LLM 主线判定）。
+    板块必读为优先主源，韭研次之，LLM v2 作补充覆盖人工漏标。
     过滤：剔除"一季报预增/反弹/公告/其他"这类基本面属性 / 无主线归类。
     归一：板块名通过 theme_taxonomy.SUB_TO_THEME 映射到主线
          （芯片→国产芯片 / 锂电→电池产业链 / 钨/稀土→稀有金属 / PCB→PCB板 等）。
@@ -244,6 +244,6 @@ class BasePattern(ABC):
 
     @abstractmethod
     async def find_signals(
-        self, session: AsyncSession, trade_date: str, source: str = "bankuai"
+        self, session: AsyncSession, trade_date: str
     ) -> list[PatternSignal]:
         """返回 T 日触发的信号列表。"""
