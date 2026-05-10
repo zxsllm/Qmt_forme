@@ -356,12 +356,26 @@ async def run_pattern(pattern, label: str, dates: list[str]) -> list[PatternTrad
                 print(f"  {td}: 无触发")
                 continue
             print(f"\n  --- {td}：触发 {len(sigs)} 个信号 ---")
+            # 按 (trade_date, pick_code) 去重 — 同一只标的当日只下一笔单（与实盘 OMS 一致），
+            # 后续重复信号标 already_traded，不再下单（细分粒度后同股可能被多个 sector 识别）
+            traded_today: set[tuple[str, str]] = set()
             for i, sig in enumerate(sigs, 1):
+                key = (sig.trade_date, sig.pick_code)
+                if key in traded_today:
+                    skip_trade = PatternTrade(
+                        signal=sig, next_date="", buy_price=None, sell_price=None,
+                        skip_reason=f"already_traded（同日 {sig.pick_code} 已被前序 sector 信号买入，本信号 sector={sig.sector} 跳过）",
+                    )
+                    all_trades.append(skip_trade)
+                    print(fmt_trade_block(skip_trade))
+                    continue
                 trade = await execute_signal(sig)
                 all_trades.append(trade)
                 if trade.skip_reason:
                     print(fmt_trade_block(trade))
                     continue
+                # 成功执行后才登记，避免 unfillable_limit / missing price 占用槽位
+                traded_today.add(key)
                 sec_info = await fetch_sector_followers(
                     sig.sector, sig.trade_date,
                     exclude_codes={sig.long1_code, sig.pick_code},
