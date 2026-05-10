@@ -14,6 +14,7 @@ import {
   api,
   type LimitBoardItem, type LimitStepItem, type DragonTigerItem, type HotListItem,
   type BoardLeaderItem, type HotMoneyItem,
+  type KplListItem, type ThsHotItem, type MoneyflowCntItem, type DcIndexItem,
 } from '../services/api';
 import Panel from '../components/Panel';
 
@@ -904,14 +905,241 @@ function DragonTigerTab({ tradeDate }: { tradeDate: string }) {
   );
 }
 
-function HotListTab({ tradeDate }: { tradeDate: string }) {
-  const { data, isLoading } = useQuery({ queryKey: ['hot-list', tradeDate], queryFn: () => api.hotList(tradeDate), refetchInterval: 60_000 });
+function ThemeDcHotCard({ tradeDate }: { tradeDate: string }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ['hot-list', tradeDate],
+    queryFn: () => api.hotList(tradeDate, 100),
+    staleTime: 120_000,
+  });
   return (
-    <div>
-      <div style={{ color: '#93a9bc', fontSize: 12, marginBottom: 8 }}>{data?.trade_date ? `数据日期: ${data.trade_date}` : ''}</div>
-      <Table columns={hotColumns} dataSource={data?.data ?? []} rowKey={(r) => `${r.ts_code}-hot`}
-        size="small" loading={isLoading} pagination={{ pageSize: 30, size: 'small' }}
+    <Card size="small" style={{ ...CARD_STYLE, borderRadius: 18 }}
+      title={<span style={{ fontSize: 14, fontWeight: 700 }}>东方财富热榜（个股 / ETF / 港美股）</span>}
+      extra={<span style={{ color: '#93a9bc', fontSize: 12 }}>
+        {data?.trade_date ? `数据日期: ${data.trade_date}` : ''}（{data?.count ?? 0} 条）
+      </span>}
+    >
+      <Table columns={hotColumns} dataSource={data?.data ?? []} rowKey={(r, i) => `${r.ts_code}-${r.data_type ?? ''}-${i}`}
+        size="small" loading={isLoading} pagination={{ pageSize: 15, size: 'small' }}
         locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无热榜数据" /> }} />
+    </Card>
+  );
+}
+
+// ─── 题材热榜 Tab: 4 张卡片上下堆叠 ─────────────────────────────────
+
+const PCT_COLOR = (v: number | null) =>
+  v == null ? '-' : (
+    <span style={{ color: v >= 0 ? '#ef4444' : '#22c55e' }}>{v.toFixed(2)}%</span>
+  );
+
+const FMT_AMOUNT_YI = (v: number | null) =>
+  v == null ? '-' : (Math.abs(v) >= 1e8 ? (v / 1e8).toFixed(2) : (v / 1e4).toFixed(2));
+
+const kplColumns: ColumnsType<KplListItem> = [
+  { title: '题材', dataIndex: 'theme', width: 140, ellipsis: true,
+    render: (v: string | null) => v ? <Tag color="purple" style={{ margin: 0 }}>{v}</Tag> : '-' },
+  { title: '名称', dataIndex: 'name', width: 90 },
+  { title: '代码', dataIndex: 'ts_code', width: 100 },
+  { title: '状态', dataIndex: 'status', width: 100,
+    render: (v: string | null) => v ? <Tag color={v.includes('连板') || v.includes('天') ? 'red' : 'orange'}>{v}</Tag> : '-' },
+  { title: '涨跌幅', dataIndex: 'pct_chg', width: 80, align: 'right', render: PCT_COLOR },
+  { title: '涨停原因', dataIndex: 'lu_desc', ellipsis: true,
+    render: (v: string | null) => v || '-' },
+  { title: '成交额(亿)', dataIndex: 'amount', width: 100, align: 'right', render: FMT_AMOUNT_YI },
+];
+
+const thsHotColumns: ColumnsType<ThsHotItem> = [
+  { title: '排名', dataIndex: 'rank', width: 60, align: 'center' },
+  { title: '类型', dataIndex: 'data_type', width: 90 },
+  { title: '名称', dataIndex: 'ts_name', width: 110, ellipsis: true },
+  { title: '涨跌幅', dataIndex: 'pct_change', width: 80, align: 'right', render: PCT_COLOR },
+  { title: '热度', dataIndex: 'hot', width: 90, align: 'right',
+    render: (v: number | null) => v == null ? '-' : v.toLocaleString() },
+  { title: '概念', dataIndex: 'concept', width: 160, ellipsis: true,
+    render: (v: string | null) => v || '-' },
+  { title: '上榜解读', dataIndex: 'rank_reason', ellipsis: true,
+    render: (v: string | null) => v || '-' },
+];
+
+const moneyflowCntColumns: ColumnsType<MoneyflowCntItem> = [
+  { title: '板块', dataIndex: 'name', width: 130, ellipsis: true,
+    render: (v: string | null) => v ? <Tag color="cyan" style={{ margin: 0 }}>{v}</Tag> : '-' },
+  { title: '涨跌幅', dataIndex: 'pct_change', width: 80, align: 'right', render: PCT_COLOR },
+  { title: '领涨股', dataIndex: 'lead_stock', width: 100, ellipsis: true },
+  { title: '净流入(亿)', dataIndex: 'net_amount', width: 110, align: 'right',
+    render: (v: number | null) => v == null ? '-' : (
+      <span style={{ color: v >= 0 ? '#ef4444' : '#22c55e', fontWeight: 600 }}>
+        {v.toFixed(2)}
+      </span>
+    ) },
+  { title: '净买入(亿)', dataIndex: 'net_buy_amount', width: 110, align: 'right',
+    render: (v: number | null) => v == null ? '-' : v.toFixed(2) },
+  { title: '净卖出(亿)', dataIndex: 'net_sell_amount', width: 110, align: 'right',
+    render: (v: number | null) => v == null ? '-' : v.toFixed(2) },
+  { title: '含股票数', dataIndex: 'company_num', width: 90, align: 'right' },
+];
+
+const dcIndexColumns: ColumnsType<DcIndexItem> = [
+  { title: '类型', dataIndex: 'idx_type', width: 90,
+    render: (v: string | null) => v ? <Tag color={v === '行业板块' ? 'blue' : v === '概念板块' ? 'purple' : 'orange'}>{v}</Tag> : '-' },
+  { title: '板块', dataIndex: 'name', width: 130, ellipsis: true },
+  { title: '涨跌幅', dataIndex: 'pct_change', width: 80, align: 'right', render: PCT_COLOR },
+  { title: '领涨股', dataIndex: 'leading', width: 100, ellipsis: true },
+  { title: '领涨涨幅', dataIndex: 'leading_pct', width: 90, align: 'right', render: PCT_COLOR },
+  { title: '涨家数', dataIndex: 'up_num', width: 80, align: 'right',
+    render: (v: number | null) => v != null ? <span style={{ color: '#ef4444' }}>{v}</span> : '-' },
+  { title: '跌家数', dataIndex: 'down_num', width: 80, align: 'right',
+    render: (v: number | null) => v != null ? <span style={{ color: '#22c55e' }}>{v}</span> : '-' },
+  { title: '换手率(%)', dataIndex: 'turnover_rate', width: 95, align: 'right',
+    render: (v: number | null) => v != null ? v.toFixed(2) : '-' },
+];
+
+function ThemeKplCard({ tradeDate }: { tradeDate: string }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ['kpl-list', tradeDate],
+    queryFn: () => api.kplList(tradeDate),
+    staleTime: 120_000,
+  });
+  return (
+    <Card size="small" style={{ ...CARD_STYLE, borderRadius: 18 }}
+      title={<span style={{ fontSize: 14, fontWeight: 700 }}>题材主线（开盘啦榜单）</span>}
+      extra={<span style={{ color: '#93a9bc', fontSize: 12 }}>
+        {data?.trade_date ? `数据日期: ${data.trade_date}` : ''}（{data?.count ?? 0} 条）
+      </span>}
+    >
+      <Table<KplListItem> columns={kplColumns} dataSource={data?.data ?? []}
+        rowKey={(r) => `${r.ts_code}-${r.tag ?? ''}`}
+        size="small" loading={isLoading}
+        pagination={{ pageSize: 15, size: 'small' }}
+        scroll={{ x: 900 }}
+        locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="kpl_list 次日 08:30 才出，请明早 08:45 后查看" /> }}
+      />
+    </Card>
+  );
+}
+
+const THS_HOT_TYPES = ['热股', 'ETF', '概念板块', '行业板块', '港股', '美股', '可转债', '期货', ''];
+
+function ThemeThsHotCard({ tradeDate }: { tradeDate: string }) {
+  const [dataType, setDataType] = useState('热股');
+  const { data, isLoading } = useQuery({
+    queryKey: ['ths-hot', tradeDate, dataType],
+    queryFn: () => api.thsHot(tradeDate, dataType),
+    staleTime: 120_000,
+  });
+  return (
+    <Card size="small" style={{ ...CARD_STYLE, borderRadius: 18 }}
+      title={<span style={{ fontSize: 14, fontWeight: 700 }}>同花顺热榜</span>}
+      extra={
+        <div className="flex items-center" style={{ gap: 6 }}>
+          {THS_HOT_TYPES.map(t => (
+            <Tag key={t || 'all'} style={{ cursor: 'pointer', margin: 0 }}
+              color={dataType === t ? 'blue' : 'default'}
+              onClick={() => setDataType(t)}>
+              {t || '全部'}
+            </Tag>
+          ))}
+          <span style={{ color: '#93a9bc', fontSize: 12, marginLeft: 8 }}>
+            {data?.trade_date ? `${data.trade_date}` : ''}
+          </span>
+        </div>
+      }
+    >
+      <Table<ThsHotItem> columns={thsHotColumns} dataSource={data?.data ?? []}
+        rowKey={(r, i) => `${r.ts_code ?? 'x'}-${r.data_type ?? ''}-${i}`}
+        size="small" loading={isLoading}
+        pagination={{ pageSize: 15, size: 'small' }}
+        scroll={{ x: 800 }}
+        locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无同花顺热榜数据" /> }}
+      />
+    </Card>
+  );
+}
+
+function ThemeMoneyflowCntCard({ tradeDate }: { tradeDate: string }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ['moneyflow-cnt', tradeDate],
+    queryFn: () => api.moneyflowCnt(tradeDate),
+    staleTime: 120_000,
+  });
+  return (
+    <Card size="small" style={{ ...CARD_STYLE, borderRadius: 18 }}
+      title={<span style={{ fontSize: 14, fontWeight: 700 }}>同花顺概念资金流（按净流入排序）</span>}
+      extra={<span style={{ color: '#93a9bc', fontSize: 12 }}>
+        {data?.trade_date ? `数据日期: ${data.trade_date}` : ''}（{data?.count ?? 0} 条）
+      </span>}
+    >
+      <Table<MoneyflowCntItem> columns={moneyflowCntColumns} dataSource={data?.data ?? []}
+        rowKey={(r) => `${r.ts_code}-mfcnt`}
+        size="small" loading={isLoading}
+        pagination={{ pageSize: 15, size: 'small' }}
+        scroll={{ x: 800 }}
+        locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无概念资金流数据" /> }}
+      />
+    </Card>
+  );
+}
+
+const DC_IDX_TYPES = ['', '行业板块', '概念板块', '地域板块'];
+
+function ThemeDcIndexCard({ tradeDate }: { tradeDate: string }) {
+  const [idxType, setIdxType] = useState('概念板块');
+  const { data, isLoading } = useQuery({
+    queryKey: ['dc-index', tradeDate, idxType],
+    queryFn: () => api.dcIndex(tradeDate, idxType),
+    staleTime: 120_000,
+  });
+  return (
+    <Card size="small" style={{ ...CARD_STYLE, borderRadius: 18 }}
+      title={<span style={{ fontSize: 14, fontWeight: 700 }}>东财板块表现</span>}
+      extra={
+        <div className="flex items-center" style={{ gap: 6 }}>
+          {DC_IDX_TYPES.map(t => (
+            <Tag key={t || 'all'} style={{ cursor: 'pointer', margin: 0 }}
+              color={idxType === t ? 'blue' : 'default'}
+              onClick={() => setIdxType(t)}>
+              {t || '全部'}
+            </Tag>
+          ))}
+          <span style={{ color: '#93a9bc', fontSize: 12, marginLeft: 8 }}>
+            {data?.trade_date ? `${data.trade_date}` : ''}（{data?.count ?? 0} 条）
+          </span>
+        </div>
+      }
+    >
+      <Table<DcIndexItem> columns={dcIndexColumns} dataSource={data?.data ?? []}
+        rowKey={(r) => `${r.ts_code}-dc`}
+        size="small" loading={isLoading}
+        pagination={{ pageSize: 15, size: 'small' }}
+        scroll={{ x: 850 }}
+        locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无东财板块数据" /> }}
+      />
+    </Card>
+  );
+}
+
+function ThsMainlineTab({ tradeDate }: { tradeDate: string }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <ThemeThsHotCard tradeDate={tradeDate} />
+      <ThemeMoneyflowCntCard tradeDate={tradeDate} />
+    </div>
+  );
+}
+
+function DcMainlineTab({ tradeDate }: { tradeDate: string }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <ThemeDcHotCard tradeDate={tradeDate} />
+      <ThemeDcIndexCard tradeDate={tradeDate} />
+    </div>
+  );
+}
+
+function KplMainlineTab({ tradeDate }: { tradeDate: string }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <ThemeKplCard tradeDate={tradeDate} />
     </div>
   );
 }
@@ -946,7 +1174,9 @@ export default function SentimentPage() {
             { key: 'limit-board', label: '涨跌停榜', children: <LimitBoardTab tradeDate={tradeDate} /> },
             { key: 'limit-step', label: '连板天梯', children: <LimitStepTab tradeDate={tradeDate} /> },
             { key: 'dragon-tiger', label: '龙虎榜', children: <DragonTigerTab tradeDate={tradeDate} /> },
-            { key: 'hot-list', label: '市场热榜', children: <HotListTab tradeDate={tradeDate} /> },
+            { key: 'ths-mainline', label: '同花顺主线', children: <ThsMainlineTab tradeDate={tradeDate} /> },
+            { key: 'dc-mainline', label: '东财主线', children: <DcMainlineTab tradeDate={tradeDate} /> },
+            { key: 'kpl-mainline', label: '开盘啦主线', children: <KplMainlineTab tradeDate={tradeDate} /> },
           ]}
         />
       </Panel>

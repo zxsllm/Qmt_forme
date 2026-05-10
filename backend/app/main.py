@@ -719,6 +719,169 @@ async def get_hot_list(
     return {"count": len(data), "data": data, "trade_date": trade_date}
 
 
+def _resolve_trade_date_with_fallback(trade_date: str, table: str, conn) -> str:
+    """If trade_date 为空或数据库无该日期数据，回退到 MAX(trade_date)。"""
+    return trade_date  # placeholder, not used—each endpoint handles its own fallback
+
+
+@app.get("/api/v1/sentiment/kpl-list")
+async def get_kpl_list(
+    trade_date: str = Query("", description="YYYYMMDD; 空=自动取数据库最新交易日"),
+    theme: str = Query("", description="按 theme 过滤（模糊匹配）"),
+    limit: int = Query(100, ge=1, le=500),
+):
+    from app.core.database import async_session
+    from sqlalchemy import text
+    async with async_session() as session:
+        if not trade_date:
+            r = await session.execute(text("SELECT MAX(trade_date) FROM kpl_list"))
+            row = r.fetchone()
+            trade_date = row[0] if row and row[0] else ""
+        if not trade_date:
+            return {"count": 0, "data": [], "trade_date": ""}
+        wheres = ["trade_date = :td"]
+        params: dict = {"td": trade_date, "lim": limit}
+        if theme:
+            wheres.append("theme ILIKE :theme")
+            params["theme"] = f"%{theme}%"
+        result = await session.execute(text(f"""
+            SELECT trade_date, ts_code, name, theme, tag, lu_desc,
+                   lu_time, last_time, status, pct_chg, amount,
+                   turnover_rate, net_change, limit_order, free_float
+            FROM kpl_list WHERE {' AND '.join(wheres)}
+            ORDER BY pct_chg DESC NULLS LAST
+            LIMIT :lim
+        """), params)
+        rows = result.fetchall()
+    cols = ["trade_date", "ts_code", "name", "theme", "tag", "lu_desc",
+            "lu_time", "last_time", "status", "pct_chg", "amount",
+            "turnover_rate", "net_change", "limit_order", "free_float"]
+    data = [dict(zip(cols, r)) for r in rows]
+    for d in data:
+        for k, v in d.items():
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                d[k] = None
+    return {"count": len(data), "data": data, "trade_date": trade_date}
+
+
+@app.get("/api/v1/sentiment/ths-hot")
+async def get_ths_hot(
+    trade_date: str = Query("", description="YYYYMMDD, defaults to today"),
+    data_type: str = Query("", description="如 A股市场 / 港股市场 / ETF / 概念板块, 空=全部"),
+    is_new: str = Query("Y", description="Y=22:30 完整版（默认） N=盘后中间版"),
+    limit: int = Query(100, ge=1, le=500),
+):
+    from datetime import datetime as _dt
+    from app.core.database import async_session
+    from sqlalchemy import text
+    if not trade_date:
+        trade_date = _dt.now().strftime("%Y%m%d")
+    async with async_session() as session:
+        wheres = ["trade_date = :td", "is_new = :inew"]
+        params: dict = {"td": trade_date, "inew": is_new, "lim": limit}
+        if data_type:
+            wheres.append("data_type = :dt")
+            params["dt"] = data_type
+        result = await session.execute(text(f"""
+            SELECT trade_date, data_type, ts_code, ts_name, rank,
+                   pct_change, current_price, concept, rank_reason, hot,
+                   rank_time, is_new
+            FROM ths_hot WHERE {' AND '.join(wheres)}
+            ORDER BY rank ASC NULLS LAST
+            LIMIT :lim
+        """), params)
+        rows = result.fetchall()
+        # is_new=Y 没数据时回退 N（22:30 之前完整版还没拉到）
+        if not rows and is_new == "Y":
+            params["inew"] = "N"
+            result = await session.execute(text(f"""
+                SELECT trade_date, data_type, ts_code, ts_name, rank,
+                       pct_change, current_price, concept, rank_reason, hot,
+                       rank_time, is_new
+                FROM ths_hot WHERE {' AND '.join(wheres)}
+                ORDER BY rank ASC NULLS LAST
+                LIMIT :lim
+            """), params)
+            rows = result.fetchall()
+    cols = ["trade_date", "data_type", "ts_code", "ts_name", "rank",
+            "pct_change", "current_price", "concept", "rank_reason", "hot",
+            "rank_time", "is_new"]
+    data = [dict(zip(cols, r)) for r in rows]
+    for d in data:
+        for k, v in d.items():
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                d[k] = None
+    return {"count": len(data), "data": data, "trade_date": trade_date}
+
+
+@app.get("/api/v1/sentiment/moneyflow-cnt")
+async def get_moneyflow_cnt_ths(
+    trade_date: str = Query("", description="YYYYMMDD, defaults to today"),
+    limit: int = Query(50, ge=1, le=200),
+):
+    from datetime import datetime as _dt
+    from app.core.database import async_session
+    from sqlalchemy import text
+    if not trade_date:
+        trade_date = _dt.now().strftime("%Y%m%d")
+    async with async_session() as session:
+        result = await session.execute(text("""
+            SELECT trade_date, ts_code, name, lead_stock, close_price,
+                   pct_change, industry_index, company_num, pct_change_stock,
+                   net_buy_amount, net_sell_amount, net_amount
+            FROM moneyflow_cnt_ths WHERE trade_date = :td
+            ORDER BY net_amount DESC NULLS LAST
+            LIMIT :lim
+        """), {"td": trade_date, "lim": limit})
+        rows = result.fetchall()
+    cols = ["trade_date", "ts_code", "name", "lead_stock", "close_price",
+            "pct_change", "industry_index", "company_num", "pct_change_stock",
+            "net_buy_amount", "net_sell_amount", "net_amount"]
+    data = [dict(zip(cols, r)) for r in rows]
+    for d in data:
+        for k, v in d.items():
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                d[k] = None
+    return {"count": len(data), "data": data, "trade_date": trade_date}
+
+
+@app.get("/api/v1/sentiment/dc-index")
+async def get_dc_index(
+    trade_date: str = Query("", description="YYYYMMDD, defaults to today"),
+    idx_type: str = Query("", description="行业板块 / 概念板块 / 地域板块, 空=全部"),
+    limit: int = Query(50, ge=1, le=200),
+):
+    from datetime import datetime as _dt
+    from app.core.database import async_session
+    from sqlalchemy import text
+    if not trade_date:
+        trade_date = _dt.now().strftime("%Y%m%d")
+    async with async_session() as session:
+        wheres = ["trade_date = :td"]
+        params: dict = {"td": trade_date, "lim": limit}
+        if idx_type:
+            wheres.append("idx_type = :it")
+            params["it"] = idx_type
+        result = await session.execute(text(f"""
+            SELECT trade_date, ts_code, name, idx_type, "leading", leading_code,
+                   pct_change, leading_pct, total_mv, turnover_rate,
+                   up_num, down_num
+            FROM dc_index WHERE {' AND '.join(wheres)}
+            ORDER BY pct_change DESC NULLS LAST
+            LIMIT :lim
+        """), params)
+        rows = result.fetchall()
+    cols = ["trade_date", "ts_code", "name", "idx_type", "leading", "leading_code",
+            "pct_change", "leading_pct", "total_mv", "turnover_rate",
+            "up_num", "down_num"]
+    data = [dict(zip(cols, r)) for r in rows]
+    for d in data:
+        for k, v in d.items():
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                d[k] = None
+    return {"count": len(data), "data": data, "trade_date": trade_date}
+
+
 @app.get("/api/v1/stock/{ts_code}/irm_qa")
 async def get_stock_irm_qa(ts_code: str, limit: int = Query(20, ge=1, le=100)):
     import pandas as pd

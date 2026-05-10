@@ -106,6 +106,11 @@ CHECKS: list[CheckDef] = [
     CheckDef("dc_hot",         "市场热榜",   "sentiment", "trade_date", "sentiment", "important", "limit_board"),
     CheckDef("top_inst",       "龙虎榜机构", "sentiment", "trade_date", "sentiment", "minor",     "top_inst"),
     CheckDef("limit_cpt_list", "涨停题材",   "sentiment", "trade_date", "sentiment", "minor",     "limit_board"),
+    # 题材热榜 Tab: 4 项扩展接口
+    CheckDef("kpl_list",          "开盘啦榜单", "sentiment", "trade_date", "daily_t1",  "important", "morning_kpl_list"),
+    CheckDef("ths_hot",           "同花顺热榜", "sentiment", "trade_date", "sentiment", "important", "late_evening_ths_hot"),
+    CheckDef("moneyflow_cnt_ths", "概念资金流", "sentiment", "trade_date", "sentiment", "important", "limit_board"),
+    CheckDef("dc_index",          "东财概念",   "sentiment", "trade_date", "sentiment", "important", "limit_board"),
 
     # ── /fundamental 基本面 ──
     CheckDef("fina_indicator",    "财务指标",   "fundamental", "end_date",   "quarterly", "minor", ""),
@@ -149,9 +154,26 @@ async def _max_date(session: AsyncSession, table: str, col: str) -> str:
       - String 'YYYYMMDD'（如 trade_date）：直接返回
       - DATE / TIMESTAMP（如 trade_time）：strftime 成 YYYYMMDD
       - 其他字符串（如 'YYYY-MM-DD HH:MM:SS'）：去掉非数字字符后取前 8 位
+
+    优化：
+      1. 分钟分区表 (stock_min_kline / cb_min_kline) 优先用 sync_tracker 缓存，
+         避免 PG 全表扫（这两张表加起来 20+ 秒）。
+      2. trade_time 列加 WHERE 限制最近 30 天，让 PG 分区裁剪生效。
     """
+    if table in ("stock_min_kline", "cb_min_kline"):
+        rec = sync_tracker.get(table)
+        if rec and rec.trade_date and rec.status == SyncStatus.SUCCESS:
+            return rec.trade_date
+        # fallback 走 DB 查询（首次启动 sync_tracker 还没记录时）
     try:
-        r = await session.execute(text(f"SELECT max({col}) FROM {table}"))
+        if col == "trade_time":
+            sql = (
+                f"SELECT max({col}) FROM {table} "
+                f"WHERE {col} >= NOW() - INTERVAL '30 days'"
+            )
+        else:
+            sql = f"SELECT max({col}) FROM {table}"
+        r = await session.execute(text(sql))
         val = r.scalar_one_or_none()
         if val is None:
             return ""
@@ -207,13 +229,20 @@ def _diagnose(table: str, actual: str, expected: str, phase: str, is_trade_day: 
     if not is_trade_day:
         return {"reason": "non_trade_day", "detail": "非交易日无新数据", "action": "无需操作", "repairable": False}
 
-    if table in ("top_list", "dc_hot", "hm_detail", "top_inst"):
-        # settlement (15:00-17:00) 期间 Tushare 龙虎榜/游资类数据通常 16:00-17:00 才发布，
+    if table in ("top_list", "dc_hot", "hm_detail", "top_inst",
+                 "moneyflow_cnt_ths", "dc_index", "ths_hot"):
+        # settlement (15:00-17:00) 期间 Tushare 龙虎榜/游资/资金流/概念类数据
+        # 通常 16:00-17:00 才发布，ths_hot 完整版 22:30 才出，
         # 不应让健康检查在 15:00 立即触发自动修复（一定空跑）。
         if phase in ("morning", "afternoon", "lunch", "call_auction", "settlement"):
             return {"reason": "tushare_delay", "detail": "盘后数据，交易时段尚未发布", "action": "收盘后自动同步", "repairable": False}
         elif phase in ("evening", "post_sync", "pre_market"):
             return {"reason": "not_synced", "detail": f"盘后同步未成功拉取到{expected}数据", "action": "自动重新同步", "repairable": True}
+
+    if table == "kpl_list":
+        # kpl_list 次日 08:30 出前一交易日数据，09:00 之前都可能仍是更早的日期
+        if phase == "pre_market":
+            return {"reason": "tushare_delay", "detail": "kpl_list 次日 08:30 才出，等待早盘补拉", "action": "08:45 自动同步", "repairable": False}
 
     if not effective or effective.last_attempt == 0:
         return {"reason": "not_synced", "detail": "本次启动后未触发同步", "action": "自动重新同步", "repairable": True}
@@ -504,11 +533,16 @@ async def run_health_check(session: AsyncSession, auto_repair: bool = True) -> d
         note = ""
         status = "ok"
         try:
-            r_max = await session.execute(text(
-                f"SELECT to_char(max(trade_time), 'YYYYMMDD') FROM {table} "
-                f"WHERE trade_time >= now() - interval '35 days'"
-            ))
-            actual_date = r_max.scalar_one_or_none() or ""
+            # 优先用 sync_tracker 缓存的 trade_date，避免 PG 全表扫 4+ 秒
+            rec_min = sync_tracker.get(table)
+            if rec_min and rec_min.trade_date and rec_min.status == SyncStatus.SUCCESS:
+                actual_date = rec_min.trade_date
+            else:
+                r_max = await session.execute(text(
+                    f"SELECT to_char(max(trade_time), 'YYYYMMDD') FROM {table} "
+                    f"WHERE trade_time >= now() - interval '35 days'"
+                ))
+                actual_date = r_max.scalar_one_or_none() or ""
 
             if is_trade_day and phase in ("evening", "post_sync"):
                 expected_date = today

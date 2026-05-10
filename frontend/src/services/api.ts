@@ -485,6 +485,27 @@ export const api = {
       `/api/v1/sentiment/hot-list?trade_date=${trade_date}&limit=${limit}`,
     ),
 
+  // ── 题材热榜 Tab: 4 个接口 ───────────────────────────────
+  kplList: (trade_date = '', theme = '', limit = 100) =>
+    fetchJson<{ count: number; data: KplListItem[]; trade_date: string }>(
+      `/api/v1/sentiment/kpl-list?trade_date=${trade_date}&theme=${encodeURIComponent(theme)}&limit=${limit}`,
+    ),
+
+  thsHot: (trade_date = '', data_type = '', is_new = 'Y', limit = 100) =>
+    fetchJson<{ count: number; data: ThsHotItem[]; trade_date: string }>(
+      `/api/v1/sentiment/ths-hot?trade_date=${trade_date}&data_type=${encodeURIComponent(data_type)}&is_new=${is_new}&limit=${limit}`,
+    ),
+
+  moneyflowCnt: (trade_date = '', limit = 50) =>
+    fetchJson<{ count: number; data: MoneyflowCntItem[]; trade_date: string }>(
+      `/api/v1/sentiment/moneyflow-cnt?trade_date=${trade_date}&limit=${limit}`,
+    ),
+
+  dcIndex: (trade_date = '', idx_type = '', limit = 50) =>
+    fetchJson<{ count: number; data: DcIndexItem[]; trade_date: string }>(
+      `/api/v1/sentiment/dc-index?trade_date=${trade_date}&idx_type=${encodeURIComponent(idx_type)}&limit=${limit}`,
+    ),
+
   // ── Fundamental ─────────────────────────────────────────────
   fundamentalIndustries: () =>
     fetchJson<{ data: IndustryItem[] }>('/api/v1/fundamental/industries'),
@@ -812,6 +833,72 @@ export interface HotListItem {
   pct_change: number | null;
   rank: number | null;
   current_price: number | null;
+}
+
+// ── 题材热榜 Tab 类型 ────────────────────────────────────────
+
+export interface KplListItem {
+  trade_date: string;
+  ts_code: string;
+  name: string | null;
+  theme: string | null;
+  tag: string | null;
+  lu_desc: string | null;
+  lu_time: string | null;
+  last_time: string | null;
+  status: string | null;
+  pct_chg: number | null;
+  amount: number | null;
+  turnover_rate: number | null;
+  net_change: number | null;
+  limit_order: number | null;
+  free_float: number | null;
+}
+
+export interface ThsHotItem {
+  trade_date: string;
+  data_type: string | null;
+  ts_code: string | null;
+  ts_name: string | null;
+  rank: number | null;
+  pct_change: number | null;
+  current_price: number | null;
+  concept: string | null;
+  rank_reason: string | null;
+  hot: number | null;
+  rank_time: string | null;
+  is_new: string | null;
+}
+
+export interface MoneyflowCntItem {
+  trade_date: string;
+  ts_code: string;
+  name: string | null;
+  lead_stock: string | null;
+  close_price: number | null;
+  pct_change: number | null;
+  industry_index: number | null;
+  company_num: number | null;
+  pct_change_stock: number | null;
+  net_buy_amount: number | null;
+  net_sell_amount: number | null;
+  net_amount: number | null;
+}
+
+export interface DcIndexItem {
+  trade_date: string;
+  ts_code: string;
+  name: string | null;
+  idx_type: string | null;
+  leading: string | null;
+  leading_code: string | null;
+  pct_change: number | null;
+  leading_pct: number | null;
+  total_mv: number | null;
+  turnover_rate: number | null;
+  up_num: number | null;
+  down_num: number | null;
+  level: string | null;
 }
 
 // ── Fundamental types ────────────────────────────────────────

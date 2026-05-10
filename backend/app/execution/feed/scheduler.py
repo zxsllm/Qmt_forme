@@ -38,7 +38,9 @@ MIN_SYNC_TIME = dtime(17, 0)     # 分钟数据独立子进程（与 daily-sync 
 REVIEW_TIME = dtime(17, 30)      # daily-sync 完成后生成日复盘
 VERIFY_TIME = dtime(17, 35)      # 复盘后自动验证早盘计划
 BACKFILL_TIME = dtime(18, 0)     # 监控事件回填（依赖分钟同步完成）
+LATE_EVENING_TIME = dtime(22, 30)  # ths_hot 完整版 (is_new=Y) 单独补拉
 PLAN_TIME = dtime(8, 0)          # generate morning plan before market open
+MORNING_KPL_TIME = dtime(8, 45)  # kpl_list 次日 08:30 出 → 拉前一交易日
 
 
 def _is_trading_time(now: datetime | None = None) -> bool:
@@ -245,6 +247,8 @@ class MarketDataScheduler:
         self._plan_verified_today = False
         self._backfill_done_today = False
         self._monitor_cleaned_today = False
+        self._late_evening_done_today = False
+        self._morning_kpl_done_today = False
 
     def _maybe_pull_mins(self) -> None:
         """Pull minute bars for watched stocks — fire-and-forget, every 60s."""
@@ -615,6 +619,8 @@ class MarketDataScheduler:
                     self._plan_verified_today = False
                     self._backfill_done_today = False
                     self._monitor_cleaned_today = False
+                    self._late_evening_done_today = False
+                    self._morning_kpl_done_today = False
 
                     if self._today_is_trading:
                         from app.execution.engine import trading_engine
@@ -717,6 +723,9 @@ class MarketDataScheduler:
                         if self._min_sync_done_today or t >= dtime(18, 30):
                             self._run_monitor_backfill()
                             self._backfill_done_today = True
+                    if not self._late_evening_done_today and t >= LATE_EVENING_TIME:
+                        self._run_late_evening_sync()
+                        self._late_evening_done_today = True
                     await asyncio.sleep(self.NEWS_REFRESH_INTERVAL)
 
                 else:
@@ -731,6 +740,10 @@ class MarketDataScheduler:
                     if not self._plan_generated_today and t >= PLAN_TIME:
                         self._run_plan_generation()
                         self._plan_generated_today = True
+                    # Pre-market: kpl_list 在 08:30 出，08:45 拉前一交易日数据
+                    if not self._morning_kpl_done_today and t >= MORNING_KPL_TIME:
+                        self._run_morning_kpl_sync()
+                        self._morning_kpl_done_today = True
                     await asyncio.sleep(self.NEWS_REFRESH_INTERVAL)
 
             except asyncio.CancelledError:
@@ -918,6 +931,62 @@ class MarketDataScheduler:
                 logger.exception("post-market min-sync failed")
 
         asyncio.ensure_future(_msync())
+
+    def _run_late_evening_sync(self) -> None:
+        """22:30 触发：拉 ths_hot 当日完整版 (is_new=Y)。
+
+        Tushare ths_hot 接口的 is_new=Y 版本要 22:30 之后才出。盘后 17:00
+        sync_limit_board 已拉过中间版 (is_new=N)，这里再拉一次完整版，UK 含 is_new
+        所以两版本共存。
+        """
+        from app.execution.feed.data_sync import run_late_evening_sync
+
+        trade_date = datetime.now().strftime("%Y%m%d")
+        logger.info("late-evening sync: starting for %s", trade_date)
+
+        async def _les():
+            try:
+                await asyncio.to_thread(run_late_evening_sync, trade_date)
+                logger.info("late-evening sync completed for %s", trade_date)
+            except Exception:
+                logger.exception("late-evening sync failed")
+
+        asyncio.ensure_future(_les())
+
+    def _run_morning_kpl_sync(self) -> None:
+        """次日 08:45 触发：拉前一交易日的 kpl_list（08:30 才出）。"""
+        from app.execution.feed.data_sync import run_morning_kpl_sync
+
+        # 查 trade_cal 找上一交易日
+        async def _resolve_prev_trade_date() -> str | None:
+            try:
+                from app.core.database import async_session
+                from sqlalchemy import text
+                today_str = datetime.now().strftime("%Y%m%d")
+                async with async_session() as session:
+                    r = await session.execute(text(
+                        "SELECT MAX(cal_date) FROM trade_cal "
+                        "WHERE cal_date < :td AND is_open = 1"
+                    ), {"td": today_str})
+                    row = r.fetchone()
+                    return row[0] if row and row[0] else None
+            except Exception:
+                logger.exception("resolve prev trade date failed")
+                return None
+
+        async def _mks():
+            prev_td = await _resolve_prev_trade_date()
+            if not prev_td:
+                logger.warning("morning kpl sync: cannot resolve previous trade date, skip")
+                return
+            logger.info("morning kpl sync: starting for prev_td=%s", prev_td)
+            try:
+                await asyncio.to_thread(run_morning_kpl_sync, prev_td)
+                logger.info("morning kpl sync completed for %s", prev_td)
+            except Exception:
+                logger.exception("morning kpl sync failed")
+
+        asyncio.ensure_future(_mks())
 
     NEWS_RETENTION_DAYS = 30
 

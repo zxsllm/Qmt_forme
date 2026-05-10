@@ -668,8 +668,156 @@ def sync_limit_board(conn, svc: TushareService, trade_date: str) -> int:
             except Exception:
                 pass
 
+    # === 题材热榜 Tab 扩展：moneyflow_cnt_ths + dc_index(×3) + ths_hot(中间版) ===
+    # 三类接口都是盘后即出（17:00 已 ready）；ths_hot 22:30 完整版由 sync_late_evening_ths_hot 单独再拉一次
+    ext_tasks = [
+        ("moneyflow_cnt_ths", {}),
+        ("dc_index", {"idx_type": "行业板块"}),
+        ("dc_index", {"idx_type": "概念板块"}),
+        ("dc_index", {"idx_type": "地域板块"}),
+        ("ths_hot", {"is_new": "N"}),
+    ]
+    for table, extra in ext_tasks:
+        try:
+            _time.sleep(1.3)
+            df = svc.query(table, trade_date=trade_date, **extra)
+            if df is None or df.empty:
+                continue
+            df = df.copy()
+            if table == "ths_hot":
+                df["is_new"] = extra.get("is_new", "Y")
+            elif table == "dc_index":
+                df["idx_type"] = extra["idx_type"]
+            elif table == "moneyflow_cnt_ths":
+                # Tushare 偶尔在板块列表里塞"2026一季报预增"这种文字描述行，ts_code 为空
+                df = df.dropna(subset=["ts_code"])
+                if df.empty:
+                    continue
+            cols, vals = _df_to_values(df)
+            # PG 保留字处理: leading / lead 等需加引号
+            if table == "dc_index":
+                cols = [f'"{c}"' if c in ("leading",) else c for c in cols]
+            execute_values(
+                conn.cursor(),
+                f"INSERT INTO {table} ({','.join(cols)}) VALUES %s ON CONFLICT DO NOTHING",
+                vals,
+            )
+            conn.commit()
+            total += len(df)
+        except Exception:
+            conn.rollback()
+            logger.warning("sync %s(%s) failed", table, extra, exc_info=True)
+
     logger.info("sync: limit_board %s +%d rows", trade_date, total)
     return total
+
+
+def sync_late_evening_ths_hot(conn, svc: TushareService, trade_date: str) -> int:
+    """22:30 之后单独拉 ths_hot 完整版 (is_new=Y)。
+
+    ths_hot 接口规则：is_new=Y 是当日 22:30 才出的最终完整热榜。盘后 17:00
+    sync_limit_board 已经拉过 is_new=N 中间版；这里再拉一次 Y 版本，UK 含 is_new
+    所以两版本共存。
+    """
+    total = 0
+    try:
+        df = svc.query("ths_hot", trade_date=trade_date, is_new="Y")
+        if df is None or df.empty:
+            logger.info("sync_late_evening_ths_hot: empty for %s", trade_date)
+            return 0
+        df = df.copy()
+        df["is_new"] = "Y"
+        cols, vals = _df_to_values(df)
+        execute_values(
+            conn.cursor(),
+            f"INSERT INTO ths_hot ({','.join(cols)}) VALUES %s ON CONFLICT DO NOTHING",
+            vals,
+        )
+        conn.commit()
+        total = len(df)
+        logger.info("sync: ths_hot(is_new=Y) %s +%d rows", trade_date, total)
+    except Exception:
+        conn.rollback()
+        logger.warning("sync ths_hot(is_new=Y) failed", exc_info=True)
+    return total
+
+
+def sync_morning_kpl_list(conn, svc: TushareService, trade_date: str) -> int:
+    """次日 08:45 拉前一交易日的 kpl_list（开盘啦榜单 08:30 出数据）。
+
+    trade_date 应该是上一交易日（在调用方解析）。kpl_list 含题材 / 连板状态 /
+    主力净额，是识别"昨日主线"的核心数据源。
+    """
+    total = 0
+    try:
+        df = svc.kpl_list(trade_date=trade_date)
+        if df is None or df.empty:
+            logger.info("sync_morning_kpl_list: empty for %s", trade_date)
+            return 0
+        cols, vals = _df_to_values(df)
+        _auto_add_columns(conn, "kpl_list", cols, df)
+        execute_values(
+            conn.cursor(),
+            f"INSERT INTO kpl_list ({','.join(cols)}) VALUES %s ON CONFLICT DO NOTHING",
+            vals,
+        )
+        conn.commit()
+        total = len(df)
+        logger.info("sync: kpl_list %s +%d rows", trade_date, total)
+    except Exception:
+        conn.rollback()
+        logger.warning("sync kpl_list failed", exc_info=True)
+    return total
+
+
+def run_late_evening_sync(trade_date: str) -> dict[str, bool]:
+    """22:30 触发：拉 ths_hot 当日完整版 (is_new=Y)。"""
+    from app.shared.sync_tracker import sync_tracker
+
+    logger.info("=== late-evening sync started (trade_date=%s) ===", trade_date)
+    db_url = _db_url()
+    svc = TushareService()
+    results: dict[str, bool] = {}
+
+    sync_tracker.begin("late_evening_ths_hot", trade_date)
+    try:
+        with psycopg2.connect(db_url) as conn:
+            conn.autocommit = False
+            rows = sync_late_evening_ths_hot(conn, svc, trade_date)
+        results["late_evening_ths_hot"] = True
+        sync_tracker.success("late_evening_ths_hot", rows)
+    except Exception as exc:
+        results["late_evening_ths_hot"] = False
+        sync_tracker.fail("late_evening_ths_hot", exc)
+        logger.exception("late-evening sync failed")
+
+    logger.info("=== late-evening sync done ===")
+    return results
+
+
+def run_morning_kpl_sync(trade_date: str) -> dict[str, bool]:
+    """次日 08:45 触发：拉 trade_date（前一交易日）的 kpl_list。"""
+    from app.shared.sync_tracker import sync_tracker
+
+    logger.info("=== morning kpl-list sync started (trade_date=%s) ===", trade_date)
+    db_url = _db_url()
+    svc = TushareService()
+    results: dict[str, bool] = {}
+
+    sync_tracker.begin("morning_kpl_list", trade_date)
+    try:
+        with psycopg2.connect(db_url) as conn:
+            conn.autocommit = False
+            rows = sync_morning_kpl_list(conn, svc, trade_date)
+        results["morning_kpl_list"] = True
+        sync_tracker.success("morning_kpl_list", rows)
+    except Exception as exc:
+        results["morning_kpl_list"] = False
+        sync_tracker.fail("morning_kpl_list", exc)
+        logger.exception("morning kpl-list sync failed")
+
+    logger.info("=== morning kpl-list sync done ===")
+    return results
 
 
 def sync_cb(conn, svc: TushareService, trade_date: str) -> int:

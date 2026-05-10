@@ -319,6 +319,41 @@ class TushareService:
         )
         return self.query("dc_hot", **kwargs)
 
+    def kpl_list(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "ts_code,name,trade_date,lu_time,ld_time,open_time,last_time,"
+            "lu_desc,tag,theme,net_change,bid_amount,status,bid_change,bid_turnover,"
+            "lu_bid_vol,pct_chg,bid_pct_chg,rzrq,limit_order,amount,turnover_rate,"
+            "free_float,lu_limit_order",
+        )
+        return self.query("kpl_list", **kwargs)
+
+    def ths_hot(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "trade_date,data_type,ts_code,ts_name,rank,pct_change,current_price,"
+            "concept,rank_reason,hot,rank_time",
+        )
+        return self.query("ths_hot", **kwargs)
+
+    def moneyflow_cnt_ths(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "trade_date,ts_code,name,lead_stock,close_price,pct_change,"
+            "industry_index,company_num,pct_change_stock,net_buy_amount,"
+            "net_sell_amount,net_amount",
+        )
+        return self.query("moneyflow_cnt_ths", **kwargs)
+
+    def dc_index(self, **kwargs) -> pd.DataFrame:
+        kwargs.setdefault(
+            "fields",
+            "ts_code,trade_date,name,leading,leading_code,pct_change,"
+            "leading_pct,total_mv,turnover_rate,up_num,down_num,level",
+        )
+        return self.query("dc_index", **kwargs)
+
     # ── Convertible Bond ──────────────────────────────────────────
 
     def cb_basic(self, **kwargs) -> pd.DataFrame:
