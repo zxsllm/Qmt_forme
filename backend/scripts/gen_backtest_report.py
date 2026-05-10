@@ -11,14 +11,17 @@ import argparse
 import asyncio
 import html
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.core.database import async_session  # noqa: E402
-from app.research.strategies.base_pattern import PatternSignal, PatternTrade  # noqa: E402
+from app.research.signals.long_head_detector import fetch_minute_quotes  # noqa: E402
+from app.research.strategies.base_pattern import PatternSignal, PatternTrade, load_sectors  # noqa: E402
 from app.research.strategies.pattern_01_long1_natural import Pattern01  # noqa: E402
+from sqlalchemy import text  # noqa: E402
 
 from test_pattern_backtest import (  # noqa: E402
     execute_signal, fetch_sector_followers, role_label,
@@ -40,27 +43,19 @@ def _hhmm(anchor: str, anchor_time: str | None) -> str:
     return "?"
 
 
-def build_buy_reason(sig: PatternSignal, sec_info: dict) -> str:
-    """根据信号字段拼一段中文买入理由。"""
+def build_trigger_reason(sig: PatternSignal, sec_info: dict) -> str:
+    """触发（买入）理由：主线 / 角色 / 龙 1 / 板块强度 / 买入锚点 / 策略 reason。"""
     role = role_label(sig.pick_role)
-    parts = []
+    parts = [f"<b>主线</b>: {_h(sig.sector)} ／ <b>角色</b>: {_h(role)}"]
 
-    # 主线 + 标的
-    parts.append(f"<b>主线</b>: {_h(sig.sector)}")
-    parts.append(f"<b>角色</b>: {_h(role)}")
-
-    # CB 关联
     if sig.pick_kind == "cb":
-        und = sig.underlying_code or "?"
-        parts.append(f"<b>正股</b>: {_h(und)}")
+        parts.append(f"<b>正股</b>: {_h(sig.underlying_code or '?')}")
 
-    # 龙 1
     parts.append(
         f"<b>龙 1</b>: {_h(sig.long1_name)}({_h(sig.long1_tag)}) "
         f"首封 {_h(sig.long1_first_time)}，当日炸板 {sig.long1_open_times} 次"
     )
 
-    # 板块强度
     if sec_info:
         max_stock = sec_info.get("max_stock")
         if max_stock:
@@ -68,27 +63,157 @@ def build_buy_reason(sig: PatternSignal, sec_info: dict) -> str:
         followers = sec_info.get("followers", [])
         at_long1 = sec_info.get("at_long1_count", 0)
         parts.append(
-            f"<b>跟风</b>: 龙 1 封板时刻已封 {at_long1} 只 / 全天 {len(followers)} 只"
+            f"<b>板块涨停</b>: 龙 1 封板时刻已封 {at_long1} 只 ／ 全天 {len(followers)} 只"
         )
     else:
-        parts.append("<b>跟风</b>: 萌芽板块 / 板块成员未识别")
+        parts.append("<b>板块</b>: 萌芽板块 / 成员未识别")
 
-    # 买入策略
     buy_t = _hhmm(sig.buy_anchor, sig.buy_anchor_time)
-    sell_t = _hhmm(sig.sell_anchor, sig.sell_anchor_time)
-    parts.append(
-        f"<b>买入</b>: {sig.buy_anchor} ({buy_t}) → "
-        f"<b>卖出</b>: {sig.sell_anchor} ({sell_t})"
-    )
+    parts.append(f"<b>买入锚点</b>: {sig.buy_anchor} ({buy_t})")
 
-    # 持有方式
-    parts.append(f"<b>持有</b>: {_h(sig.holding)}")
-
-    # 信号原始 reason
     if sig.reason:
         parts.append(f"<b>策略 reason</b>: {_h(sig.reason)}")
 
     return "<br>".join(parts)
+
+
+def build_sell_reason(sig: PatternSignal) -> str:
+    """卖出理由：根据 sell_anchor / sell_anchor_time / pick_kind 推断 L_CB 状态机分支。"""
+    if sig.sell_anchor == "next_open":
+        if sig.pick_kind == "cb":
+            return (
+                "<b>L_CB A 分支（升级隔夜）</b>: 板块共识达标（≥3 涨停 + 炸板 ≤1）→ "
+                "CB 升级为隔夜持有，T+1 09:30 开盘卖出（博次日高开溢价）"
+            )
+        return (
+            "<b>L1 / L2 正股标准隔夜</b>: T+1 09:30 开盘卖出，"
+            "博次日高开溢价（自然涨停启动 + 板块共识强 → 次日资金延续概率高）"
+        )
+
+    if sig.sell_anchor == "today_close":
+        return (
+            "<b>L_CB D 分支（fallback）</b>: 盘中 underlying 既未封板共识达标也未触跌停止损 → "
+            "T 日 14:55 尾盘 fallback 卖出（保守不留隔夜）"
+        )
+
+    if sig.sell_anchor == "intraday_at" and sig.sell_anchor_time:
+        sell_hhmm = f"{sig.sell_anchor_time[:2]}:{sig.sell_anchor_time[2:4]}"
+        # 用买入时间和卖出时间的差分推断分支
+        if sig.buy_anchor_time:
+            try:
+                buy_min = int(sig.buy_anchor_time[:2]) * 60 + int(sig.buy_anchor_time[2:4])
+                sell_min = int(sig.sell_anchor_time[:2]) * 60 + int(sig.sell_anchor_time[2:4])
+                diff = sell_min - buy_min
+                if diff <= 5:
+                    return (
+                        f"<b>L_CB B 分支（T+0 立卖）</b>: 买入后 {diff} 分钟内 underlying "
+                        f"封板共识不达标（板块未成 ≥3 涨停 或 炸板 >1）→ {sell_hhmm} 立即退出止损"
+                    )
+                if diff <= 60:
+                    return (
+                        f"<b>L_CB C 分支（VWAP 止损）</b>: underlying 跌破日内 VWAP → "
+                        f"{sell_hhmm} 盘中止损卖出（持仓 {diff} 分钟）"
+                    )
+                return (
+                    f"<b>L_CB 分支（盘中退出）</b>: underlying 板块炸板累计 ≥3 / 题材崩 → "
+                    f"{sell_hhmm} 退出（持仓 {diff} 分钟，可能升级后又回退）"
+                )
+            except Exception:
+                pass
+        return f"<b>盘中退出</b>: {sell_hhmm} 卖出（策略状态机决定）"
+
+    return f"<b>未知卖出锚点</b>: {sig.sell_anchor}"
+
+
+# ---------------------------------------------------------------------------
+# 板块共识股票（trigger 时点 ≥6%/≥8% 的板块成员，含未涨停的 ）
+# ---------------------------------------------------------------------------
+
+async def fetch_consensus_stocks(
+    s, sector: str, trade_date: str, anchor_hhmmss: str,
+    threshold: float, exclude_codes: set[str] | None = None,
+) -> list[dict]:
+    """拉指定时刻板块内涨幅 ≥threshold% 的所有股票（含未涨停）。"""
+    from app.research.signals.theme_taxonomy import ALIAS_TO_CANONICAL
+
+    if not sector or sector.startswith("("):
+        return []
+
+    aliases = [alias for alias, canon in ALIAS_TO_CANONICAL.items() if canon == sector]
+    sub_names = list({sector, *aliases})
+
+    cal_rows = (await s.execute(text(
+        "SELECT cal_date FROM trade_cal WHERE cal_date < :td AND is_open=1 "
+        "ORDER BY cal_date DESC LIMIT 5"
+    ), {"td": trade_date})).fetchall()
+    if not cal_rows:
+        return []
+    dates = [r[0] for r in cal_rows]
+
+    code_rows = (await s.execute(text(
+        "SELECT DISTINCT ts_code FROM daily_sector_review "
+        "WHERE trade_date = ANY(:dates) AND sector_name = ANY(:names) "
+        "AND source IN ('bankuai','jiuyan','llm_v2') "
+        "AND ts_code IS NOT NULL AND ts_code <> ''"
+    ), {"dates": dates, "names": sub_names})).fetchall()
+    codes = [r[0] for r in code_rows]
+    if not codes:
+        return []
+
+    quotes = await fetch_minute_quotes(s, trade_date, codes)
+    minute_dt = datetime.strptime(trade_date, "%Y%m%d").replace(
+        hour=int(anchor_hhmmss[:2]), minute=int(anchor_hhmmss[2:4])
+    )
+
+    excludes = exclude_codes or set()
+    consensus = []
+    for code in codes:
+        if code in excludes:
+            continue
+        q = quotes.get((code, minute_dt))
+        if q and q.pct >= threshold:
+            consensus.append({"code": code, "pct": q.pct, "is_limit": q.is_limit})
+
+    if consensus:
+        name_rows = (await s.execute(text(
+            "SELECT ts_code, name FROM stock_basic WHERE ts_code = ANY(:codes)"
+        ), {"codes": [c["code"] for c in consensus]})).fetchall()
+        name_map = {r[0]: (r[1] or "").replace(" ", "") for r in name_rows}
+        for c in consensus:
+            c["name"] = name_map.get(c["code"], c["code"])
+
+    consensus.sort(key=lambda x: (-int(x["is_limit"]), -x["pct"]))
+    return consensus
+
+
+def consensus_threshold_for(sig: PatternSignal) -> float:
+    """根据 reason / pick_role 推断该信号触发时用的共识阈值（6% 或 8%）。"""
+    if sig.reason and "≥8%" in sig.reason:
+        return 8.0
+    if sig.pick_role in ("shadow", "long2", "shadow_cb", "long2_cb"):
+        return 8.0
+    return 6.0
+
+
+def render_consensus(consensus: list[dict], threshold: float) -> str:
+    if not consensus:
+        return f"<span class='gray' style='font-size:12px'>触发时点板块内 ≥{threshold:.0f}% 共识股 0 只（去重 龙 1 / 标的）</span>"
+    items = []
+    for c in consensus:
+        cls = "red" if c.get("is_limit") else ""
+        flag = " 🔥" if c.get("is_limit") else ""
+        pct_str = f"+{c['pct']:.2f}%"
+        items.append(
+            f"<li><span class='{cls}'>{_h(c['name'])}</span> "
+            f"<span class='gray' style='font-size:11px'>({_h(c['code'])})</span> "
+            f"<span class='{cls}'>{pct_str}</span>{flag}</li>"
+        )
+    return (
+        f"<details open><summary style='cursor:pointer;color:#1890ff;font-size:12px;'>"
+        f"🎯 触发时点板块共识股 {len(consensus)} 只 ≥{threshold:.0f}%（🔥 = 当时已涨停）</summary>"
+        f"<ul style='margin:4px 0 0 20px;padding:0;font-size:12px;line-height:1.7;"
+        f"columns:2;column-gap:24px;'>{''.join(items)}</ul></details>"
+    )
 
 
 def render_followers(sec_info: dict) -> str:
@@ -151,7 +276,7 @@ tr:hover td { background-color: #f0f6ff; }
 
 
 def render_html(trade_date: str, results: list, summary: dict, pattern_desc: str) -> str:
-    """results: list of (idx, trade, sec_info, is_skip)"""
+    """results: list of (idx, trade, sec_info, consensus_stocks)"""
     win_count = summary["wins"]
     lose_count = summary["losses"]
     total = summary["total"]
@@ -167,7 +292,7 @@ def render_html(trade_date: str, results: list, summary: dict, pattern_desc: str
     # 已成交表行
     traded_rows = []
     skip_rows = []
-    for idx, trade, sec_info in results:
+    for idx, trade, sec_info, consensus in results:
         sig = trade.signal
         role = role_label(sig.pick_role)
         kind_tag = "CB" if sig.pick_kind == "cb" else "股"
@@ -205,8 +330,11 @@ def render_html(trade_date: str, results: list, summary: dict, pattern_desc: str
         sign_pct = "+" if trade.ret_pct > 0 else ""
         sign_pnl = "+" if trade.pnl > 0 else ""
 
-        reason_html = build_buy_reason(sig, sec_info)
+        trigger_html = build_trigger_reason(sig, sec_info)
+        sell_html = build_sell_reason(sig)
         followers_html = render_followers(sec_info)
+        consensus_threshold = consensus_threshold_for(sig)
+        consensus_html = render_consensus(consensus, consensus_threshold)
 
         traded_rows.append(f"""
 <tr class='{pnl_row_cls}'>
@@ -218,8 +346,16 @@ def render_html(trade_date: str, results: list, summary: dict, pattern_desc: str
   <td class='{ret_cls}'>{sign_pct}{trade.ret_pct}%</td>
   <td class='{ret_cls}'>{sign_pnl}{trade.pnl}</td>
   <td>
-    <div class='reason'>{reason_html}</div>
-    <div style='margin-top:6px'>{followers_html}</div>
+    <div class='reason' style='border-left:3px solid #fa8c16;padding-left:8px;margin-bottom:8px'>
+      <div style='color:#fa8c16;font-weight:700;margin-bottom:4px'>📥 触发理由（买入）</div>
+      {trigger_html}
+    </div>
+    <div class='reason' style='border-left:3px solid #1890ff;padding-left:8px;margin-bottom:8px'>
+      <div style='color:#1890ff;font-weight:700;margin-bottom:4px'>📤 卖出策略</div>
+      {sell_html}
+    </div>
+    <div style='margin-top:6px'>{consensus_html}</div>
+    <div style='margin-top:4px'>{followers_html}</div>
   </td>
 </tr>""")
 
@@ -295,40 +431,54 @@ async def gen_one(trade_date: str) -> str:
         sigs = await pattern.find_signals(s, trade_date)
     print(f"  信号数: {len(sigs)}")
 
-    results = []  # (idx, trade, sec_info)
+    results = []  # (idx, trade, sec_info, consensus)
     traded_today: set[tuple[str, str]] = set()
     wins: list[float] = []
     losses: list[float] = []
     skipped = 0
-    for i, sig in enumerate(sigs, 1):
-        key = (sig.trade_date, sig.pick_code)
-        if key in traded_today:
-            from app.research.strategies.base_pattern import PatternTrade as PT
-            trade = PT(
-                signal=sig, next_date="", buy_price=None, sell_price=None,
-                skip_reason=f"already_traded（同日 {sig.pick_code} 已被前序 sector 信号买入，本信号 sector={sig.sector} 跳过）"
+    async with async_session() as s_conn:
+        for i, sig in enumerate(sigs, 1):
+            key = (sig.trade_date, sig.pick_code)
+            if key in traded_today:
+                from app.research.strategies.base_pattern import PatternTrade as PT
+                trade = PT(
+                    signal=sig, next_date="", buy_price=None, sell_price=None,
+                    skip_reason=f"already_traded（同日 {sig.pick_code} 已被前序 sector 信号买入，本信号 sector={sig.sector} 跳过）"
+                )
+                results.append((i, trade, None, []))
+                skipped += 1
+                continue
+
+            trade = await execute_signal(sig)
+            if trade.skip_reason:
+                results.append((i, trade, None, []))
+                skipped += 1
+                continue
+            traded_today.add(key)
+
+            sec_info = await fetch_sector_followers(
+                sig.sector, sig.trade_date,
+                exclude_codes={sig.long1_code, sig.pick_code},
+                long1_first_time=sig.long1_first_time,
             )
-            results.append((i, trade, None))
-            skipped += 1
-            continue
 
-        trade = await execute_signal(sig)
-        if trade.skip_reason:
-            results.append((i, trade, None))
-            skipped += 1
-            continue
-        traded_today.add(key)
-
-        sec_info = await fetch_sector_followers(
-            sig.sector, sig.trade_date,
-            exclude_codes={sig.long1_code, sig.pick_code},
-            long1_first_time=sig.long1_first_time,
-        )
-        results.append((i, trade, sec_info))
-        if trade.pnl > 0:
-            wins.append(trade.pnl)
-        elif trade.pnl < 0:
-            losses.append(abs(trade.pnl))
+            # 板块共识股票（trigger 时点全板块成员中 ≥6%/≥8% 的）
+            anchor_hhmmss = sig.buy_anchor_time
+            if not anchor_hhmmss:
+                # 兜底：从 buy_anchor 推
+                anchor_hhmmss = {"today_close": "145500", "today_open": "093000"}.get(
+                    sig.buy_anchor, "093000"
+                )
+            threshold = consensus_threshold_for(sig)
+            consensus = await fetch_consensus_stocks(
+                s_conn, sig.sector, sig.trade_date, anchor_hhmmss, threshold,
+                exclude_codes={sig.long1_code, sig.pick_code},
+            )
+            results.append((i, trade, sec_info, consensus))
+            if trade.pnl > 0:
+                wins.append(trade.pnl)
+            elif trade.pnl < 0:
+                losses.append(abs(trade.pnl))
 
     valid_count = len([r for r in results if not r[1].skip_reason])
     avg_win = sum(wins) / len(wins) if wins else 0
