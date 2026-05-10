@@ -226,8 +226,9 @@ async def fetch_sector_followers(
 ) -> dict:
     """拉同板块当日涨停股明细。
 
-    sector 是归一后的主线名（如"国产芯片"），SQL 用 THEME_TO_SUBS 反向展开
-    匹配 daily 行里所有 sub-name（如"芯片"/"洁净室"/"半导体"等）。
+    sector 是归一后的细分主线名（如"光模块"/"PCB"/"算力租赁"），SQL 用
+    ALIAS_TO_CANONICAL 反向展开 — 找出所有归一到这个 canonical 的 raw alias，
+    一并匹配 daily_sector_review.sector_name。
 
     返回 dict 含:
         followers: list[dict]   — 跟风列表（去 exclude_codes，按 first_time 排）
@@ -235,10 +236,12 @@ async def fetch_sector_followers(
         max_stock: (name, tag)  — 板块最高板对应的票
         at_long1_count: int     — 龙1 封板时刻 (first_time <= long1_ft) 已经封板的跟风数
     """
-    from app.research.signals.theme_taxonomy import THEME_TO_SUBS
+    from app.research.signals.theme_taxonomy import ALIAS_TO_CANONICAL
     if not sector or sector.startswith("("):
         return {"followers": [], "max_board": 0, "max_stock": None, "at_long1_count": 0}
-    sub_names = list({sector, *THEME_TO_SUBS.get(sector, [])})
+    # 反向查：找所有归一到 sector 这个 canonical 细分的 raw alias
+    aliases = [alias for alias, canonical in ALIAS_TO_CANONICAL.items() if canonical == sector]
+    sub_names = list({sector, *aliases})
     async with async_session() as s:
         rows = (await s.execute(text(
             "SELECT DISTINCT ls.ts_code, ls.name, ls.first_time, ls.open_times, "

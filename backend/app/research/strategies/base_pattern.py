@@ -179,8 +179,10 @@ async def load_sectors(
     源：bankuai（板块必读，主源） + jiuyan（韭研公社） + llm_v2（LLM 主线判定）。
     板块必读为优先主源，韭研次之，LLM v2 作补充覆盖人工漏标。
     过滤：剔除"一季报预增/反弹/公告/其他"这类基本面属性 / 无主线归类。
-    归一：板块名通过 theme_taxonomy.SUB_TO_THEME 映射到主线
-         （芯片→国产芯片 / 锂电→电池产业链 / 钨/稀土→稀有金属 / PCB→PCB板 等）。
+    归一：板块名通过 theme_taxonomy.ALIAS_TO_CANONICAL 把同义词收敛到 canonical
+         细分主线（"光模块"="光通信模块"、"PCB"="PCB板"="印制电路板"），
+         小细分独立保留（光模块/光模块零件/光纤是 3 个不同主线），
+         未匹配 alias 的 sector_name 保留原始名（不再压成大筐）。
 
     N 日滚动并集 = 老主线 T 日仍然抓得到（昨日已识别），新主线 T 日漏掉
     （要等 T+1 进入名单），代价用户接受。
@@ -188,7 +190,7 @@ async def load_sectors(
     Raises:
         ValueError: trade_date 非交易日（避免静默退化到错误的 lookback 窗口）
     """
-    from app.research.signals.theme_taxonomy import SUB_TO_THEME
+    from app.research.signals.theme_taxonomy import ALIAS_TO_CANONICAL
 
     is_open = (await session.execute(text(
         "SELECT is_open FROM trade_cal WHERE cal_date=:td"
@@ -217,10 +219,10 @@ async def load_sectors(
         "AND sector_name NOT IN ('一季报预增','反弹','公告','其他')"
     ), {"dates": dates})).fetchall()
 
-    # 多源 / 多日 / 多 sub 板块合并到 canonical 主线，按 (sector, ts_code) 去重
+    # 多源 / 多日 / 同义词合并到 canonical 细分主线，按 (sector, ts_code) 去重
     merged: dict[str, set[str]] = {}
     for sec_name, ts_code in rows:
-        canonical = SUB_TO_THEME.get(sec_name, sec_name)
+        canonical = ALIAS_TO_CANONICAL.get(sec_name, sec_name)
         merged.setdefault(canonical, set()).add(ts_code)
     return {sec: sorted(codes) for sec, codes in merged.items()}
 
