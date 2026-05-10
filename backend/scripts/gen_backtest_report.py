@@ -285,9 +285,16 @@ def render_html(trade_date: str, results: list, summary: dict, pattern_desc: str
     pl_ratio = summary["pl_ratio"]
     pnl = summary["pnl"]
     skipped = summary["skipped"]
+    cost = summary["cost"]
+    revenue = summary["revenue"]
+    fees = summary["fees"]
+    avg_cost = summary["avg_cost"]
+    avg_win = summary["avg_win"]
+    avg_loss = summary["avg_loss"]
 
-    pnl_cls = "green" if pnl > 0 else ("red" if pnl < 0 else "gray")
-    avg_cls = "green" if avg_ret > 0 else ("red" if avg_ret < 0 else "gray")
+    # A 股配色：净盈亏 + = 红（盈利）／ - = 绿（亏损）
+    pnl_cls = "red" if pnl > 0 else ("green" if pnl < 0 else "gray")
+    avg_cls = "red" if avg_ret > 0 else ("green" if avg_ret < 0 else "gray")
 
     # 已成交表行
     traded_rows = []
@@ -336,15 +343,19 @@ def render_html(trade_date: str, results: list, summary: dict, pattern_desc: str
         consensus_threshold = consensus_threshold_for(sig)
         consensus_html = render_consensus(consensus, consensus_threshold)
 
+        # 每笔占用 + 回收（不计手续费，让用户看清"实际下单时打了多少钱进去"）
+        trade_cost = (trade.buy_price or 0) * trade.qty
+        trade_revenue = (trade.sell_price or 0) * trade.qty
+        qty_label = f"{trade.qty} {'张' if sig.pick_kind == 'cb' else '股'}"
         traded_rows.append(f"""
 <tr class='{pnl_row_cls}'>
   <td>{idx}</td>
   <td>{sector_html}</td>
   <td>{target_html}</td>
-  <td><div class='code'>{sig.trade_date} {buy_t}</div><div class='code'>¥{trade.buy_price}</div></td>
-  <td><div class='code'>{sell_date} {sell_t}</div><div class='code'>¥{trade.sell_price}</div></td>
+  <td><div class='code'>{sig.trade_date} {buy_t}</div><div class='code'>¥{trade.buy_price} × {qty_label}</div><div class='code' style='color:#666;font-size:11px'>占用 ¥{trade_cost:,.2f}</div></td>
+  <td><div class='code'>{sell_date} {sell_t}</div><div class='code'>¥{trade.sell_price} × {qty_label}</div><div class='code' style='color:#666;font-size:11px'>回收 ¥{trade_revenue:,.2f}</div></td>
   <td class='{ret_cls}'>{sign_pct}{trade.ret_pct}%</td>
-  <td class='{ret_cls}'>{sign_pnl}{trade.pnl}</td>
+  <td class='{ret_cls}'>{sign_pnl}¥{trade.pnl:,.2f}<div style='color:#999;font-size:11px;font-weight:normal'>手续费 ¥{trade.fee:.2f}</div></td>
   <td>
     <div class='reason' style='border-left:3px solid #fa8c16;padding-left:8px;margin-bottom:8px'>
       <div style='color:#fa8c16;font-weight:700;margin-bottom:4px'>📥 触发理由（买入）</div>
@@ -374,6 +385,16 @@ def render_html(trade_date: str, results: list, summary: dict, pattern_desc: str
     板块来源：bankuai + jiuyan + llm_v2 三源并集（细分主线粒度），ALIAS_TO_CANONICAL 同义词归一<br>
     撮合口径：分钟线，涨停封单容差 0.005，A 股 100 股 / CB 10 张，含手续费
   </div>
+
+  <div style='background:#fff;border:1px solid #e6e9ed;padding:12px 16px;margin:14px 0;font-size:13px;line-height:1.7;'>
+    <b style='color:#1890ff'>📖 指标说明</b><br>
+    · <b>净盈亏</b>: 单位元（¥）。每笔 = 卖出金额 - 买入金额 - 手续费（双向佣金 + 印花税 + 沪市过户费）。当日合计 = 所有成交净盈亏之和<br>
+    · <b>占用资金</b>: 单位元（¥）。每笔 = 买入价 × 数量（A 股 100 股 / CB 10 张）。当日合计 = 所有成交独立累加（策略不复用资金，每个信号都假定独立下单）<br>
+    · <b>胜率</b>: 净盈亏 &gt; 0 的笔数 / 成交总笔数<br>
+    · <b>盈亏比</b>: 平均盈利 ÷ 平均亏损（=平均赚一笔的金额是平均亏一笔金额的 N 倍）。盈亏比 &gt; 1 即使胜率低也能赚；&lt; 1 时即便胜率高也容易亏（典型如"小赚多次，一次大亏吃掉所有利润"）<br>
+    · <b>SKIP</b>: 信号被丢弃。原因可能是 unfillable_limit（涨停封单买不到）/ missing price（分钟数据缺失，常见于次日数据未拉）/ already_traded（同一标的当日已被前序 sector 信号买入，去重）
+  </div>
+
   <div class='summary'>
     <div>📊 {total} 笔成交</div>
     <div class='red'>✅ 胜 {win_count}</div>
@@ -381,8 +402,18 @@ def render_html(trade_date: str, results: list, summary: dict, pattern_desc: str
     <div>胜率 <b>{win_rate:.1f}%</b></div>
     <div class='{avg_cls}'>均收益 {'+' if avg_ret>0 else ''}{avg_ret:.2f}%</div>
     <div>盈亏比 <b>{pl_ratio:.2f}</b></div>
-    <div class='{pnl_cls}' style='font-size:17px'>PnL {'+' if pnl>0 else ''}{pnl:.2f}</div>
+    <div class='{pnl_cls}' style='font-size:17px'>净盈亏 {'+' if pnl>0 else ''}¥{pnl:,.2f}</div>
     <div class='gray'>⏭ SKIP {skipped} 个信号</div>
+  </div>
+
+  <div class='summary' style='border-left-color:#52c41a;background:#f6ffed'>
+    <div>💰 当日占用资金 <b>¥{cost:,.2f}</b></div>
+    <div>📥 卖出回收 <b>¥{revenue:,.2f}</b></div>
+    <div>💸 手续费合计 <b>¥{fees:,.2f}</b></div>
+    <div>📊 平均单笔投入 <b>¥{avg_cost:,.2f}</b></div>
+    <div class='gray' style='font-size:12px;font-weight:normal'>(每笔独立下单，不考虑资金复用)</div>
+    <div>🟢 平均盈利单 <b>¥{avg_win:,.2f}</b></div>
+    <div>🔴 平均亏损单 <b>¥{avg_loss:,.2f}</b></div>
   </div>
 
   <h2>已成交（{total} 笔）</h2>
@@ -392,10 +423,10 @@ def render_html(trade_date: str, results: list, summary: dict, pattern_desc: str
         <th style='width:40px'>#</th>
         <th style='width:130px'>主线 / 角色</th>
         <th style='width:160px'>标的</th>
-        <th style='width:130px'>买入</th>
-        <th style='width:130px'>卖出</th>
+        <th style='width:140px'>买入<br><span style='color:#999;font-weight:normal;font-size:11px'>时间 / 价 / 占用 ¥</span></th>
+        <th style='width:140px'>卖出<br><span style='color:#999;font-weight:normal;font-size:11px'>时间 / 价 / 回收 ¥</span></th>
         <th style='width:80px'>收益</th>
-        <th style='width:90px'>PnL</th>
+        <th style='width:100px'>净盈亏 (¥)</th>
         <th>买入理由 + 板块跟风</th>
       </tr>
     </thead>
@@ -489,13 +520,22 @@ async def gen_one(trade_date: str) -> str:
     avg_ret = sum(t.ret_pct for t in valid_trades) / len(valid_trades) if valid_trades else 0
     pnl = sum(t.pnl for t in valid_trades)
 
+    # 资金统计（不考虑分时复用，每笔独立计算占用 — 与策略无资金限制的口径一致）
+    cost = sum((t.buy_price or 0) * t.qty for t in valid_trades)
+    revenue = sum((t.sell_price or 0) * t.qty for t in valid_trades)
+    fees = sum(t.fee for t in valid_trades)
+    avg_cost = cost / valid_count if valid_count else 0
+
     summary = {
         "total": valid_count, "wins": len(wins), "losses": len(losses),
         "win_rate": win_rate, "avg_ret": avg_ret, "pl_ratio": pl_ratio, "pnl": pnl,
         "skipped": skipped,
+        "cost": cost, "revenue": revenue, "fees": fees, "avg_cost": avg_cost,
+        "avg_win": avg_win, "avg_loss": avg_loss,
     }
     print(f"  成交 {valid_count} 笔 / 胜 {len(wins)} / 负 {len(losses)} / "
-          f"胜率 {win_rate:.1f}% / 均 {avg_ret:+.2f}% / PnL {pnl:+.2f} / SKIP {skipped}")
+          f"胜率 {win_rate:.1f}% / 均 {avg_ret:+.2f}% / 净盈亏 {pnl:+.2f} / "
+          f"投入 ¥{cost:.0f} / SKIP {skipped}")
 
     # render_html 内部按"已成交 / SKIP"自动分两表，传完整 results
     html_str = render_html(trade_date, results, summary, pattern.description)
