@@ -78,6 +78,23 @@ L_CB_OVERNIGHT_OPEN_MAX = 1      # 板块累计炸板 ≤ 1 只（情绪稳）
 # ── 漏① 修复（思路 B）：升级隔夜后不锁死，每分钟复查板块炸板 ──
 # 升级时阈值是 broken ≤ 1，后续累计炸板再增加到 ≥ 3 即"题材开始崩" → 回退 T+0
 L_CB_RECHECK_BROKEN_MAX = 3
+# ── 漏② 修复：underlying 首次封板后给评估窗口，让市场达成共识（不再一刀切立卖）──
+# underlying 首封那一瞬间板块共识可能还没形成（如 5/7 盈峰 09:32 首封时算力只有龙1
+# 1 只涨停），此时立卖会误杀强势主线。给首封后 10min 窗口，期间每分钟复查 A 条件。
+L_CB_EVAL_WINDOW_MIN = 10
+# ── 买回机制：被早盘 C 误杀的票，板块情绪重燃 + CB 价不高 → 买回，重走 ABCD ──
+# 触发条件：
+#   1) 该 hold 已 evaluated（已被卖出）
+#   2) 已买回次数 < L_CB_REBUY_MAX_TIMES
+#   3) 卖出时刻之后，板块累计涨停新增 ≥ L_CB_REBUY_NEW_LIMITS_MIN 只
+#   4) CB 当前 close ≤ 我们卖出价（不追高）
+#   5) 当前时刻 ≤ L_CB_REBUY_DEADLINE（留时间走 ABCD）
+L_CB_REBUY_MAX_TIMES = 1                  # 同一标的当日最多买回 1 次
+L_CB_REBUY_NEW_LIMITS_MIN = 3             # 板块新增涨停 ≥ 3 只（要求板块真主升，不是零星接力）
+L_CB_REBUY_PRICE_RATIO = 1.02             # CB 当前价 ≤ 卖价 × 1.02（允许追高 2%，覆盖 C 卖在低点的情况）
+L_CB_REBUY_MIN_GAP_MIN = 5                # 距离卖出至少 5min（避免反复买卖）
+L_CB_REBUY_DEADLINE = "143000"            # 14:30 后不再买回
+L_CB_REBUY_FIXED_STOP_RATIO = 0.99        # 买回 hold 固定止损：CB 价 < 买回价 × 0.99 → 卖（不走 VWAP）
 
 # ── 萌芽主线 ──
 EMERGING_CUTOFF = "113000"             # 早盘结束前都监控
@@ -94,7 +111,18 @@ class _CbHolding:
     sector_codes: list[str]         # 板块成员（升级判定用）
     buy_minute: datetime
     ever_limit: bool = False        # underlying 是否曾封板
-    evaluated: bool = False         # 是否已决定 sell_anchor
+    evaluated: bool = False         # 是否已决定 sell_anchor（最终确定）
+    upgraded: bool = False          # 是否已升级 A 隔夜（区分 placeholder 和真升级）
+    first_limit_minute: datetime | None = None  # underlying 首次封板时刻（评估窗口起点）
+    last_close_below_vwap: bool = False  # 上一分钟是否 close < vwap（C 缓冲：连续 2min 才触发）
+    # ── 买回机制相关 ──
+    sell_minute: datetime | None = None      # 实际卖出时刻
+    sell_price: float | None = None          # 卖出时刻 CB close（用于"买回价 ≤ 卖价"约束）
+    sell_sector_limits: int = 0              # 卖出时刻板块累计涨停数（用于"新增涨停"判定）
+    rebuy_count: int = 0                     # 已买回次数
+    cb_minute_close: dict = field(default_factory=dict)  # dict[datetime, float] CB 全天分钟 close
+    is_rebuy: bool = False                   # 是否为买回 hold（走固定止损，不走 VWAP）
+    rebuy_price: float | None = None         # 买回价（固定止损基准）
 
 
 def _hhmmss(dt: datetime) -> str:
@@ -105,19 +133,42 @@ def _hhmm_label(dt: datetime) -> str:
     return dt.strftime("%H:%M")
 
 
-def _set_sell_overnight(hold: _CbHolding) -> None:
+def _set_sell_overnight(hold: _CbHolding, reason: str = "A_overnight") -> None:
     hold.signal.sell_anchor = "next_open"
     hold.signal.sell_anchor_time = None
+    hold.signal.sell_reason = reason
 
 
-def _set_sell_t0(hold: _CbHolding, when: datetime) -> None:
+def _set_sell_t0(hold: _CbHolding, when: datetime, reason: str = "") -> None:
     hold.signal.sell_anchor = "intraday_at"
     hold.signal.sell_anchor_time = _hhmmss(when)
+    if reason:
+        hold.signal.sell_reason = reason
+    # 记录卖出时刻 + CB 价格（用于买回判定）
+    hold.sell_minute = when
+    hold.sell_price = hold.cb_minute_close.get(when)
 
 
-def _set_sell_today_close(hold: _CbHolding) -> None:
+def _set_sell_today_close(hold: _CbHolding, reason: str = "D_today_close") -> None:
     hold.signal.sell_anchor = "today_close"
     hold.signal.sell_anchor_time = None
+    hold.signal.sell_reason = reason
+    # D fallback 不参与买回（已经到 14:55 收盘）
+
+
+async def _fetch_cb_minute_close(
+    session: AsyncSession, cb_code: str, trade_date: str,
+) -> dict:
+    """拉 CB 当日全天 1min close 序列，返回 dict[datetime, float]。"""
+    st = datetime.strptime(trade_date, "%Y%m%d").replace(hour=9, minute=0)
+    et = datetime.strptime(trade_date, "%Y%m%d").replace(hour=15, minute=30)
+    rows = (await session.execute(text(
+        "SELECT trade_time, close FROM cb_min_kline "
+        "WHERE ts_code=:c AND freq='1min' "
+        "AND trade_time >= :st AND trade_time <= :et "
+        "ORDER BY trade_time"
+    ), {"c": cb_code, "st": st, "et": et})).fetchall()
+    return {r[0]: float(r[1]) for r in rows if r[1] is not None}
 
 
 class Pattern01(BasePattern):
@@ -279,7 +330,19 @@ class Pattern01(BasePattern):
                     )
                     # （对应虚拟板块的 L1 检查已经在上面循环里触发了，这里只记日志）
 
-            # ── L_CB 持仓状态更新 ──
+            # ── L_CB 持仓状态更新（重写：C 全程独立 + 首封后 10min 评估窗）──
+            #
+            # 优先级（每分钟按顺序判定）:
+            #   [1] C VWAP 止损 — 全程独立，最高优先级（不论 ever_limit）
+            #   [2] underlying 首次封板 → 立即检查一次 A 条件，达标则升级；
+            #                            否则进入 10min 评估窗
+            #   [3] 已升级隔夜 → 复查板块崩（漏① 修复，沿用）
+            #   [4] 已封板未升级（评估窗内）→ 每分钟复查 A 条件；超时立卖
+            #
+            # 漏修复说明：
+            #   漏① 升级隔夜后板块整体崩 → 回退 T+0（沿用 L_CB_RECHECK_BROKEN_MAX）
+            #   漏② underlying 首封时板块共识未形成 → 给 10min 窗口达成（新增）
+            #   漏③ underlying 封板后 C VWAP 监控失效 → 提到全程独立（修问题 1）
             for hold in cb_holdings:
                 if hold.evaluated:
                     continue
@@ -289,37 +352,110 @@ class Pattern01(BasePattern):
                 q = quotes.get((hold.underlying, minute_dt))
                 if q is None:
                     continue
-                if q.is_limit and not hold.ever_limit:
-                    # underlying 当前分钟首次封板 → 评估升级
-                    hold.ever_limit = True
-                    sec_limit_n, sec_broken_n = count_sector_limit_state_intraday(
-                        quotes, hold.sector_codes, minute_dt,
-                    )
-                    upgrade = (
-                        sec_limit_n >= L_CB_OVERNIGHT_LIMIT_MIN
-                        and sec_broken_n <= L_CB_OVERNIGHT_OPEN_MAX
-                    )
-                    logger.info(
-                        "pattern_01 L_CB eval %s sector=%s underlying=%s at=%s "
-                        "limits=%d/%d broken=%d/%d → %s",
-                        trade_date, hold.sector, hold.underlying, _hhmm_label(minute_dt),
-                        sec_limit_n, L_CB_OVERNIGHT_LIMIT_MIN,
-                        sec_broken_n, L_CB_OVERNIGHT_OPEN_MAX,
-                        "overnight (待复查)" if upgrade else "T+0",
-                    )
-                    if upgrade:
-                        _set_sell_overnight(hold)
-                        # 漏① 修复：暂定隔夜，不锁死 evaluated，每分钟继续监控板块
-                    else:
-                        _set_sell_t0(hold, minute_dt)
+
+                # [1] 止损监控（最高优先级，不论 ever_limit）
+                # ──────────────────────────────────────────────────────
+                # 原始 hold: 走 C VWAP 止损（09:35 前 1min 缓冲）
+                # 买回 hold: 走固定止损（CB 价 < 买回价 × 0.99，不受 VWAP 干扰）
+                # 这样设计原因：买回价多在卖价附近，VWAP 受开盘 spike 污染，
+                # 买回后用 VWAP 会反复触发 C → 改用 CB 价相对买回价的固定止损
+                # ──────────────────────────────────────────────────────
+                if hold.is_rebuy and hold.rebuy_price is not None:
+                    # 买回 hold: CB 价格固定止损
+                    cb_now = hold.cb_minute_close.get(minute_dt)
+                    rebuy_stop = hold.rebuy_price * L_CB_REBUY_FIXED_STOP_RATIO
+                    if cb_now is not None and cb_now < rebuy_stop:
+                        sec_lim_at_sell, _ = count_sector_limit_state_intraday(
+                            quotes, hold.sector_codes, minute_dt,
+                        )
+                        hold.sell_sector_limits = sec_lim_at_sell
+                        logger.info(
+                            "pattern_01 L_CB rebuy-stoploss-fixed %s sector=%s underlying=%s "
+                            "at=%s cb_close=%.2f < 买回价 %.2f × %.2f = %.2f → 固定止损",
+                            trade_date, hold.sector, hold.underlying,
+                            _hhmm_label(minute_dt), cb_now,
+                            hold.rebuy_price, L_CB_REBUY_FIXED_STOP_RATIO, rebuy_stop,
+                        )
+                        _set_sell_t0(hold, minute_dt, reason="C_rebuy_fixed_stop")
                         hold.evaluated = True
-                elif hold.ever_limit and not hold.evaluated:
-                    # 漏① 修复：A 分支已暂定隔夜，每分钟复查板块炸板
-                    # 累计炸板 ≥ L_CB_RECHECK_BROKEN_MAX → 题材开始崩 → 回退 T+0
+                        continue
+                    # 不更新 last_close_below_vwap（买回 hold 不用 VWAP）
+                else:
+                    # 原始 hold: C VWAP 止损（09:35 前 1min 缓冲）
+                    vwap = compute_vwap_until(quotes, hold.underlying, minute_dt)
+                    current_below = (vwap is not None and q.close < vwap)
+                    buffer_cutoff = minute_dt.replace(hour=9, minute=35, second=0)
+                    use_buffer = minute_dt < buffer_cutoff
+
+                    if current_below:
+                        if use_buffer and not hold.last_close_below_vwap:
+                            logger.info(
+                                "pattern_01 L_CB vwap-buffer %s sector=%s underlying=%s at=%s "
+                                "close=%.2f < vwap=%.2f → 09:35 前缓冲，等下分钟确认",
+                                trade_date, hold.sector, hold.underlying,
+                                _hhmm_label(minute_dt), q.close, vwap,
+                            )
+                        else:
+                            reason_label = (
+                                "连续 2min 跌破（缓冲生效内）" if use_buffer
+                                else "09:35+ 立卖（无缓冲）"
+                            )
+                            sec_lim_at_sell, _ = count_sector_limit_state_intraday(
+                                quotes, hold.sector_codes, minute_dt,
+                            )
+                            hold.sell_sector_limits = sec_lim_at_sell
+                            logger.info(
+                                "pattern_01 L_CB stoploss-vwap %s sector=%s underlying=%s at=%s "
+                                "close=%.2f < vwap=%.2f → C 止损（%s, ever_limit=%s, 板块涨停=%d）",
+                                trade_date, hold.sector, hold.underlying,
+                                _hhmm_label(minute_dt), q.close, vwap,
+                                reason_label, hold.ever_limit, sec_lim_at_sell,
+                            )
+                            _set_sell_t0(hold, minute_dt, reason="C_vwap")
+                            hold.evaluated = True
+                            continue
+                    hold.last_close_below_vwap = current_below
+
+                # [2] underlying 还没封过板 → 等待封板（C 已检查过 VWAP）
+                if not hold.ever_limit:
+                    if q.is_limit:
+                        # 首次封板 → 记录窗口起点 + 立即检查 A 条件
+                        hold.ever_limit = True
+                        hold.first_limit_minute = minute_dt
+                        sec_limit_n, sec_broken_n = count_sector_limit_state_intraday(
+                            quotes, hold.sector_codes, minute_dt,
+                        )
+                        if (sec_limit_n >= L_CB_OVERNIGHT_LIMIT_MIN
+                                and sec_broken_n <= L_CB_OVERNIGHT_OPEN_MAX):
+                            logger.info(
+                                "pattern_01 L_CB upgrade-immediate %s sector=%s underlying=%s "
+                                "at=%s limits=%d broken=%d → A 隔夜（首封即达标）",
+                                trade_date, hold.sector, hold.underlying,
+                                _hhmm_label(minute_dt), sec_limit_n, sec_broken_n,
+                            )
+                            _set_sell_overnight(hold)
+                            hold.upgraded = True
+                            # 升级但不 evaluated，继续监控板块崩 + VWAP
+                        else:
+                            logger.info(
+                                "pattern_01 L_CB eval-window-start %s sector=%s underlying=%s "
+                                "at=%s limits=%d/%d broken=%d/%d → 进入 %dmin 评估窗",
+                                trade_date, hold.sector, hold.underlying,
+                                _hhmm_label(minute_dt),
+                                sec_limit_n, L_CB_OVERNIGHT_LIMIT_MIN,
+                                sec_broken_n, L_CB_OVERNIGHT_OPEN_MAX,
+                                L_CB_EVAL_WINDOW_MIN,
+                            )
+                    # else: 等待 underlying 封板（VWAP 已检查）
+                    continue
+
+                # [3] 已封板已升级隔夜 → 复查板块崩（漏① 修复，沿用）
+                if hold.upgraded:
                     sec_limit_n, sec_broken_n = count_sector_limit_state_intraday(
                         quotes, hold.sector_codes, minute_dt,
                     )
                     if sec_broken_n >= L_CB_RECHECK_BROKEN_MAX:
+                        hold.sell_sector_limits = sec_limit_n
                         logger.info(
                             "pattern_01 L_CB recheck-fallback %s sector=%s underlying=%s "
                             "at=%s limits=%d broken=%d≥%d → 回退 T+0",
@@ -327,28 +463,142 @@ class Pattern01(BasePattern):
                             _hhmm_label(minute_dt),
                             sec_limit_n, sec_broken_n, L_CB_RECHECK_BROKEN_MAX,
                         )
-                        _set_sell_t0(hold, minute_dt)
+                        _set_sell_t0(hold, minute_dt, reason="A_then_recheck_fallback")
                         hold.evaluated = True
-                elif not hold.ever_limit:
-                    # 还没封板 → 检查止损：close 跌破当日均价
-                    vwap = compute_vwap_until(quotes, hold.underlying, minute_dt)
-                    if vwap is not None and q.close < vwap:
-                        logger.info(
-                            "pattern_01 L_CB stoploss %s sector=%s underlying=%s at=%s "
-                            "close=%.2f < vwap=%.2f → T+0 cut",
-                            trade_date, hold.sector, hold.underlying,
-                            _hhmm_label(minute_dt), q.close, vwap,
-                        )
-                        _set_sell_t0(hold, minute_dt)
-                        hold.evaluated = True
+                    continue
+
+                # [4] 已封板未升级（评估窗内）→ 每分钟复查 A 条件；超时立卖
+                if hold.first_limit_minute is None:
+                    continue  # 安全兜底
+                elapsed_sec = (minute_dt - hold.first_limit_minute).total_seconds()
+                in_window = elapsed_sec <= L_CB_EVAL_WINDOW_MIN * 60
+
+                sec_limit_n, sec_broken_n = count_sector_limit_state_intraday(
+                    quotes, hold.sector_codes, minute_dt,
+                )
+                if (sec_limit_n >= L_CB_OVERNIGHT_LIMIT_MIN
+                        and sec_broken_n <= L_CB_OVERNIGHT_OPEN_MAX):
+                    logger.info(
+                        "pattern_01 L_CB upgrade-late %s sector=%s underlying=%s "
+                        "at=%s limits=%d broken=%d 窗口内+%dmin → A 隔夜",
+                        trade_date, hold.sector, hold.underlying,
+                        _hhmm_label(minute_dt), sec_limit_n, sec_broken_n,
+                        int(elapsed_sec // 60),
+                    )
+                    _set_sell_overnight(hold)
+                    hold.upgraded = True
+                    # 升级，下分钟进 [3] 复查板块崩
+                    continue
+
+                if not in_window:
+                    hold.sell_sector_limits = sec_limit_n
+                    logger.info(
+                        "pattern_01 L_CB t0-window-timeout %s sector=%s underlying=%s "
+                        "at=%s limits=%d/%d broken=%d/%d 窗口超时 → B 立卖",
+                        trade_date, hold.sector, hold.underlying,
+                        _hhmm_label(minute_dt),
+                        sec_limit_n, L_CB_OVERNIGHT_LIMIT_MIN,
+                        sec_broken_n, L_CB_OVERNIGHT_OPEN_MAX,
+                    )
+                    _set_sell_t0(hold, minute_dt, reason="B_window_timeout")
+                    hold.evaluated = True
+
+            # ── [5] 买回判定（每分钟末尾，扫描已卖出的 hold）──
+            # 板块新增涨停 ≥ 1 只 + CB 当前价 ≤ 卖价 + 时间 ≤ 14:30 → 买回，重走 ABCD
+            to_rebuy: list[dict] = []
+            cur_hhmmss = _hhmmss(minute_dt)
+            for hold in cb_holdings:
+                if not hold.evaluated:
+                    continue
+                if hold.rebuy_count >= L_CB_REBUY_MAX_TIMES:
+                    continue
+                if hold.sell_minute is None or hold.sell_price is None:
+                    continue
+                # 距离卖出至少 N 分钟（避免反复买卖白扣手续费）
+                gap_sec = (minute_dt - hold.sell_minute).total_seconds()
+                if gap_sec < L_CB_REBUY_MIN_GAP_MIN * 60:
+                    continue
+                if cur_hhmmss > L_CB_REBUY_DEADLINE:
+                    continue
+                # 板块新增涨停判定（要求板块真重燃，不是个别票）
+                sec_lim_now, _ = count_sector_limit_state_intraday(
+                    quotes, hold.sector_codes, minute_dt,
+                )
+                new_limits = sec_lim_now - hold.sell_sector_limits
+                if new_limits < L_CB_REBUY_NEW_LIMITS_MIN:
+                    continue
+                # CB 当前价 ≤ 卖价 × 倍率（默认 1.02 允许追高 2%）
+                cb_now_close = hold.cb_minute_close.get(minute_dt)
+                price_threshold = hold.sell_price * L_CB_REBUY_PRICE_RATIO
+                if cb_now_close is None or cb_now_close > price_threshold:
+                    continue
+                # ✓ 触发买回
+                hold.rebuy_count += 1  # 标记防止同分钟重复
+                to_rebuy.append({
+                    "hold": hold, "sec_lim_now": sec_lim_now,
+                    "new_limits": new_limits, "cb_now_close": cb_now_close,
+                })
+
+            for r in to_rebuy:
+                old = r["hold"]
+                cb_code = old.signal.pick_code
+                u_name = old.signal.pick_name.replace("转债", "")
+                logger.info(
+                    "pattern_01 L_CB rebuy %s sector=%s underlying=%s at=%s "
+                    "原卖价=%.2f → 买回价=%.2f / 板块涨停 %d→%d (+%d)",
+                    trade_date, old.sector, old.underlying, _hhmm_label(minute_dt),
+                    old.sell_price, r["cb_now_close"],
+                    old.sell_sector_limits, r["sec_lim_now"], r["new_limits"],
+                )
+                new_sig = PatternSignal(
+                    trade_date=trade_date,
+                    pattern=old.signal.pattern,
+                    sector=old.sector,
+                    long1_code=old.signal.long1_code,
+                    long1_name=old.signal.long1_name,
+                    long1_tag=old.signal.long1_tag,
+                    long1_first_time=old.signal.long1_first_time,
+                    long1_open_times=old.signal.long1_open_times,
+                    sector_size=r["sec_lim_now"],
+                    pick_code=cb_code,
+                    pick_name=old.signal.pick_name,
+                    pick_role="follower_cb_rebuy",
+                    pick_tag=old.signal.pick_tag,
+                    reason=(
+                        f"事后买回 板块涨停 {old.sell_sector_limits}→{r['sec_lim_now']}"
+                        f"(+{r['new_limits']}) 原卖价={old.sell_price:.2f} → "
+                        f"买回={r['cb_now_close']:.2f} 买{_hhmm_label(minute_dt)} "
+                        f"underlying={u_name}({old.underlying}) [L_CB 跟风债-买回]"
+                    ),
+                    holding="overnight",
+                    sell_anchor="next_open",
+                    pick_kind="cb",
+                    underlying_code=old.underlying,
+                    buy_anchor="intraday_at",
+                    buy_anchor_time=_hhmmss(minute_dt),
+                )
+                signals.append(new_sig)
+                cb_holdings.append(_CbHolding(
+                    signal=new_sig,
+                    underlying=old.underlying,
+                    sector=old.sector,
+                    sector_codes=old.sector_codes,
+                    buy_minute=minute_dt,
+                    cb_minute_close=old.cb_minute_close,
+                    rebuy_count=L_CB_REBUY_MAX_TIMES,  # 买回 hold 自身不再触发买回
+                    is_rebuy=True,
+                    rebuy_price=r["cb_now_close"],
+                ))
 
         # 6. 收尾：未 evaluated 的 L_CB
-        #   - ever_limit=True：A 分支暂定隔夜后板块没崩到回退阈值 → 维持 next_open
-        #   - ever_limit=False：全天没封过板也没跌破 VWAP → 保守 today_close
+        #   - upgraded=True: A 分支已升级隔夜后板块没崩 → 维持 next_open
+        #   - ever_limit=True 但未 upgraded: 评估窗内一直不达标，窗口在 14:55 才超时
+        #                                    → today_close fallback（保守不留隔夜）
+        #   - ever_limit=False: 全天没封过板也没跌破 VWAP → today_close fallback
         for hold in cb_holdings:
             if hold.evaluated:
                 continue
-            if hold.ever_limit:
+            if hold.upgraded:
                 logger.info(
                     "pattern_01 L_CB confirm-overnight %s sector=%s underlying=%s "
                     "→ 板块未崩，维持 next_open",
@@ -357,8 +607,9 @@ class Pattern01(BasePattern):
                 # sell_anchor 已在 A 分支设为 next_open，不动
             else:
                 logger.info(
-                    "pattern_01 L_CB default %s sector=%s underlying=%s → today_close",
-                    trade_date, hold.sector, hold.underlying,
+                    "pattern_01 L_CB default %s sector=%s underlying=%s "
+                    "(ever_limit=%s) → today_close",
+                    trade_date, hold.sector, hold.underlying, hold.ever_limit,
                 )
                 _set_sell_today_close(hold)
             hold.evaluated = True
@@ -498,12 +749,15 @@ class Pattern01(BasePattern):
                 buy_anchor_time=buy_time_str,
             )
             signals.append(cb_sig)
+            # 预拉该 CB 全天分钟 close（用于卖出价记录 + 买回价判定）
+            cb_minute_close = await _fetch_cb_minute_close(session, cb_code, trade_date)
             cb_holdings.append(_CbHolding(
                 signal=cb_sig,
                 underlying=follower_code,
                 sector=sec_name,
                 sector_codes=codes,
                 buy_minute=minute_dt,
+                cb_minute_close=cb_minute_close,
             ))
         return (cand, minute_dt)
 

@@ -78,50 +78,64 @@ def build_trigger_reason(sig: PatternSignal, sec_info: dict) -> str:
 
 
 def build_sell_reason(sig: PatternSignal) -> str:
-    """卖出理由：根据 sell_anchor / sell_anchor_time / pick_kind 推断 L_CB 状态机分支。"""
+    """卖出理由：优先用 sig.sell_reason（真实分支），fallback 到 sell_anchor 推断。"""
+    sell_hhmm = ""
+    if sig.sell_anchor_time:
+        sell_hhmm = f"{sig.sell_anchor_time[:2]}:{sig.sell_anchor_time[2:4]}"
+    diff_label = ""
+    if sig.buy_anchor_time and sig.sell_anchor_time:
+        try:
+            buy_min = int(sig.buy_anchor_time[:2]) * 60 + int(sig.buy_anchor_time[2:4])
+            sell_min = int(sig.sell_anchor_time[:2]) * 60 + int(sig.sell_anchor_time[2:4])
+            diff_label = f"（持仓 {sell_min - buy_min} 分钟）"
+        except Exception:
+            pass
+
+    # 优先用 sell_reason 字段（pattern_01 直接写入的真实分支）
+    reason = getattr(sig, "sell_reason", "") or ""
+    if reason == "C_vwap":
+        return (
+            f"<b>L_CB C 分支（VWAP 止损）</b>: underlying close 跌破当日 VWAP（开盘累计均价）"
+            f"→ {sell_hhmm} 盘中止损卖出{diff_label}"
+        )
+    if reason == "C_rebuy_fixed_stop":
+        return (
+            f"<b>L_CB 买回固定止损</b>: CB 价跌破买回价 × 0.99（仅对买回 hold 生效，不走 VWAP）"
+            f"→ {sell_hhmm} 卖出{diff_label}"
+        )
+    if reason == "B_window_timeout":
+        return (
+            f"<b>L_CB B 分支（T+0 立卖 / 评估窗超时）</b>: underlying 首次封板后给 10min 评估窗，"
+            f"窗口内板块共识始终未达标（≥3 涨停 + 炸板 ≤1）→ {sell_hhmm} 窗口超时立卖{diff_label}"
+        )
+    if reason == "A_overnight":
+        return (
+            "<b>L_CB A 分支（升级隔夜）</b>: 板块共识达标（≥3 涨停 + 炸板 ≤1）→ "
+            "CB 升级为隔夜持有，T+1 09:30 开盘卖出"
+        )
+    if reason == "A_then_recheck_fallback":
+        return (
+            f"<b>L_CB A→T+0 回退（题材崩）</b>: 升级隔夜后板块累计炸板 ≥3 → "
+            f"{sell_hhmm} 盘中回退止损{diff_label}"
+        )
+    if reason == "D_today_close":
+        return (
+            "<b>L_CB D 分支（fallback）</b>: 盘中 underlying 既未封板共识达标也未触跌破止损 → "
+            "T 日 14:55 尾盘 fallback 卖出"
+        )
+
+    # Fallback：sell_reason 为空（旧数据 / 正股 L1/L2 信号）
     if sig.sell_anchor == "next_open":
         if sig.pick_kind == "cb":
-            return (
-                "<b>L_CB A 分支（升级隔夜）</b>: 板块共识达标（≥3 涨停 + 炸板 ≤1）→ "
-                "CB 升级为隔夜持有，T+1 09:30 开盘卖出（博次日高开溢价）"
-            )
+            return "<b>L_CB A 分支（升级隔夜）</b>: T+1 09:30 开盘卖出"
         return (
             "<b>L1 / L2 正股标准隔夜</b>: T+1 09:30 开盘卖出，"
             "博次日高开溢价（自然涨停启动 + 板块共识强 → 次日资金延续概率高）"
         )
-
     if sig.sell_anchor == "today_close":
-        return (
-            "<b>L_CB D 分支（fallback）</b>: 盘中 underlying 既未封板共识达标也未触跌停止损 → "
-            "T 日 14:55 尾盘 fallback 卖出（保守不留隔夜）"
-        )
-
-    if sig.sell_anchor == "intraday_at" and sig.sell_anchor_time:
-        sell_hhmm = f"{sig.sell_anchor_time[:2]}:{sig.sell_anchor_time[2:4]}"
-        # 用买入时间和卖出时间的差分推断分支
-        if sig.buy_anchor_time:
-            try:
-                buy_min = int(sig.buy_anchor_time[:2]) * 60 + int(sig.buy_anchor_time[2:4])
-                sell_min = int(sig.sell_anchor_time[:2]) * 60 + int(sig.sell_anchor_time[2:4])
-                diff = sell_min - buy_min
-                if diff <= 5:
-                    return (
-                        f"<b>L_CB B 分支（T+0 立卖）</b>: 买入后 {diff} 分钟内 underlying "
-                        f"封板共识不达标（板块未成 ≥3 涨停 或 炸板 >1）→ {sell_hhmm} 立即退出止损"
-                    )
-                if diff <= 60:
-                    return (
-                        f"<b>L_CB C 分支（VWAP 止损）</b>: underlying 跌破日内 VWAP → "
-                        f"{sell_hhmm} 盘中止损卖出（持仓 {diff} 分钟）"
-                    )
-                return (
-                    f"<b>L_CB 分支（盘中退出）</b>: underlying 板块炸板累计 ≥3 / 题材崩 → "
-                    f"{sell_hhmm} 退出（持仓 {diff} 分钟，可能升级后又回退）"
-                )
-            except Exception:
-                pass
-        return f"<b>盘中退出</b>: {sell_hhmm} 卖出（策略状态机决定）"
-
+        return "<b>D 分支 fallback</b>: T 日 14:55 尾盘卖出"
+    if sig.sell_anchor == "intraday_at" and sell_hhmm:
+        return f"<b>盘中卖出</b>: {sell_hhmm}{diff_label}"
     return f"<b>未知卖出锚点</b>: {sig.sell_anchor}"
 
 
@@ -270,6 +284,7 @@ tr:hover td { background-color: #f0f6ff; }
 .role-龙2, .role-龙2债 { background: #fff7e6; color: #d46b08; }
 .role-影子龙, .role-影子龙债 { background: #f9f0ff; color: #722ed1; }
 .role-跟风, .role-跟风债 { background: #f0f5ff; color: #1d39c4; }
+.role-跟风债-买回 { background: #fff7e6; color: #fa8c16; font-weight: 700; }
 .reason { font-size: 12px; line-height: 1.7; color: #444; }
 .footer { margin-top: 30px; color: #999; font-size: 12px; text-align: center; }
 """
@@ -463,13 +478,13 @@ async def gen_one(trade_date: str) -> str:
     print(f"  信号数: {len(sigs)}")
 
     results = []  # (idx, trade, sec_info, consensus)
-    traded_today: set[tuple[str, str]] = set()
+    traded_today: set[tuple[str, str, str | None]] = set()
     wins: list[float] = []
     losses: list[float] = []
     skipped = 0
     async with async_session() as s_conn:
         for i, sig in enumerate(sigs, 1):
-            key = (sig.trade_date, sig.pick_code)
+            key = (sig.trade_date, sig.pick_code, sig.buy_anchor_time)
             if key in traded_today:
                 from app.research.strategies.base_pattern import PatternTrade as PT
                 trade = PT(

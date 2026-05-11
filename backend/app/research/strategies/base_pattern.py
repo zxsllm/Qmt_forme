@@ -64,6 +64,7 @@ class PatternSignal:
     # 卖出锚点（分钟级精确撮合用）
     sell_anchor: str = "next_open"      # "next_open" | "today_close" | "intraday_at"
     sell_anchor_time: str | None = None # HHMMSS，仅当 sell_anchor="intraday_at"
+    sell_reason: str = ""               # 真实卖出分支（"A_overnight" | "B_window_timeout" | "C_vwap" | "D_today_close" | "A_then_recheck_fallback"）
 
 
 @dataclass

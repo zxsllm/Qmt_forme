@@ -174,6 +174,7 @@ ROLE_LABEL = {
     "long2_cb": "龙2债",
     "shadow_cb": "影子龙债",
     "follower_cb": "跟风债",
+    "follower_cb_rebuy": "跟风债-买回",
 }
 
 
@@ -356,11 +357,11 @@ async def run_pattern(pattern, label: str, dates: list[str]) -> list[PatternTrad
                 print(f"  {td}: 无触发")
                 continue
             print(f"\n  --- {td}：触发 {len(sigs)} 个信号 ---")
-            # 按 (trade_date, pick_code) 去重 — 同一只标的当日只下一笔单（与实盘 OMS 一致），
-            # 后续重复信号标 already_traded，不再下单（细分粒度后同股可能被多个 sector 识别）
-            traded_today: set[tuple[str, str]] = set()
+            # 按 (trade_date, pick_code, buy_anchor_time) 去重 — 同一只标的当日同一时刻只下一笔单
+            # （与实盘 OMS 一致）。buy_anchor_time 区分让"买回"信号能独立成交（同 CB 不同买入时刻）。
+            traded_today: set[tuple[str, str, str | None]] = set()
             for i, sig in enumerate(sigs, 1):
-                key = (sig.trade_date, sig.pick_code)
+                key = (sig.trade_date, sig.pick_code, sig.buy_anchor_time)
                 if key in traded_today:
                     skip_trade = PatternTrade(
                         signal=sig, next_date="", buy_price=None, sell_price=None,
