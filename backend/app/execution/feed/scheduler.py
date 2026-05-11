@@ -30,7 +30,7 @@ AFTERNOON_OPEN = dtime(13, 0)
 AFTERNOON_CLOSE = dtime(15, 0)
 
 POLL_INTERVAL = 1.2  # 50 calls/min extreme rate
-FULL_MARKET_PATTERN = "6*.SH,0*.SZ,3*.SZ,9*.BJ"
+FULL_MARKET_PATTERN = "6*.SH,0*.SZ,3*.SZ,9*.BJ,11*.SH,12*.SZ"
 
 SETTLEMENT_TIME = dtime(15, 1)   # 实时收盘指数快照持久化（Tushare 兜底）
 SYNC_TIME = dtime(17, 0)         # daily/财务/资金流等慢的 Tushare 接口
