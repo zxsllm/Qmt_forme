@@ -4,14 +4,17 @@
     python backend/scripts/test_pattern_backtest.py 20260428 20260429 20260430
     python backend/scripts/test_pattern_backtest.py --pattern 1,3,10 20260428 20260429 20260430
 
-回测口径（简化）：
-    - 买入价 = T 日 daily.close
-    - 卖出价 = T+1 日 daily.open
-    - 100 股 / 笔，含手续费
-    - 不模拟封单/撮合，只看价差 → 给出胜率 + 盈亏比的初步参考
+回测口径：
+    - 买卖价：分钟线（按 buy_anchor / sell_anchor 取真实分钟 close）
+    - 仓位：单笔目标 ¥10,000（向下取整到不超过 10k 的整手；最少 1 手）
+            * 正股 1 手 = 100 股；qty = max(1, floor(10000 / (price × 100))) × 100
+            * 转债 1 手 = 10 张；qty = max(1, floor(10000 / (price × 10))) × 10
+    - 含手续费（佣金万 2.5 最低 5、印花税 0.05% 仅卖、沪市过户 0.001%）
+    - 涨停封单：买入价 ≥ 涨停价（含 0.005 容差）→ SKIP
 """
 import argparse
 import asyncio
+import math
 import re
 import sys
 from pathlib import Path
@@ -89,6 +92,19 @@ async def fetch_stock_up_limit(s, td: str, code: str) -> float | None:
 # 散户挂涨停板 99% 排不进，buy_price ≥ up_limit - 0.005（容差 0.5 分）视为已封板 → skip
 LIMIT_UP_FILL_TOLERANCE = 0.005
 
+# 单笔目标仓位（向下取整到不超过此金额的整手；若 1 手已超也仍买 1 手）
+TARGET_NOTIONAL = 10_000
+
+
+def calc_qty(price: float, is_cb: bool) -> int:
+    """单笔目标 ¥10k：正股 1 手 = 100 股，转债 1 手 = 10 张；最少 1 手。"""
+    lot_size = 10 if is_cb else 100
+    one_lot_value = price * lot_size
+    if one_lot_value <= 0:
+        return lot_size
+    n_lots = max(1, math.floor(TARGET_NOTIONAL / one_lot_value))
+    return n_lots * lot_size
+
 
 ANCHOR_TIME_MAP = {
     "today_close": "145500",   # 散户能下单的最后实际可控时刻
@@ -151,7 +167,7 @@ async def execute_signal(sig: PatternSignal) -> PatternTrade:
                             sell_price=sell_price,
                             skip_reason=f"missing price (kind={sig.pick_kind})")
 
-    qty = 100 if not is_cb else 10  # CB 1 手 = 10 张
+    qty = calc_qty(buy_price, is_cb)  # 单笔目标 ¥10,000 向下取整
     bf = calc_fee(buy_price, qty, "BUY", sig.pick_code, kind=sig.pick_kind)
     sf = calc_fee(sell_price, qty, "SELL", sig.pick_code, kind=sig.pick_kind)
     fee = bf + sf

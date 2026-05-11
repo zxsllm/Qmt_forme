@@ -398,13 +398,13 @@ def render_html(trade_date: str, results: list, summary: dict, pattern_desc: str
   <div class='meta'>
     策略：{_h(pattern_desc)}<br>
     板块来源：bankuai + jiuyan + llm_v2 三源并集（细分主线粒度），ALIAS_TO_CANONICAL 同义词归一<br>
-    撮合口径：分钟线，涨停封单容差 0.005，A 股 100 股 / CB 10 张，含手续费
+    撮合口径：分钟线，涨停封单容差 0.005，单笔目标仓位 ¥10,000（向下取整到不超过 10k 的整手），含手续费
   </div>
 
   <div style='background:#fff;border:1px solid #e6e9ed;padding:12px 16px;margin:14px 0;font-size:13px;line-height:1.7;'>
     <b style='color:#1890ff'>📖 指标说明</b><br>
     · <b>净盈亏</b>: 单位元（¥）。每笔 = 卖出金额 - 买入金额 - 手续费（双向佣金 + 印花税 + 沪市过户费）。当日合计 = 所有成交净盈亏之和<br>
-    · <b>占用资金</b>: 单位元（¥）。每笔 = 买入价 × 数量（A 股 100 股 / CB 10 张）。当日合计 = 所有成交独立累加（策略不复用资金，每个信号都假定独立下单）<br>
+    · <b>占用资金</b>: 单位元（¥）。每笔 = 买入价 × 数量。数量按"单笔目标 ¥10,000 向下取整到不超过该金额的整手"计算（正股 1 手 100 股 / 转债 1 手 10 张；若 1 手已 ≥ ¥10,000 仍买 1 手）。当日合计 = 所有成交独立累加（策略不复用资金，每个信号都假定独立下单）<br>
     · <b>胜率</b>: 净盈亏 &gt; 0 的笔数 / 成交总笔数<br>
     · <b>盈亏比</b>: 平均盈利 ÷ 平均亏损（=平均赚一笔的金额是平均亏一笔金额的 N 倍）。盈亏比 &gt; 1 即使胜率低也能赚；&lt; 1 时即便胜率高也容易亏（典型如"小赚多次，一次大亏吃掉所有利润"）<br>
     · <b>SKIP</b>: 信号被丢弃。原因可能是 unfillable_limit（涨停封单买不到）/ missing price（分钟数据缺失，常见于次日数据未拉）/ already_traded（同一标的当日已被前序 sector 信号买入，去重）
