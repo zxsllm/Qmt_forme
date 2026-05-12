@@ -100,11 +100,16 @@ L_CB_REBUY_FIXED_STOP_RATIO = 0.99        # 买回 hold 固定止损：CB 价 < 
 # ── 偏离度过滤（L1 / L2）──
 # 候选当前价相对 T-1 前 5 个交易日收盘 MA5 偏离度上限。
 #   L2 影子龙：20%（4/29 中晶 23%、5/7 德明利 21% 被拦下）
-#   L1 龙1：  28%（5/7 金螳螂 31.8% 透支被拦；5/6 金螳螂 27.5% 即使保留也涨停封单
-#                   买不到、丰元 25.7% 次日高开难复制 — 实战不可成交）
+#   L1 龙1（按流通市值分档）：
+#     · 大市值 ≥ 800 亿 → 20%（盘大难加速、盈亏比天然低，例：德明利 995 亿 5/7
+#       偏离 21% 实际亏 -¥2868；按 28% 通行规则放行，按大市值 20% 拦下）
+#     · 中小市值 → 28%（5/7 金螳螂 31.8% 透支被拦；5/6 金螳螂 27.5% 即使保留也
+#       涨停封单买不到 / 丰元 25.7% 次日高开难复制 — 实战不可成交）
 # 语义：触发已经发生，但价位太高就看着不买（锁定 state、发"假装触发"信号写入报告，
 # 不实际成交、不再扫该板块）。数据不足的票（IPO 不久 / 长期停牌）默认通过。
 L1_MA5_DEVIATION_MAX = 0.28
+L1_MA5_DEVIATION_LARGE_MV = 0.20
+L1_LARGE_MV_THRESHOLD_YI = 800            # 亿元，流通市值分档线
 L2_MA5_DEVIATION_MAX = 0.20
 
 # ── 萌芽主线 ──
@@ -165,6 +170,31 @@ def _set_sell_today_close(hold: _CbHolding, reason: str = "D_today_close") -> No
     hold.signal.sell_anchor_time = None
     hold.signal.sell_reason = reason
     # D fallback 不参与买回（已经到 14:55 收盘）
+
+
+async def _fetch_pre_t_circ_mv(
+    session: AsyncSession, trade_date: str, codes: list[str],
+) -> dict[str, float]:
+    """拉 codes 在 T-1（最近一个交易日）的流通市值（亿元）。
+
+    用 T-1 数据是因为 T 日早盘还没有当日 daily_basic（盘后才落库）。
+    流通市值差异在隔夜内通常 < 5%，足够给"大市值"分档用。
+    """
+    if not codes:
+        return {}
+    rows = (await session.execute(text(
+        "WITH t1 AS ("
+        "  SELECT cal_date FROM trade_cal "
+        "  WHERE cal_date < :td AND is_open=1 "
+        "  ORDER BY cal_date DESC LIMIT 1"
+        ") "
+        "SELECT ts_code, (circ_mv/10000.0)::float AS circ_mv_yi "
+        "FROM daily_basic "
+        "WHERE trade_date IN (SELECT cal_date FROM t1) "
+        "  AND ts_code = ANY(:codes) "
+        "  AND circ_mv IS NOT NULL"
+    ), {"td": trade_date, "codes": codes})).fetchall()
+    return {r[0]: float(r[1]) for r in rows}
 
 
 async def _fetch_pre_t_ma5(
@@ -253,6 +283,8 @@ class Pattern01(BasePattern):
         meta = await fetch_stock_meta(session, trade_date, all_codes)
         # L2 偏离度过滤：T-1 前 5 个交易日收盘 MA5（盘中可知）
         ma5_map = await _fetch_pre_t_ma5(session, trade_date, all_codes)
+        # L1 大市值分档：T-1 流通市值（亿元）— 决定该票走大市值阈值还是普通阈值
+        circ_mv_map = await _fetch_pre_t_circ_mv(session, trade_date, all_codes)
         # 预计算 quotes 的 by-code 索引（提速 count_sector_limit_state_intraday 和 compute_vwap_until）
         minutes_by_code, first_limit_minute, close_cumsum_by_code = build_quote_indices(quotes)
 
@@ -344,7 +376,7 @@ class Pattern01(BasePattern):
                     triggered = await self._check_and_trigger_l1(
                         session, trade_date, sec_name, codes, minute_dt,
                         quotes, meta, signals, cb_holdings, is_emerging,
-                        t1_one_word, ma5_map,
+                        t1_one_word, ma5_map, circ_mv_map,
                     )
                     if triggered:
                         state["l1"] = triggered  # (code, minute)
@@ -680,6 +712,7 @@ class Pattern01(BasePattern):
         is_emerging: bool,
         t1_one_word: set[str],
         ma5_map: dict[str, float],
+        circ_mv_map: dict[str, float],
     ) -> tuple[str, datetime] | None:
         # 板块共识：≥6% 票数（萌芽板块 ≥3 只 / 已知主线 ≥2 只）
         min_required = (
@@ -740,23 +773,32 @@ class Pattern01(BasePattern):
         )
         # L1 偏离度检查：L1 触发已经发生，但价位太高就"假装触发"——发出 long1 信号
         # 但 buy_anchor="skip" 让回测层 SKIP；L_CB 跟风债照常发（板块共识仍然有效）
+        # 阈值按流通市值分档：≥800 亿用 20%（大盘股难加速），其他用 28%
         l1_dev_over = False
         l1_dev = None
         l1_ma5 = ma5_map.get(cand)
+        cand_mv = circ_mv_map.get(cand)
+        is_large_mv = (cand_mv is not None and cand_mv >= L1_LARGE_MV_THRESHOLD_YI)
+        l1_threshold = L1_MA5_DEVIATION_LARGE_MV if is_large_mv else L1_MA5_DEVIATION_MAX
         if l1_ma5 is not None and l1_ma5 > 0:
             l1_dev = (q.close - l1_ma5) / l1_ma5
-            if l1_dev > L1_MA5_DEVIATION_MAX:
+            if l1_dev > l1_threshold:
                 l1_dev_over = True
+                mv_label = f"大市值{cand_mv:.0f}亿" if is_large_mv else f"市值{cand_mv:.0f}亿" if cand_mv else "市值未知"
                 logger.info(
                     "pattern_01 funnel %s sector=%s L1 trigger-but-skip %s at=%s "
-                    "close=%.2f ma5=%.2f 偏离%.1f%%>阈值%.1f%% → 假装触发不买（L_CB 照发）",
+                    "close=%.2f ma5=%.2f 偏离%.1f%%>阈值%.1f%%(%s) → 假装触发不买（L_CB 照发）",
                     trade_date, sec_name, cand, _hhmm_label(minute_dt),
-                    q.close, l1_ma5, l1_dev * 100, L1_MA5_DEVIATION_MAX * 100,
+                    q.close, l1_ma5, l1_dev * 100, l1_threshold * 100, mv_label,
                 )
 
         # L1 信号（萌芽主线不发 L1 正股）
         if not is_emerging:
             if l1_dev_over:
+                mv_tag = (
+                    f"大市值{cand_mv:.0f}亿" if is_large_mv
+                    else (f"市值{cand_mv:.0f}亿" if cand_mv else "市值未知")
+                )
                 signals.append(PatternSignal(
                     **base,
                     pick_code=cand,
@@ -764,8 +806,8 @@ class Pattern01(BasePattern):
                     pick_role="long1",
                     pick_tag=l1_tag,
                     reason=(
-                        f"L1偏离度{l1_dev*100:.1f}%>阈值{L1_MA5_DEVIATION_MAX*100:.0f}% "
-                        f"close=¥{q.close:.2f}/MA5=¥{l1_ma5:.2f} "
+                        f"L1偏离度{l1_dev*100:.1f}%>阈值{l1_threshold*100:.0f}%"
+                        f"({mv_tag}) close=¥{q.close:.2f}/MA5=¥{l1_ma5:.2f} "
                         f"触发{_hhmm_label(minute_dt)} [假装触发-放弃买入]"
                     ),
                     pick_kind="stock",
