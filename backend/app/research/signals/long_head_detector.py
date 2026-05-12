@@ -487,8 +487,50 @@ def count_codes_above_pct_intraday(
     return n
 
 
+def build_quote_indices(quotes: QuoteMap) -> tuple[
+    dict[str, list[datetime]],          # quotes_minutes_by_code（已排序）
+    dict[str, datetime | None],         # first_limit_minute_by_code
+    dict[str, list[float]],             # close_cumsum_by_code（前缀和，索引同 minutes）
+]:
+    """一次性预计算 by-code 索引，把 O(N=全 dict)/调用 降到 O(1)。
+
+    返回:
+        minutes_by_code: 每只票按时间排序的 minute 列表
+        first_limit_minute_by_code: 每只票首次封板分钟（None 表示全天未封）
+        close_cumsum_by_code: 累计 close（cumsum_by_code[code][i] = sum(close[:i+1])）
+
+    用法见 count_sector_limit_state_intraday_fast / compute_vwap_until_fast。
+    """
+    by_code: dict[str, list[tuple[datetime, MinuteQuote]]] = {}
+    for (code, mt), q in quotes.items():
+        by_code.setdefault(code, []).append((mt, q))
+
+    minutes_by_code: dict[str, list[datetime]] = {}
+    first_limit: dict[str, datetime | None] = {}
+    cumsum_by_code: dict[str, list[float]] = {}
+    for code, lst in by_code.items():
+        lst.sort(key=lambda x: x[0])
+        minutes_by_code[code] = [mt for mt, _ in lst]
+        # first limit minute
+        fl = None
+        for mt, q in lst:
+            if q.is_limit:
+                fl = mt
+                break
+        first_limit[code] = fl
+        # close 前缀和
+        cum: list[float] = []
+        s = 0.0
+        for _, q in lst:
+            s += q.close
+            cum.append(s)
+        cumsum_by_code[code] = cum
+    return minutes_by_code, first_limit, cumsum_by_code
+
+
 def count_sector_limit_state_intraday(
     quotes: QuoteMap, codes: list[str], minute_dt: datetime,
+    first_limit_minute: dict[str, datetime | None] | None = None,
 ) -> tuple[int, int]:
     """事中：截至 minute_dt 板块内（已封过板的票数, 已炸过板的票数）。
 
@@ -496,13 +538,23 @@ def count_sector_limit_state_intraday(
         - 已封过板 = 在 [09:30, minute_dt] 任意一分钟 close ≥ pre × 1.099
         - 已炸过板 = 已封过板 且 minute_dt 当下 close < pre × 1.099
 
-    替代 count_sector_limit_state（旧版用 limit_stats.open_times，是当日累计字段
-    带 mild 未来风险）。
+    若传入 first_limit_minute（由 build_quote_indices 预计算），用 O(1) 查询；
+    否则 fallback 到老逻辑（每只票扫全 dict — 慢 100×+）。
     """
     ever_limit = 0
     broken = 0
+    if first_limit_minute is not None:
+        for code in codes:
+            flm = first_limit_minute.get(code)
+            if flm is None or flm > minute_dt:
+                continue
+            ever_limit += 1
+            cur = quotes.get((code, minute_dt))
+            if cur and not cur.is_limit:
+                broken += 1
+        return ever_limit, broken
+    # ---- fallback：老逻辑（兼容旧调用）----
     for code in codes:
-        # 扫该票在 [09:30, minute_dt] 的所有分钟，看是否曾封板
         had_limit = False
         for (c, mt), q in quotes.items():
             if c != code or mt > minute_dt:
@@ -513,7 +565,6 @@ def count_sector_limit_state_intraday(
         if not had_limit:
             continue
         ever_limit += 1
-        # 当下是否已炸（close < 涨停价）
         cur = quotes.get((code, minute_dt))
         if cur and not cur.is_limit:
             broken += 1
@@ -522,12 +573,25 @@ def count_sector_limit_state_intraday(
 
 def compute_vwap_until(
     quotes: QuoteMap, ts_code: str, minute_dt: datetime,
+    minutes_by_code: dict[str, list[datetime]] | None = None,
+    close_cumsum_by_code: dict[str, list[float]] | None = None,
 ) -> float | None:
     """事中：截至 minute_dt 那一分钟（含），该票的简单分时均价（AVG close）。
 
-    简化版：用 close 累计平均代替成交量加权（vol 字段未拉，需要的话再加）。
-    A 股盘中"分时均线"实际是 VWAP，但 close 累计平均在涨停盘是足够近似的指标。
+    若传入预计算索引（minutes_by_code + close_cumsum_by_code），用二分 + 前缀和
+    O(log M) 查询；否则 fallback 老逻辑。
     """
+    if minutes_by_code is not None and close_cumsum_by_code is not None:
+        from bisect import bisect_right
+        minutes = minutes_by_code.get(ts_code)
+        if not minutes:
+            return None
+        idx = bisect_right(minutes, minute_dt) - 1
+        if idx < 0:
+            return None
+        cum = close_cumsum_by_code[ts_code]
+        return cum[idx] / (idx + 1)
+    # ---- fallback ----
     closes: list[float] = []
     for (c, mt), q in quotes.items():
         if c != ts_code or mt > minute_dt:

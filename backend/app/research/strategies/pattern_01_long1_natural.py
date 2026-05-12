@@ -43,6 +43,7 @@ from sqlalchemy import text
 from app.research.data.cb_resolver import find_cb_for_stock
 from app.research.signals.long_head_detector import (
     QuoteMap,
+    build_quote_indices,
     compute_vwap_until,
     count_codes_above_pct_intraday,
     count_sector_limit_state_intraday,
@@ -95,6 +96,16 @@ L_CB_REBUY_PRICE_RATIO = 1.02             # CB 当前价 ≤ 卖价 × 1.02（�
 L_CB_REBUY_MIN_GAP_MIN = 5                # 距离卖出至少 5min（避免反复买卖）
 L_CB_REBUY_DEADLINE = "143000"            # 14:30 后不再买回
 L_CB_REBUY_FIXED_STOP_RATIO = 0.99        # 买回 hold 固定止损：CB 价 < 买回价 × 0.99 → 卖（不走 VWAP）
+
+# ── 偏离度过滤（L1 / L2）──
+# 候选当前价相对 T-1 前 5 个交易日收盘 MA5 偏离度上限。
+#   L2 影子龙：20%（4/29 中晶 23%、5/7 德明利 21% 被拦下）
+#   L1 龙1：  28%（5/7 金螳螂 31.8% 透支被拦；5/6 金螳螂 27.5% 即使保留也涨停封单
+#                   买不到、丰元 25.7% 次日高开难复制 — 实战不可成交）
+# 语义：触发已经发生，但价位太高就看着不买（锁定 state、发"假装触发"信号写入报告，
+# 不实际成交、不再扫该板块）。数据不足的票（IPO 不久 / 长期停牌）默认通过。
+L1_MA5_DEVIATION_MAX = 0.28
+L2_MA5_DEVIATION_MAX = 0.20
 
 # ── 萌芽主线 ──
 EMERGING_CUTOFF = "113000"             # 早盘结束前都监控
@@ -156,6 +167,31 @@ def _set_sell_today_close(hold: _CbHolding, reason: str = "D_today_close") -> No
     # D fallback 不参与买回（已经到 14:55 收盘）
 
 
+async def _fetch_pre_t_ma5(
+    session: AsyncSession, trade_date: str, codes: list[str],
+) -> dict[str, float]:
+    """拉 codes 在 T-1 之前 5 个交易日的收盘 MA5（盘中可知，无未来函数）。
+
+    数据不足 5 天的票（IPO 不久或停牌）不返回 → 调用方默认通过（不过滤）。
+    """
+    if not codes:
+        return {}
+    rows = (await session.execute(text(
+        "WITH pre_dates AS ("
+        "  SELECT cal_date FROM trade_cal "
+        "  WHERE cal_date < :td AND is_open=1 "
+        "  ORDER BY cal_date DESC LIMIT 5"
+        ") "
+        "SELECT ts_code, AVG(close)::float AS ma5 "
+        "FROM stock_daily "
+        "WHERE trade_date IN (SELECT cal_date FROM pre_dates) "
+        "  AND ts_code = ANY(:codes) "
+        "GROUP BY ts_code "
+        "HAVING COUNT(*) = 5"
+    ), {"td": trade_date, "codes": codes})).fetchall()
+    return {r[0]: float(r[1]) for r in rows}
+
+
 async def _fetch_cb_minute_close(
     session: AsyncSession, cb_code: str, trade_date: str,
 ) -> dict:
@@ -215,6 +251,22 @@ class Pattern01(BasePattern):
         industries = await fetch_industries(session, all_codes)
         # 展示元数据：中文名 / 板数标签 / 真实 first_time / 炸板数（仅输出用，不影响决策）
         meta = await fetch_stock_meta(session, trade_date, all_codes)
+        # L2 偏离度过滤：T-1 前 5 个交易日收盘 MA5（盘中可知）
+        ma5_map = await _fetch_pre_t_ma5(session, trade_date, all_codes)
+        # 预计算 quotes 的 by-code 索引（提速 count_sector_limit_state_intraday 和 compute_vwap_until）
+        minutes_by_code, first_limit_minute, close_cumsum_by_code = build_quote_indices(quotes)
+
+        def _count_state(secs, mt):
+            return count_sector_limit_state_intraday(
+                quotes, secs, mt, first_limit_minute=first_limit_minute
+            )
+
+        def _vwap(code, mt):
+            return compute_vwap_until(
+                quotes, code, mt,
+                minutes_by_code=minutes_by_code,
+                close_cumsum_by_code=close_cumsum_by_code,
+            )
 
         # ── B 规则：板块级闸门（开盘 09:30 板块内任何成员"开盘瞬间"封板 → 板块作废）──
         # 用 is_limit_at_open（基于 9:30 那根的 open 字段）而不是 close —— 集合竞价封死
@@ -292,7 +344,7 @@ class Pattern01(BasePattern):
                     triggered = await self._check_and_trigger_l1(
                         session, trade_date, sec_name, codes, minute_dt,
                         quotes, meta, signals, cb_holdings, is_emerging,
-                        t1_one_word,
+                        t1_one_word, ma5_map,
                     )
                     if triggered:
                         state["l1"] = triggered  # (code, minute)
@@ -301,7 +353,7 @@ class Pattern01(BasePattern):
                     l1_code = state["l1"][0]
                     triggered = await self._check_and_trigger_l2(
                         sec_name, codes, l1_code, minute_dt, quotes, meta, signals,
-                        t1_one_word,
+                        t1_one_word, ma5_map, trade_date,
                     )
                     if triggered:
                         state["l2"] = triggered
@@ -365,9 +417,7 @@ class Pattern01(BasePattern):
                     cb_now = hold.cb_minute_close.get(minute_dt)
                     rebuy_stop = hold.rebuy_price * L_CB_REBUY_FIXED_STOP_RATIO
                     if cb_now is not None and cb_now < rebuy_stop:
-                        sec_lim_at_sell, _ = count_sector_limit_state_intraday(
-                            quotes, hold.sector_codes, minute_dt,
-                        )
+                        sec_lim_at_sell, _ = _count_state(hold.sector_codes, minute_dt)
                         hold.sell_sector_limits = sec_lim_at_sell
                         logger.info(
                             "pattern_01 L_CB rebuy-stoploss-fixed %s sector=%s underlying=%s "
@@ -382,7 +432,7 @@ class Pattern01(BasePattern):
                     # 不更新 last_close_below_vwap（买回 hold 不用 VWAP）
                 else:
                     # 原始 hold: C VWAP 止损（09:35 前 1min 缓冲）
-                    vwap = compute_vwap_until(quotes, hold.underlying, minute_dt)
+                    vwap = _vwap(hold.underlying, minute_dt)
                     current_below = (vwap is not None and q.close < vwap)
                     buffer_cutoff = minute_dt.replace(hour=9, minute=35, second=0)
                     use_buffer = minute_dt < buffer_cutoff
@@ -400,9 +450,7 @@ class Pattern01(BasePattern):
                                 "连续 2min 跌破（缓冲生效内）" if use_buffer
                                 else "09:35+ 立卖（无缓冲）"
                             )
-                            sec_lim_at_sell, _ = count_sector_limit_state_intraday(
-                                quotes, hold.sector_codes, minute_dt,
-                            )
+                            sec_lim_at_sell, _ = _count_state(hold.sector_codes, minute_dt)
                             hold.sell_sector_limits = sec_lim_at_sell
                             logger.info(
                                 "pattern_01 L_CB stoploss-vwap %s sector=%s underlying=%s at=%s "
@@ -422,9 +470,7 @@ class Pattern01(BasePattern):
                         # 首次封板 → 记录窗口起点 + 立即检查 A 条件
                         hold.ever_limit = True
                         hold.first_limit_minute = minute_dt
-                        sec_limit_n, sec_broken_n = count_sector_limit_state_intraday(
-                            quotes, hold.sector_codes, minute_dt,
-                        )
+                        sec_limit_n, sec_broken_n = _count_state(hold.sector_codes, minute_dt)
                         if (sec_limit_n >= L_CB_OVERNIGHT_LIMIT_MIN
                                 and sec_broken_n <= L_CB_OVERNIGHT_OPEN_MAX):
                             logger.info(
@@ -451,9 +497,7 @@ class Pattern01(BasePattern):
 
                 # [3] 已封板已升级隔夜 → 复查板块崩（漏① 修复，沿用）
                 if hold.upgraded:
-                    sec_limit_n, sec_broken_n = count_sector_limit_state_intraday(
-                        quotes, hold.sector_codes, minute_dt,
-                    )
+                    sec_limit_n, sec_broken_n = _count_state(hold.sector_codes, minute_dt)
                     if sec_broken_n >= L_CB_RECHECK_BROKEN_MAX:
                         hold.sell_sector_limits = sec_limit_n
                         logger.info(
@@ -473,9 +517,7 @@ class Pattern01(BasePattern):
                 elapsed_sec = (minute_dt - hold.first_limit_minute).total_seconds()
                 in_window = elapsed_sec <= L_CB_EVAL_WINDOW_MIN * 60
 
-                sec_limit_n, sec_broken_n = count_sector_limit_state_intraday(
-                    quotes, hold.sector_codes, minute_dt,
-                )
+                sec_limit_n, sec_broken_n = _count_state(hold.sector_codes, minute_dt)
                 if (sec_limit_n >= L_CB_OVERNIGHT_LIMIT_MIN
                         and sec_broken_n <= L_CB_OVERNIGHT_OPEN_MAX):
                     logger.info(
@@ -521,9 +563,7 @@ class Pattern01(BasePattern):
                 if cur_hhmmss > L_CB_REBUY_DEADLINE:
                     continue
                 # 板块新增涨停判定（要求板块真重燃，不是个别票）
-                sec_lim_now, _ = count_sector_limit_state_intraday(
-                    quotes, hold.sector_codes, minute_dt,
-                )
+                sec_lim_now, _ = _count_state(hold.sector_codes, minute_dt)
                 new_limits = sec_lim_now - hold.sell_sector_limits
                 if new_limits < L_CB_REBUY_NEW_LIMITS_MIN:
                     continue
@@ -639,6 +679,7 @@ class Pattern01(BasePattern):
         cb_holdings: list[_CbHolding],
         is_emerging: bool,
         t1_one_word: set[str],
+        ma5_map: dict[str, float],
     ) -> tuple[str, datetime] | None:
         # 板块共识：≥6% 票数（萌芽板块 ≥3 只 / 已知主线 ≥2 只）
         min_required = (
@@ -697,22 +738,55 @@ class Pattern01(BasePattern):
             holding="overnight",
             sell_anchor="next_open",
         )
+        # L1 偏离度检查：L1 触发已经发生，但价位太高就"假装触发"——发出 long1 信号
+        # 但 buy_anchor="skip" 让回测层 SKIP；L_CB 跟风债照常发（板块共识仍然有效）
+        l1_dev_over = False
+        l1_dev = None
+        l1_ma5 = ma5_map.get(cand)
+        if l1_ma5 is not None and l1_ma5 > 0:
+            l1_dev = (q.close - l1_ma5) / l1_ma5
+            if l1_dev > L1_MA5_DEVIATION_MAX:
+                l1_dev_over = True
+                logger.info(
+                    "pattern_01 funnel %s sector=%s L1 trigger-but-skip %s at=%s "
+                    "close=%.2f ma5=%.2f 偏离%.1f%%>阈值%.1f%% → 假装触发不买（L_CB 照发）",
+                    trade_date, sec_name, cand, _hhmm_label(minute_dt),
+                    q.close, l1_ma5, l1_dev * 100, L1_MA5_DEVIATION_MAX * 100,
+                )
+
         # L1 信号（萌芽主线不发 L1 正股）
         if not is_emerging:
-            signals.append(PatternSignal(
-                **base,
-                pick_code=cand,
-                pick_name=l1_name,
-                pick_role="long1",
-                pick_tag=l1_tag,
-                reason=(
-                    f"事中L1 自身{q.pct:.1f}%≥9% 板块共识{consensus_n}只≥6% "
-                    f"触发{_hhmm_label(minute_dt)} [L1 正股]"
-                ),
-                pick_kind="stock",
-                buy_anchor="intraday_at",
-                buy_anchor_time=buy_time_str,
-            ))
+            if l1_dev_over:
+                signals.append(PatternSignal(
+                    **base,
+                    pick_code=cand,
+                    pick_name=l1_name,
+                    pick_role="long1",
+                    pick_tag=l1_tag,
+                    reason=(
+                        f"L1偏离度{l1_dev*100:.1f}%>阈值{L1_MA5_DEVIATION_MAX*100:.0f}% "
+                        f"close=¥{q.close:.2f}/MA5=¥{l1_ma5:.2f} "
+                        f"触发{_hhmm_label(minute_dt)} [假装触发-放弃买入]"
+                    ),
+                    pick_kind="stock",
+                    buy_anchor="skip",
+                    buy_anchor_time=buy_time_str,
+                ))
+            else:
+                signals.append(PatternSignal(
+                    **base,
+                    pick_code=cand,
+                    pick_name=l1_name,
+                    pick_role="long1",
+                    pick_tag=l1_tag,
+                    reason=(
+                        f"事中L1 自身{q.pct:.1f}%≥9% 板块共识{consensus_n}只≥6% "
+                        f"触发{_hhmm_label(minute_dt)} [L1 正股]"
+                    ),
+                    pick_kind="stock",
+                    buy_anchor="intraday_at",
+                    buy_anchor_time=buy_time_str,
+                ))
         # L_CB 同步：板块所有跟风（除 L1 自己外）的债
         role_prefix = "萌芽-" if is_emerging else ""
         for follower_code in codes:
@@ -775,6 +849,8 @@ class Pattern01(BasePattern):
         meta: dict[str, dict],
         signals: list[PatternSignal],
         t1_one_word: set[str],
+        ma5_map: dict[str, float],
+        trade_date: str,
     ) -> tuple[str, datetime] | None:
         consensus_n = count_codes_above_pct_intraday(
             quotes, codes, minute_dt, INTRADAY_CONSENSUS_PCT_L2
@@ -799,6 +875,49 @@ class Pattern01(BasePattern):
         # 按"龙2度"排序：1) 已封板优先；2) 涨幅高的 tie-breaker
         candidates.sort(key=lambda x: (0 if x[1].is_limit else 1, -x[1].pct))
         cand, q = candidates[0]
+        # 偏离度过滤：L2 已经出现，但价位太高就"假装触发"——发出 shadow 信号但 buy_anchor="skip"
+        # 让回测层 SKIP，报告里仍能看到这条"该买未买"的记录
+        ma5 = ma5_map.get(cand)
+        if ma5 is not None and ma5 > 0:
+            dev = (q.close - ma5) / ma5
+            if dev > L2_MA5_DEVIATION_MAX:
+                logger.info(
+                    "pattern_01 funnel %s sector=%s L2 trigger-but-skip %s at=%s "
+                    "close=%.2f ma5=%.2f 偏离%.1f%%>阈值%.1f%% → 假装触发不买",
+                    trade_date, sec_name, cand, _hhmm_label(minute_dt),
+                    q.close, ma5, dev * 100, L2_MA5_DEVIATION_MAX * 100,
+                )
+                buy_time_str = _hhmmss(minute_dt)
+                l1_meta_skip = meta.get(l1_code, {})
+                cand_meta_skip = meta.get(cand, {})
+                cand_name_skip = cand_meta_skip.get("name") or cand
+                cand_tag_skip = cand_meta_skip.get("tag") or f"{q.pct:.1f}%"
+                signals.append(PatternSignal(
+                    trade_date=minute_dt.strftime("%Y%m%d"),
+                    pattern="pattern_01",
+                    sector=sec_name,
+                    long1_code=l1_code,
+                    long1_name=l1_meta_skip.get("name") or l1_code,
+                    long1_tag=l1_meta_skip.get("tag") or "",
+                    long1_first_time=l1_meta_skip.get("first_time") or "",
+                    long1_open_times=l1_meta_skip.get("open_times", 0),
+                    sector_size=consensus_n,
+                    pick_code=cand,
+                    pick_name=cand_name_skip,
+                    pick_role="shadow",
+                    pick_tag=cand_tag_skip,
+                    reason=(
+                        f"L2偏离度{dev*100:.1f}%>阈值{L2_MA5_DEVIATION_MAX*100:.0f}% "
+                        f"close=¥{q.close:.2f}/MA5=¥{ma5:.2f} "
+                        f"触发{_hhmm_label(minute_dt)} [假装触发-放弃买入]"
+                    ),
+                    pick_kind="stock",
+                    buy_anchor="skip",
+                    buy_anchor_time=buy_time_str,
+                    holding="overnight",
+                    sell_anchor="next_open",
+                ))
+                return (cand, minute_dt)
         logger.info(
             "pattern_01 funnel sector=%s L2 trigger at=%s code=%s "
             "self_pct=%.2f%% is_limit=%s consensus=%d/%d candidates=%d",

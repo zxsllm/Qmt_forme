@@ -121,6 +121,13 @@ async def execute_signal(sig: PatternSignal) -> PatternTrade:
     sell_price: float | None = None
     next_date = sig.trade_date
 
+    # "假装触发"信号（L2 偏离度过高放弃买入）：不撮合，直接 SKIP，理由原样传出
+    if sig.buy_anchor == "skip":
+        return PatternTrade(
+            signal=sig, next_date="", buy_price=None, sell_price=None,
+            skip_reason=sig.reason or "skip(price_too_high)",
+        )
+
     async with async_session() as s:
         # ---- 买入价（分钟线）----
         if sig.buy_anchor in ("today_close", "today_open"):
