@@ -242,7 +242,7 @@ fi
 # ── 6. 生成 Markdown 报告 ──────────────────────────────────────
 echo "[6/6] 生成 Markdown 报告..."
 
-REPORT_DIR="$PROJECT_ROOT/reports"
+REPORT_DIR="$PROJECT_ROOT/reports/plan_review"
 mkdir -p "$REPORT_DIR"
 MD_FILE="$REPORT_DIR/plan_${TRADE_DATE}.md"
 
@@ -367,5 +367,5 @@ echo "  ✓ $MD_FILE"
 echo ""
 echo "=== 早盘计划生成完毕 ==="
 echo "目标日: $TRADE_DATE"
-echo "报告文件: reports/plan_${TRADE_DATE}.md"
+echo "报告文件: reports/plan_review/plan_${TRADE_DATE}.md"
 echo "日志文件: $LOG_FILE"

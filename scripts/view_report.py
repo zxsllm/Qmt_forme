@@ -9,7 +9,7 @@
     python3 scripts/view_report.py plan 20260411 --md     # 导出为 Markdown 文件
 
 日期格式: YYYYMMDD，省略则显示最新一条
---md 将报告导出到 reports/ 目录下的 .md 文件
+--md 将报告导出到 reports/plan_review/ 目录下的 .md 文件
 """
 
 import json
@@ -219,9 +219,9 @@ def show_plan(date: str | None = None):
 
 
 def _reports_dir() -> Path:
-    """Find project root and return reports/ directory."""
-    p = Path(__file__).resolve().parent.parent / "reports"
-    p.mkdir(exist_ok=True)
+    """Return reports/plan_review/（早盘 + 复盘 md 导出目录）。"""
+    p = Path(__file__).resolve().parent.parent / "reports" / "plan_review"
+    p.mkdir(parents=True, exist_ok=True)
     return p
 
 

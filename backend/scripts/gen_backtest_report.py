@@ -2,7 +2,7 @@
 
 用法:
     python backend/scripts/gen_backtest_report.py 20260430 20260506 20260507 20260508
-    输出到 reports/backtest_YYYYMMDD_pattern1.html
+    输出到 reports/backtest/backtest_YYYYMMDD_pattern1.html
 
 复用 test_pattern_backtest.py 的 execute_signal + fetch_sector_followers + Pattern01。
 HTML 含：汇总卡片 / 已成交表（含买入理由 + 板块跟风明细折叠）/ 未成交 SKIP 表。
@@ -401,6 +401,16 @@ def render_html(trade_date: str, results: list, summary: dict, pattern_desc: str
     撮合口径：分钟线，涨停封单容差 0.005，单笔目标仓位 ¥10,000（向下取整到不超过 10k 的整手），含手续费
   </div>
 
+  <div style='background:#fff7e6;border:1px solid #ffd591;padding:12px 16px;margin:14px 0;font-size:13px;line-height:1.7;'>
+    <b style='color:#fa8c16'>📐 偏离度过滤公式（"假装触发"信号的判定依据）</b><br>
+    · <b>偏离度</b> = (触发时刻 close − MA5) / MA5
+    &nbsp;&nbsp;<span style='color:#666'>例：5/8 09:39 迅捷兴 close=¥55.57，MA5=¥41.93，偏离度 = (55.57−41.93)/41.93 = +32.5%</span><br>
+    · <b>MA5</b> = 触发日之前 5 个交易日的收盘 close 算术平均（盘中可知，无未来函数）<br>
+    · <b>L1 龙1 阈值</b>：流通市值 ≥ 800 亿用 <b>20%</b>（大盘股难加速）；中小市值用 <b>28%</b><br>
+    · <b>L2 影子龙阈值</b>：统一 <b>20%</b>（影子龙是事中第二个被发现的，已被前几日拉得太远风险高）<br>
+    · 超阈值 → 输出"<b>[假装触发-放弃买入]</b>"信号写入报告但 buy_anchor=skip 不实买；L_CB 跟风债照常发（板块共识仍然有效）
+  </div>
+
   <div style='background:#fff;border:1px solid #e6e9ed;padding:12px 16px;margin:14px 0;font-size:13px;line-height:1.7;'>
     <b style='color:#1890ff'>📖 指标说明</b><br>
     · <b>净盈亏</b>: 单位元（¥）。每笔 = 卖出金额 - 买入金额 - 手续费（双向佣金 + 印花税 + 沪市过户费）。当日合计 = 所有成交净盈亏之和<br>
@@ -555,8 +565,8 @@ async def gen_one(trade_date: str) -> str:
     # render_html 内部按"已成交 / SKIP"自动分两表，传完整 results
     html_str = render_html(trade_date, results, summary, pattern.description)
 
-    out_dir = Path(__file__).resolve().parents[2] / "reports"
-    out_dir.mkdir(exist_ok=True)
+    out_dir = Path(__file__).resolve().parents[2] / "reports" / "backtest"
+    out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"backtest_{trade_date}_pattern1.html"
     out_path.write_text(html_str, encoding="utf-8")
     print(f"  → {out_path}")
