@@ -380,11 +380,18 @@ async def run_pattern(pattern, label: str, dates: list[str]) -> list[PatternTrad
                 print(f"  {td}: 无触发")
                 continue
             print(f"\n  --- {td}：触发 {len(sigs)} 个信号 ---")
-            # 按 (trade_date, pick_code, buy_anchor_time) 去重 — 同一只标的当日同一时刻只下一笔单
-            # （与实盘 OMS 一致）。buy_anchor_time 区分让"买回"信号能独立成交（同 CB 不同买入时刻）。
-            traded_today: set[tuple[str, str, str | None]] = set()
+            # 同一标的当日只下一笔单（与实盘 OMS 一致）。去重 key 按 pick_role 分两类：
+            #   - 一次性进场（long1 / shadow / follower_cb）：key = (trade_date, pick_code)
+            #     不论被多少个板块同时识别为 L1/L2/跟风，只买一次（避免 5/11 富春染织转债
+            #     同分钟被"纺织"+"机器人"两个板块各发一次债，造成同票买两次的 bug）
+            #   - 买回（follower_cb_rebuy）：key = (trade_date, pick_code, buy_anchor_time)
+            #     保留时刻区分，让早盘 C 止损后下午板块重燃的买回能独立成交
+            traded_today: set[tuple] = set()
             for i, sig in enumerate(sigs, 1):
-                key = (sig.trade_date, sig.pick_code, sig.buy_anchor_time)
+                if sig.pick_role == "follower_cb_rebuy":
+                    key = (sig.trade_date, sig.pick_code, sig.buy_anchor_time)
+                else:
+                    key = (sig.trade_date, sig.pick_code)
                 if key in traded_today:
                     skip_trade = PatternTrade(
                         signal=sig, next_date="", buy_price=None, sell_price=None,
