@@ -63,59 +63,37 @@ from app.research.strategies.base_pattern import (
 
 logger = logging.getLogger(__name__)
 
-# ── 共识阈值（分层）──
-INTRADAY_CONSENSUS_MIN_L1 = 2    # L1 板块第一次触发最少票数（已知主线）
-INTRADAY_CONSENSUS_MIN_L1_EMERGING = 3  # 萌芽板块 L1 加严：≥3 只 ≥6%（避免板块未真共振就触发）
-INTRADAY_CONSENSUS_MIN_L2 = 3    # L2 板块第二次触发最少票数
-INTRADAY_CONSENSUS_PCT_L1 = 6.0  # L1 共识阈值（不按板块缩放，"普涨"语义跨板块统一）
-INTRADAY_CONSENSUS_PCT_L2 = 8.0  # L2 共识阈值
-# 自身涨幅触发线："接近封板"语义，按板块涨停限制按比例缩放：
-#   主板 ±10% → 9%   创业/科创 ±20% → 18%   北交所 ±30% → 27%   ST ±5% → 4.5%
-SELF_TRIGGER_RATIO = 0.9         # = up_limit_pct × 0.9
+# ── 可调参数：从 pattern_01_params 读，通过 env var STRATEGY_PRESET 切换预设 ──
+# 默认 moderate = 当前回测使用的"适中"参数；行情差用 strict，行情好用 loose
+from app.research.strategies.pattern_01_params import ACTIVE as _P, PRESET_NAME
 
-# ── L_CB 升级隔夜条件（持仓 underlying 首次封板时评估）──
-L_CB_OVERNIGHT_LIMIT_MIN = 3     # 板块累计涨停 ≥ 3 只（共识强）
-L_CB_OVERNIGHT_OPEN_MAX = 1      # 板块累计炸板 ≤ 1 只（情绪稳）
-# ── 漏① 修复（思路 B）：升级隔夜后不锁死，每分钟复查板块炸板 ──
-# 升级时阈值是 broken ≤ 1，后续累计炸板再增加到 ≥ 3 即"题材开始崩" → 回退 T+0
-L_CB_RECHECK_BROKEN_MAX = 3
-# ── 漏② 修复：underlying 首次封板后给评估窗口，让市场达成共识（不再一刀切立卖）──
-# underlying 首封那一瞬间板块共识可能还没形成（如 5/7 盈峰 09:32 首封时算力只有龙1
-# 1 只涨停），此时立卖会误杀强势主线。给首封后 10min 窗口，期间每分钟复查 A 条件。
-L_CB_EVAL_WINDOW_MIN = 10
-# ── 买回机制：被早盘 C 误杀的票，板块情绪重燃 + CB 价不高 → 买回，重走 ABCD ──
-# 触发条件：
-#   1) 该 hold 已 evaluated（已被卖出）
-#   2) 已买回次数 < L_CB_REBUY_MAX_TIMES
-#   3) 卖出时刻之后，板块累计涨停新增 ≥ L_CB_REBUY_NEW_LIMITS_MIN 只
-#   4) CB 当前 close ≤ 我们卖出价（不追高）
-#   5) 当前时刻 ≤ L_CB_REBUY_DEADLINE（留时间走 ABCD）
-L_CB_REBUY_MAX_TIMES = 1                  # 同一标的当日最多买回 1 次
-L_CB_REBUY_NEW_LIMITS_MIN = 3             # 板块新增涨停 ≥ 3 只（要求板块真主升，不是零星接力）
-L_CB_REBUY_PRICE_RATIO = 1.02             # CB 当前价 ≤ 卖价 × 1.02（允许追高 2%，覆盖 C 卖在低点的情况）
-L_CB_REBUY_MIN_GAP_MIN = 5                # 距离卖出至少 5min（避免反复买卖）
-L_CB_REBUY_DEADLINE = "143000"            # 14:30 后不再买回
-L_CB_REBUY_FIXED_STOP_RATIO = 0.99        # 买回 hold 固定止损：CB 价 < 买回价 × 0.99 → 卖（不走 VWAP）
+INTRADAY_CONSENSUS_MIN_L1 = _P["INTRADAY_CONSENSUS_MIN_L1"]
+INTRADAY_CONSENSUS_MIN_L1_EMERGING = _P["INTRADAY_CONSENSUS_MIN_L1_EMERGING"]
+INTRADAY_CONSENSUS_MIN_L2 = _P["INTRADAY_CONSENSUS_MIN_L2"]
+INTRADAY_CONSENSUS_PCT_L1 = _P["INTRADAY_CONSENSUS_PCT_L1"]
+INTRADAY_CONSENSUS_PCT_L2 = _P["INTRADAY_CONSENSUS_PCT_L2"]
+SELF_TRIGGER_RATIO = _P["SELF_TRIGGER_RATIO"]
 
-# ── 偏离度过滤（L1 / L2）──
-# 候选当前价相对 T-1 前 5 个交易日收盘 MA5 偏离度上限。
-#   L2 影子龙：20%（4/29 中晶 23%、5/7 德明利 21% 被拦下）
-#   L1 龙1（按流通市值分档）：
-#     · 大市值 ≥ 800 亿 → 20%（盘大难加速、盈亏比天然低，例：德明利 995 亿 5/7
-#       偏离 21% 实际亏 -¥2868；按 28% 通行规则放行，按大市值 20% 拦下）
-#     · 中小市值 → 28%（5/7 金螳螂 31.8% 透支被拦；5/6 金螳螂 27.5% 即使保留也
-#       涨停封单买不到 / 丰元 25.7% 次日高开难复制 — 实战不可成交）
-# 语义：触发已经发生，但价位太高就看着不买（锁定 state、发"假装触发"信号写入报告，
-# 不实际成交、不再扫该板块）。数据不足的票（IPO 不久 / 长期停牌）默认通过。
-L1_MA5_DEVIATION_MAX = 0.28
-L1_MA5_DEVIATION_LARGE_MV = 0.20
-L1_LARGE_MV_THRESHOLD_YI = 800            # 亿元，流通市值分档线
-L2_MA5_DEVIATION_MAX = 0.20
+L_CB_OVERNIGHT_LIMIT_MIN = _P["L_CB_OVERNIGHT_LIMIT_MIN"]
+L_CB_OVERNIGHT_OPEN_MAX = _P["L_CB_OVERNIGHT_OPEN_MAX"]
+L_CB_RECHECK_BROKEN_MAX = _P["L_CB_RECHECK_BROKEN_MAX"]
+L_CB_EVAL_WINDOW_MIN = _P["L_CB_EVAL_WINDOW_MIN"]
 
-# ── 萌芽主线 ──
-EMERGING_CUTOFF = "113000"             # 早盘结束前都监控
-EMERGING_MIN_COUNT = 3                 # 同行业 ≥ 3 只名单外涨停
-EMERGING_SECTOR_PREFIX = "(萌芽-"
+L_CB_REBUY_MAX_TIMES = _P["L_CB_REBUY_MAX_TIMES"]
+L_CB_REBUY_NEW_LIMITS_MIN = _P["L_CB_REBUY_NEW_LIMITS_MIN"]
+L_CB_REBUY_PRICE_RATIO = _P["L_CB_REBUY_PRICE_RATIO"]
+L_CB_REBUY_MIN_GAP_MIN = _P["L_CB_REBUY_MIN_GAP_MIN"]
+L_CB_REBUY_DEADLINE = _P["L_CB_REBUY_DEADLINE"]
+L_CB_REBUY_FIXED_STOP_RATIO = _P["L_CB_REBUY_FIXED_STOP_RATIO"]
+
+L1_MA5_DEVIATION_MAX = _P["L1_MA5_DEVIATION_MAX"]
+L1_MA5_DEVIATION_LARGE_MV = _P["L1_MA5_DEVIATION_LARGE_MV"]
+L1_LARGE_MV_THRESHOLD_YI = _P["L1_LARGE_MV_THRESHOLD_YI"]
+L2_MA5_DEVIATION_MAX = _P["L2_MA5_DEVIATION_MAX"]
+
+EMERGING_CUTOFF = _P["EMERGING_CUTOFF"]
+EMERGING_MIN_COUNT = _P["EMERGING_MIN_COUNT"]
+EMERGING_SECTOR_PREFIX = "(萌芽-"  # 字符串前缀，不可调
 
 
 @dataclass

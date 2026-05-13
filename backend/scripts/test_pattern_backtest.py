@@ -93,7 +93,9 @@ async def fetch_stock_up_limit(s, td: str, code: str) -> float | None:
 LIMIT_UP_FILL_TOLERANCE = 0.005
 
 # 单笔目标仓位（向下取整到不超过此金额的整手；若 1 手已超也仍买 1 手）
-TARGET_NOTIONAL = 10_000
+# 通过 env var STRATEGY_PRESET 切换（moderate=10k / strict=5k / loose=15k）
+from app.research.strategies.pattern_01_params import ACTIVE as _P_BT
+TARGET_NOTIONAL = _P_BT["TARGET_NOTIONAL"]
 
 
 def calc_qty(price: float, is_cb: bool) -> int:

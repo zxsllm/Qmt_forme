@@ -21,6 +21,9 @@ from app.core.database import async_session  # noqa: E402
 from app.research.signals.long_head_detector import fetch_minute_quotes  # noqa: E402
 from app.research.strategies.base_pattern import PatternSignal, PatternTrade, load_sectors  # noqa: E402
 from app.research.strategies.pattern_01_long1_natural import Pattern01  # noqa: E402
+from app.research.strategies.pattern_01_params import (  # noqa: E402
+    ACTIVE, MODERATE, PRESET_NAME,
+)
 from sqlalchemy import text  # noqa: E402
 
 from test_pattern_backtest import (  # noqa: E402
@@ -290,6 +293,142 @@ tr:hover td { background-color: #f0f6ff; }
 """
 
 
+# 参数中文说明（每个 key 一行注释，在面板里跟参数值并列展示）
+PARAM_LABELS: dict[str, str] = {
+    # 共识阈值
+    "INTRADAY_CONSENSUS_MIN_L1": "L1 板块第一次触发最少共识票数",
+    "INTRADAY_CONSENSUS_MIN_L1_EMERGING": "萌芽板块 L1 加严的共识票数下限",
+    "INTRADAY_CONSENSUS_MIN_L2": "L2 板块第二次触发最少共识票数",
+    "INTRADAY_CONSENSUS_PCT_L1": "L1 共识涨幅阈值 (%)",
+    "INTRADAY_CONSENSUS_PCT_L2": "L2 共识涨幅阈值 (%)",
+    "SELF_TRIGGER_RATIO": "自身触发线 = 涨停幅 × 此比例（主板 10%×0.9=9%）",
+    # 偏离度过滤
+    "L1_MA5_DEVIATION_MAX": "L1 中小市值偏离 MA5 上限",
+    "L1_MA5_DEVIATION_LARGE_MV": "L1 大市值偏离 MA5 上限 (≥ 800 亿)",
+    "L1_LARGE_MV_THRESHOLD_YI": "L1 大市值分档线 (亿元)",
+    "L2_MA5_DEVIATION_MAX": "L2 影子龙偏离 MA5 上限",
+    # L_CB 升级隔夜
+    "L_CB_OVERNIGHT_LIMIT_MIN": "L_CB 升级隔夜：板块累计涨停 ≥ 此数",
+    "L_CB_OVERNIGHT_OPEN_MAX": "L_CB 升级隔夜：板块累计炸板 ≤ 此数",
+    "L_CB_RECHECK_BROKEN_MAX": "升级后回退 T+0：板块累计炸板 ≥ 此数",
+    "L_CB_EVAL_WINDOW_MIN": "underlying 首封后 A 条件评估窗口 (分钟)",
+    # L_CB 买回
+    "L_CB_REBUY_MAX_TIMES": "同标的当日最多买回次数",
+    "L_CB_REBUY_NEW_LIMITS_MIN": "买回触发：板块新增涨停 ≥ 此数",
+    "L_CB_REBUY_PRICE_RATIO": "买回价上限 = 卖价 × 此比例",
+    "L_CB_REBUY_MIN_GAP_MIN": "距卖出至少 N 分钟才允许买回",
+    "L_CB_REBUY_DEADLINE": "买回截止时刻 (HHMMSS)",
+    "L_CB_REBUY_FIXED_STOP_RATIO": "买回 hold 固定止损 = 买回价 × 此比例",
+    # 萌芽主线
+    "EMERGING_CUTOFF": "萌芽主线监控截止时刻 (HHMMSS)",
+    "EMERGING_MIN_COUNT": "萌芽板块成立：同行业 ≥ 此数封板",
+    # 撮合层
+    "TARGET_NOTIONAL": "单笔目标仓位 (元，向下取整到不超过此金额的整手)",
+}
+
+PARAM_GROUPS: list[tuple[str, list[str]]] = [
+    ("共识阈值", [
+        "INTRADAY_CONSENSUS_MIN_L1", "INTRADAY_CONSENSUS_MIN_L1_EMERGING",
+        "INTRADAY_CONSENSUS_MIN_L2",
+        "INTRADAY_CONSENSUS_PCT_L1", "INTRADAY_CONSENSUS_PCT_L2",
+        "SELF_TRIGGER_RATIO",
+    ]),
+    ("偏离度过滤", [
+        "L1_MA5_DEVIATION_MAX", "L1_MA5_DEVIATION_LARGE_MV",
+        "L1_LARGE_MV_THRESHOLD_YI", "L2_MA5_DEVIATION_MAX",
+    ]),
+    ("L_CB 升级隔夜", [
+        "L_CB_OVERNIGHT_LIMIT_MIN", "L_CB_OVERNIGHT_OPEN_MAX",
+        "L_CB_RECHECK_BROKEN_MAX", "L_CB_EVAL_WINDOW_MIN",
+    ]),
+    ("L_CB 买回", [
+        "L_CB_REBUY_MAX_TIMES", "L_CB_REBUY_NEW_LIMITS_MIN",
+        "L_CB_REBUY_PRICE_RATIO", "L_CB_REBUY_MIN_GAP_MIN",
+        "L_CB_REBUY_DEADLINE", "L_CB_REBUY_FIXED_STOP_RATIO",
+    ]),
+    ("萌芽主线", ["EMERGING_CUTOFF", "EMERGING_MIN_COUNT"]),
+    ("撮合层", ["TARGET_NOTIONAL"]),
+]
+
+PRESET_COLOR = {"moderate": "#1890ff", "strict": "#fa8c16", "loose": "#d4380d"}
+
+
+def render_preset_panel(pattern_desc: str) -> str:
+    """报告头部整合 panel：当前预设 + 全部参数（带中文说明）+ 偏离度公式 + 指标说明 + 撮合口径。"""
+    color = PRESET_COLOR.get(PRESET_NAME, "#666")
+    target = ACTIVE["TARGET_NOTIONAL"]
+    rows = []
+    for group_name, keys in PARAM_GROUPS:
+        items = []
+        for k in keys:
+            cur = ACTIVE.get(k)
+            mod = MODERATE.get(k)
+            label = PARAM_LABELS.get(k, "")
+            value_html = (
+                f"<b style='color:#d4380d'>{cur}</b>"
+                f" <span style='color:#999;font-size:11px'>(moderate={mod})</span>"
+                if cur != mod
+                else f"<span style='color:#444'>{cur}</span>"
+            )
+            items.append(
+                f"<li style='margin:2px 0'><span class='code'>{k}={value_html}</span>"
+                f"<div style='color:#888;font-size:11px;margin-left:14px'>"
+                f"&mdash; {_h(label)}</div></li>"
+            )
+        rows.append(
+            f"<div><div style='font-weight:bold;color:#1890ff;margin-bottom:4px'>"
+            f"▸ {group_name}</div>"
+            f"<ul style='list-style:none;padding-left:6px;margin:0;font-size:12px;"
+            f"line-height:1.5'>{''.join(items)}</ul></div>"
+        )
+
+    return f"""
+<div style='background:#fafbfc;border:2px solid {color};border-radius:6px;padding:14px 18px;margin:14px 0'>
+
+  <!-- 标题 + 当前预设 -->
+  <div style='font-size:15px;margin-bottom:10px'>
+    ⚙️ <b>当前预设</b>:
+    <span style='background:{color};color:#fff;padding:2px 10px;border-radius:3px;font-weight:bold;font-size:14px'>{PRESET_NAME.upper()}</span>
+    <span style='color:#666;font-size:12px;margin-left:10px'>切换方式: STRATEGY_PRESET=moderate|strict|loose（与 moderate 不同的参数标红）</span>
+  </div>
+
+  <!-- 策略口径 -->
+  <div style='font-size:13px;line-height:1.7;color:#555;margin-bottom:10px;padding:8px 12px;background:#fff;border-left:3px solid {color}'>
+    <b>策略</b>：{_h(pattern_desc)}<br>
+    <b>板块来源</b>：bankuai + jiuyan 两源并集（细分主线粒度），ALIAS_TO_CANONICAL 同义词归一<br>
+    <b>撮合口径</b>：分钟线 / 涨停封单容差 0.005 / 单笔目标仓位 ¥{target:,}（向下取整到不超过该金额的整手）/ 含手续费（佣金万 2.5 最低 5、印花税 0.05% 仅卖、沪市过户 0.001%）
+  </div>
+
+  <!-- 参数网格（含中文说明） -->
+  <div style='font-weight:bold;color:#1890ff;margin:14px 0 6px'>📋 全部可调参数</div>
+  <div style='display:grid;grid-template-columns:repeat(2,1fr);gap:14px 24px'>
+    {''.join(rows)}
+  </div>
+
+  <!-- 偏离度公式 -->
+  <div style='font-weight:bold;color:#fa8c16;margin:18px 0 6px'>📐 偏离度过滤公式（"假装触发"信号的判定依据）</div>
+  <div style='font-size:13px;line-height:1.7;color:#444'>
+    · <b>偏离度</b> = (触发时刻 close − MA5) / MA5
+    &nbsp;&nbsp;<span style='color:#666'>例：5/8 09:39 迅捷兴 close=¥55.57, MA5=¥41.93, 偏离度 = (55.57−41.93)/41.93 = +32.5%</span><br>
+    · <b>MA5</b> = 触发日之前 5 个交易日的收盘 close 算术平均（盘中可知，无未来函数）<br>
+    · 当前预设下，<b>L1 阈值</b> = 中小市值 {ACTIVE['L1_MA5_DEVIATION_MAX']*100:.0f}% / 大市值 ≥ {ACTIVE['L1_LARGE_MV_THRESHOLD_YI']} 亿用 {ACTIVE['L1_MA5_DEVIATION_LARGE_MV']*100:.0f}%；<b>L2 阈值</b> 统一 {ACTIVE['L2_MA5_DEVIATION_MAX']*100:.0f}%<br>
+    · 超阈值 → 输出"<b>[假装触发-放弃买入]</b>"信号写入报告但 buy_anchor=skip 不实买；L_CB 跟风债照常发（板块共识仍然有效）
+  </div>
+
+  <!-- 指标说明 -->
+  <div style='font-weight:bold;color:#1890ff;margin:18px 0 6px'>📖 指标说明</div>
+  <div style='font-size:13px;line-height:1.7;color:#444'>
+    · <b>净盈亏</b>: 单位元（¥）。每笔 = 卖出金额 − 买入金额 − 手续费。当日合计 = 所有成交净盈亏之和<br>
+    · <b>占用资金</b>: 每笔 = 买入价 × 数量。数量按单笔目标 ¥{target:,} 向下取整到不超过该金额的整手（正股 1 手 100 股 / 转债 1 手 10 张；若 1 手已 ≥ ¥{target:,} 仍买 1 手）。当日合计 = 所有成交独立累加（策略不复用资金）<br>
+    · <b>胜率</b>: 净盈亏 &gt; 0 的笔数 / 成交总笔数<br>
+    · <b>盈亏比</b>: 平均盈利 ÷ 平均亏损（= 平均赚一笔的金额是平均亏一笔金额的 N 倍）。 &gt; 1 即使胜率低也能赚；&lt; 1 时即便胜率高也容易亏<br>
+    · <b>SKIP</b>: 信号被丢弃。原因可能是 unfillable_limit（涨停封单买不到）/ missing price（分钟数据缺失）/ already_traded（同标的当日已被前序 sector 信号买入，去重）
+  </div>
+
+</div>
+"""
+
+
 def render_html(trade_date: str, results: list, summary: dict, pattern_desc: str) -> str:
     """results: list of (idx, trade, sec_info, consensus_stocks)"""
     win_count = summary["wins"]
@@ -394,31 +533,8 @@ def render_html(trade_date: str, results: list, summary: dict, pattern_desc: str
 <style>{CSS}</style>
 </head>
 <body>
-  <h1>{trade_date} 龙头隔夜回测报告 — 模式 1</h1>
-  <div class='meta'>
-    策略：{_h(pattern_desc)}<br>
-    板块来源：bankuai + jiuyan 两源并集（细分主线粒度），ALIAS_TO_CANONICAL 同义词归一<br>
-    撮合口径：分钟线，涨停封单容差 0.005，单笔目标仓位 ¥10,000（向下取整到不超过 10k 的整手），含手续费
-  </div>
-
-  <div style='background:#fff7e6;border:1px solid #ffd591;padding:12px 16px;margin:14px 0;font-size:13px;line-height:1.7;'>
-    <b style='color:#fa8c16'>📐 偏离度过滤公式（"假装触发"信号的判定依据）</b><br>
-    · <b>偏离度</b> = (触发时刻 close − MA5) / MA5
-    &nbsp;&nbsp;<span style='color:#666'>例：5/8 09:39 迅捷兴 close=¥55.57，MA5=¥41.93，偏离度 = (55.57−41.93)/41.93 = +32.5%</span><br>
-    · <b>MA5</b> = 触发日之前 5 个交易日的收盘 close 算术平均（盘中可知，无未来函数）<br>
-    · <b>L1 龙1 阈值</b>：流通市值 ≥ 800 亿用 <b>20%</b>（大盘股难加速）；中小市值用 <b>28%</b><br>
-    · <b>L2 影子龙阈值</b>：统一 <b>20%</b>（影子龙是事中第二个被发现的，已被前几日拉得太远风险高）<br>
-    · 超阈值 → 输出"<b>[假装触发-放弃买入]</b>"信号写入报告但 buy_anchor=skip 不实买；L_CB 跟风债照常发（板块共识仍然有效）
-  </div>
-
-  <div style='background:#fff;border:1px solid #e6e9ed;padding:12px 16px;margin:14px 0;font-size:13px;line-height:1.7;'>
-    <b style='color:#1890ff'>📖 指标说明</b><br>
-    · <b>净盈亏</b>: 单位元（¥）。每笔 = 卖出金额 - 买入金额 - 手续费（双向佣金 + 印花税 + 沪市过户费）。当日合计 = 所有成交净盈亏之和<br>
-    · <b>占用资金</b>: 单位元（¥）。每笔 = 买入价 × 数量。数量按"单笔目标 ¥10,000 向下取整到不超过该金额的整手"计算（正股 1 手 100 股 / 转债 1 手 10 张；若 1 手已 ≥ ¥10,000 仍买 1 手）。当日合计 = 所有成交独立累加（策略不复用资金，每个信号都假定独立下单）<br>
-    · <b>胜率</b>: 净盈亏 &gt; 0 的笔数 / 成交总笔数<br>
-    · <b>盈亏比</b>: 平均盈利 ÷ 平均亏损（=平均赚一笔的金额是平均亏一笔金额的 N 倍）。盈亏比 &gt; 1 即使胜率低也能赚；&lt; 1 时即便胜率高也容易亏（典型如"小赚多次，一次大亏吃掉所有利润"）<br>
-    · <b>SKIP</b>: 信号被丢弃。原因可能是 unfillable_limit（涨停封单买不到）/ missing price（分钟数据缺失，常见于次日数据未拉）/ already_traded（同一标的当日已被前序 sector 信号买入，去重）
-  </div>
+  <h1>{trade_date} 龙头隔夜回测报告 — 模式 1 [{PRESET_NAME}]</h1>
+  {render_preset_panel(pattern_desc)}
 
   <div class='summary'>
     <div>📊 {total} 笔成交</div>
