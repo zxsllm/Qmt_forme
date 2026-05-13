@@ -5,6 +5,7 @@ __pycache__/
 dist/
 build/
 .venv/
+.venv-wsl/
 venv/
 env/
 
@@ -31,6 +32,9 @@ dump.rdb
 # Cursor (skills are local, rules and plans are committed)
 .cursor/skills/
 .cursor/plans/Untitled
+
+# Scripts cache (临时调试输出 / Prompt 落档 / 一次性脚本中间产物)
+scripts/_cache/
 
 # Logs
 *.log

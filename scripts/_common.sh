@@ -8,6 +8,30 @@
 # Windows 下 Python 默认编码为 GBK，强制使用 UTF-8
 export PYTHONUTF8=1
 
+# ── Python 解释器探测 ─────────────────────────────────────────────
+# Windows + Git Bash 环境下 `python3` 常指向 Windows Store stub（执行即 127）。
+# 按项目硬约束，强制走 .venv/Scripts/python.exe；缺则按可用性回退。
+# source _common.sh 时 cli 脚本已设置 PROJECT_ROOT（见 _ROOT 兜底）。
+_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+if [ -x "$_ROOT/.venv/Scripts/python.exe" ]; then
+    PYTHON_BIN="$_ROOT/.venv/Scripts/python.exe"
+elif [ -x "$_ROOT/.venv/bin/python" ]; then
+    PYTHON_BIN="$_ROOT/.venv/bin/python"
+elif command -v python >/dev/null 2>&1 && python -c "import sys" >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+elif command -v py >/dev/null 2>&1 && py -3 -c "import sys" >/dev/null 2>&1; then
+    PYTHON_BIN="py"
+else
+    echo "[_common.sh] 找不到可用 Python（应在 .venv/Scripts/python.exe）" >&2
+    exit 1
+fi
+export PYTHON_BIN
+
+# 用 shell function 劫持 `python3` 调用 → 自动走 PYTHON_BIN
+# 这样 review_cli.sh / morning_plan_cli.sh 里所有 `python3 ...` 都无需改写
+python3() { "$PYTHON_BIN" "$@"; }
+export -f python3
+
 # 确保 npm global bin 在 PATH 中（claude-sg 等工具）
 _NPM_BIN="${APPDATA:-$HOME/AppData/Roaming}/npm"
 if [ -d "$_NPM_BIN" ] && [[ ":$PATH:" != *":$_NPM_BIN:"* ]]; then
