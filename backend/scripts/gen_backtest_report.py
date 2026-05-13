@@ -167,7 +167,7 @@ async def fetch_consensus_stocks(
     code_rows = (await s.execute(text(
         "SELECT DISTINCT ts_code FROM daily_sector_review "
         "WHERE trade_date = ANY(:dates) AND sector_name = ANY(:names) "
-        "AND source IN ('bankuai','jiuyan','llm_v2') "
+        "AND source IN ('bankuai','jiuyan') "
         "AND ts_code IS NOT NULL AND ts_code <> ''"
     ), {"dates": dates, "names": sub_names})).fetchall()
     codes = [r[0] for r in code_rows]
@@ -397,7 +397,7 @@ def render_html(trade_date: str, results: list, summary: dict, pattern_desc: str
   <h1>{trade_date} 龙头隔夜回测报告 — 模式 1</h1>
   <div class='meta'>
     策略：{_h(pattern_desc)}<br>
-    板块来源：bankuai + jiuyan + llm_v2 三源并集（细分主线粒度），ALIAS_TO_CANONICAL 同义词归一<br>
+    板块来源：bankuai + jiuyan 两源并集（细分主线粒度），ALIAS_TO_CANONICAL 同义词归一<br>
     撮合口径：分钟线，涨停封单容差 0.005，单笔目标仓位 ¥10,000（向下取整到不超过 10k 的整手），含手续费
   </div>
 

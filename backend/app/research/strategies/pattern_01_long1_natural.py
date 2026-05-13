@@ -248,7 +248,7 @@ class Pattern01(BasePattern):
         session: AsyncSession,
         trade_date: str,
     ) -> list[PatternSignal]:
-        # 1. 板块名单（盘前可知，三源并集 bankuai+jiuyan+llm_v2）
+        # 1. 板块名单（盘前可知，两源并集 bankuai+jiuyan）
         sectors = await load_sectors(session, trade_date)
         if not sectors:
             logger.info("pattern_01 funnel %s: no sectors loaded", trade_date)

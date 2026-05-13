@@ -177,8 +177,8 @@ async def load_sectors(
 ) -> dict[str, list[str]]:
     """T 日盘前可知的板块成员名单 = 最近 N 个交易日（≤T-1）三源标签的并集。
 
-    源：bankuai（板块必读，主源） + jiuyan（韭研公社） + llm_v2（LLM 主线判定）。
-    板块必读为优先主源，韭研次之，LLM v2 作补充覆盖人工漏标。
+    源：bankuai（板块必读，主源） + jiuyan（韭研公社）。
+    板块必读为优先主源，韭研次之。LLM v2 已停用（实测错误识别多于价值，见 commit 历史）。
     过滤：剔除"一季报预增/反弹/公告/其他"这类基本面属性 / 无主线归类。
     归一：板块名通过 theme_taxonomy.ALIAS_TO_CANONICAL 把同义词收敛到 canonical
          细分主线（"光模块"="光通信模块"、"PCB"="PCB板"="印制电路板"），
@@ -215,7 +215,7 @@ async def load_sectors(
         "SELECT sector_name, ts_code "
         "FROM daily_sector_review "
         "WHERE trade_date = ANY(:dates) "
-        "AND source IN ('bankuai','jiuyan','llm_v2') "
+        "AND source IN ('bankuai','jiuyan') "
         "AND ts_code IS NOT NULL AND ts_code <> '' "
         "AND sector_name NOT IN ('一季报预增','反弹','公告','其他')"
     ), {"dates": dates})).fetchall()

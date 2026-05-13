@@ -276,7 +276,7 @@ async def fetch_sector_followers(
             "LEFT JOIN limit_list_ths lt ON lt.trade_date=ls.trade_date "
             "     AND lt.ts_code=ls.ts_code AND lt.limit_type='涨停池' "
             "WHERE ls.trade_date=:d AND dsr.sector_name = ANY(:names) "
-            "  AND dsr.source IN ('bankuai','jiuyan','llm_v2') "
+            "  AND dsr.source IN ('bankuai','jiuyan') "
             "  AND ls.\"limit\"='U' "
             "ORDER BY ls.first_time"
         ), {"d": trade_date, "names": sub_names})).fetchall()

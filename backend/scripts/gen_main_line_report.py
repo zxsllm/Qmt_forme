@@ -1,9 +1,9 @@
 """每日主线 + 股票池 HTML 报告生成器。
 
-数据来源 daily_sector_review（三源 bankuai + jiuyan + llm_v2）：
-  - 三源各识别的主线（原始 raw alias） + 票数
-  - 按 ALIAS_TO_CANONICAL 归一后的细分主线 + 票池（三源合并去重）
-  - 每只票标注来源（B/J/L 三源各自命中标记）
+数据来源 daily_sector_review（两源 bankuai + jiuyan，LLM v2 已停用）：
+  - 两源各识别的主线（原始 raw alias） + 票数
+  - 按 ALIAS_TO_CANONICAL 归一后的细分主线 + 票池（两源合并去重）
+  - 每只票标注来源（B/J 两源各自命中标记）
 
 用法：
     python backend/scripts/gen_main_line_report.py 20260428 20260429 ... 20260512
@@ -27,8 +27,8 @@ def _h(s) -> str:
     return html.escape(str(s)) if s is not None else ""
 
 
-SOURCE_LABEL = {"bankuai": "B 板块必读", "jiuyan": "J 韭研", "llm_v2": "L LLM v2"}
-SOURCE_COLOR = {"bankuai": "#f5222d", "jiuyan": "#fa8c16", "llm_v2": "#722ed1"}
+SOURCE_LABEL = {"bankuai": "B 板块必读", "jiuyan": "J 韭研"}
+SOURCE_COLOR = {"bankuai": "#f5222d", "jiuyan": "#fa8c16"}
 
 
 CSS = """
@@ -76,7 +76,7 @@ async def fetch_day(trade_date: str) -> dict:
                    is_main_line, raw_meta
             FROM daily_sector_review
             WHERE trade_date = :d
-              AND source IN ('bankuai','jiuyan','llm_v2')
+              AND source IN ('bankuai','jiuyan')
               AND ts_code IS NOT NULL AND ts_code <> ''
             ORDER BY source, sector_name, COALESCE(board_count, 0) DESC, limit_time
         """), {"d": trade_date})).fetchall()
@@ -144,7 +144,7 @@ def build_html(trade_date: str, rows) -> str:
 
     # 三源原始板块卡
     src_cards = []
-    for src in ("bankuai", "jiuyan", "llm_v2"):
+    for src in ("bankuai", "jiuyan"):
         if src not in by_src:
             continue
         items = sorted(by_src[src].items(), key=lambda x: -len(x[1]))
@@ -175,7 +175,7 @@ def build_html(trade_date: str, rows) -> str:
                 src_dots = "".join(
                     f"<span class='src-dot' style='background:{SOURCE_COLOR[s]}'>"
                     f"{SOURCE_LABEL[s][0]}</span>"
-                    for s in ("bankuai", "jiuyan", "llm_v2") if s in info["sources"]
+                    for s in ("bankuai", "jiuyan") if s in info["sources"]
                 )
                 board_tag = ""
                 if info["board"] and info["board"] >= 2:
@@ -247,7 +247,7 @@ def build_html(trade_date: str, rows) -> str:
     <span class='big-num'>{canonical_count}</span> 个细分主线 ／
     <span class='big-num'>{len(by_parent)}</span> 个父大类
     &nbsp;&nbsp;|&nbsp;&nbsp;
-    {' / '.join(f'<b style="color:{SOURCE_COLOR[s]}">{SOURCE_LABEL[s]}</b> {src_secs.get(s,0)}主线/{src_counts.get(s,0)}行' for s in ('bankuai','jiuyan','llm_v2') if s in by_src)}
+    {' / '.join(f'<b style="color:{SOURCE_COLOR[s]}">{SOURCE_LABEL[s]}</b> {src_secs.get(s,0)}主线/{src_counts.get(s,0)}行' for s in ('bankuai','jiuyan') if s in by_src)}
   </div>
 
   <div class='sources'>{''.join(src_cards)}</div>
