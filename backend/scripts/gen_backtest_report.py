@@ -488,13 +488,22 @@ async def gen_one(trade_date: str) -> str:
     print(f"  信号数: {len(sigs)}")
 
     results = []  # (idx, trade, sec_info, consensus)
-    traded_today: set[tuple[str, str, str | None]] = set()
+    # 同一标的当日只下一笔单（与 test_pattern_backtest.py 同步，commit 155ce1d）。
+    #   - 一次性进场（long1 / shadow / follower_cb）：key = (trade_date, pick_code)
+    #     不论被多少个板块同时识别为 L1/L2/跟风，只买一次（避免 5/11 富春染织转债
+    #     同分钟被"纺织"+"机器人"两个板块各发一次债，造成同票买两次的 bug）
+    #   - 买回（follower_cb_rebuy）：key = (trade_date, pick_code, buy_anchor_time)
+    #     保留时刻区分，让早盘 C 止损后下午板块重燃的买回能独立成交
+    traded_today: set[tuple] = set()
     wins: list[float] = []
     losses: list[float] = []
     skipped = 0
     async with async_session() as s_conn:
         for i, sig in enumerate(sigs, 1):
-            key = (sig.trade_date, sig.pick_code, sig.buy_anchor_time)
+            if sig.pick_role == "follower_cb_rebuy":
+                key = (sig.trade_date, sig.pick_code, sig.buy_anchor_time)
+            else:
+                key = (sig.trade_date, sig.pick_code)
             if key in traded_today:
                 from app.research.strategies.base_pattern import PatternTrade as PT
                 trade = PT(
