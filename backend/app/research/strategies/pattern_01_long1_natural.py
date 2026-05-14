@@ -360,9 +360,9 @@ class Pattern01(BasePattern):
                         state["l1"] = triggered  # (code, minute)
                 elif state["l2"] is None and not is_emerging:
                     # L2 检查（萌芽不发 L2 正股）
-                    l1_code = state["l1"][0]
+                    exclude_codes = state.get("l1_excludes") or {state["l1"][0]}
                     triggered = await self._check_and_trigger_l2(
-                        sec_name, codes, l1_code, minute_dt, quotes, meta, signals,
+                        sec_name, codes, exclude_codes, minute_dt, quotes, meta, signals,
                         t1_one_word, ma5_map, trade_date,
                     )
                     if triggered:
@@ -863,7 +863,7 @@ class Pattern01(BasePattern):
         self,
         sec_name: str,
         codes: list[str],
-        l1_code: str,
+        exclude_codes: set[str],
         minute_dt: datetime,
         quotes: QuoteMap,
         meta: dict[str, dict],
@@ -872,15 +872,18 @@ class Pattern01(BasePattern):
         ma5_map: dict[str, float],
         trade_date: str,
     ) -> tuple[str, datetime] | None:
+        # exclude_codes 是已识别的龙 1 集合（Pattern01 单只 / Pattern02 一字多只）
+        # L1 信号沿用其中第一个 code 作为 long1_* 字段（展示用），不影响 L2 决策
+        l1_code = next(iter(exclude_codes))
         consensus_n = count_codes_above_pct_intraday(
             quotes, codes, minute_dt, INTRADAY_CONSENSUS_PCT_L2
         )
         if consensus_n < INTRADAY_CONSENSUS_MIN_L2:
             return None
-        # 收集 L2 候选（排除 L1 + C 规则 T-1 一字）
+        # 收集 L2 候选（排除龙 1 集合 + C 规则 T-1 一字）
         candidates = []
         for cand_code in codes:
-            if cand_code == l1_code or cand_code in t1_one_word:
+            if cand_code in exclude_codes or cand_code in t1_one_word:
                 continue
             q_cand = quotes.get((cand_code, minute_dt))
             if q_cand is None:

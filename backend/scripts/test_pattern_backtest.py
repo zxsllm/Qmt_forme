@@ -27,11 +27,13 @@ from app.research.data.cb_resolver import (
 )
 from app.research.strategies.base_pattern import PatternSignal, PatternTrade
 from app.research.strategies.pattern_01_long1_natural import Pattern01
+from app.research.strategies.pattern_02_long1_yizi import Pattern02
 from sqlalchemy import text
 
 
 PATTERNS = {
-    "1": Pattern01(),  # 龙头隔夜模式（合并原 1/2，事中共识 ≥3 只 ≥6%）
+    "1": Pattern01(),  # 自然涨停启动的龙头隔夜模式（事中 L1 共识 ≥2 只 ≥6%）
+    "2": Pattern02(),  # 一字涨停启动的龙头隔夜模式（09:30 open ≥ 涨停价 → 龙 1）
 }
 
 
@@ -203,8 +205,18 @@ ROLE_LABEL = {
 }
 
 
+_LONG_N_RE = re.compile(r"^long(\d+)$")
+
+
 def role_label(role: str) -> str:
-    return ROLE_LABEL.get(role, role)
+    """ROLE_LABEL 优先；long4/5/6... 形如 'longN' → '龙N'。"""
+    label = ROLE_LABEL.get(role)
+    if label:
+        return label
+    m = _LONG_N_RE.match(role)
+    if m:
+        return f"龙{m.group(1)}"
+    return role
 
 
 def _hhmm_of(anchor: str, anchor_time: str | None) -> str:
@@ -386,12 +398,14 @@ async def run_pattern(pattern, label: str, dates: list[str]) -> list[PatternTrad
             #   - 一次性进场（long1 / shadow / follower_cb）：key = (trade_date, pick_code)
             #     不论被多少个板块同时识别为 L1/L2/跟风，只买一次（避免 5/11 富春染织转债
             #     同分钟被"纺织"+"机器人"两个板块各发一次债，造成同票买两次的 bug）
-            #   - 买回（follower_cb_rebuy）：key = (trade_date, pick_code, buy_anchor_time)
-            #     保留时刻区分，让早盘 C 止损后下午板块重燃的买回能独立成交
+            #   - 买回（follower_cb_rebuy）：key = (trade_date, pick_code, "rebuy")
+            #     允许同一只 CB 当天有 1 次进场 + 1 次买回（不同 key 类别），
+            #     但跨板块的多次买回也只算一次（L_CB_REBUY_MAX_TIMES=1 保证同板块
+            #     最多一次，去重保证跨板块也最多一次）
             traded_today: set[tuple] = set()
             for i, sig in enumerate(sigs, 1):
                 if sig.pick_role == "follower_cb_rebuy":
-                    key = (sig.trade_date, sig.pick_code, sig.buy_anchor_time)
+                    key = (sig.trade_date, sig.pick_code, "rebuy")
                 else:
                     key = (sig.trade_date, sig.pick_code)
                 if key in traded_today:

@@ -21,9 +21,16 @@ from app.core.database import async_session  # noqa: E402
 from app.research.signals.long_head_detector import fetch_minute_quotes  # noqa: E402
 from app.research.strategies.base_pattern import PatternSignal, PatternTrade, load_sectors  # noqa: E402
 from app.research.strategies.pattern_01_long1_natural import Pattern01  # noqa: E402
+from app.research.strategies.pattern_02_long1_yizi import Pattern02  # noqa: E402
 from app.research.strategies.pattern_01_params import (  # noqa: E402
     ACTIVE, MODERATE, PRESET_NAME,
 )
+
+
+PATTERNS = {
+    "1": Pattern01,  # 自然涨停启动
+    "2": Pattern02,  # 一字涨停启动
+}
 from sqlalchemy import text  # noqa: E402
 
 from test_pattern_backtest import (  # noqa: E402
@@ -429,7 +436,8 @@ def render_preset_panel(pattern_desc: str) -> str:
 """
 
 
-def render_html(trade_date: str, results: list, summary: dict, pattern_desc: str) -> str:
+def render_html(trade_date: str, results: list, summary: dict, pattern_desc: str,
+                pattern_key: str = "1", pattern_module: str = "pattern_01_long1_natural") -> str:
     """results: list of (idx, trade, sec_info, consensus_stocks)"""
     win_count = summary["wins"]
     lose_count = summary["losses"]
@@ -529,11 +537,11 @@ def render_html(trade_date: str, results: list, summary: dict, pattern_desc: str
 <html lang='zh-CN'>
 <head>
 <meta charset='utf-8'>
-<title>{trade_date} 龙头隔夜回测报告 — 模式 1</title>
+<title>{trade_date} 龙头隔夜回测报告 — 模式 {pattern_key}</title>
 <style>{CSS}</style>
 </head>
 <body>
-  <h1>{trade_date} 龙头隔夜回测报告 — 模式 1 [{PRESET_NAME}]</h1>
+  <h1>{trade_date} 龙头隔夜回测报告 — 模式 {pattern_key} [{PRESET_NAME}]</h1>
   {render_preset_panel(pattern_desc)}
 
   <div class='summary'>
@@ -589,27 +597,29 @@ def render_html(trade_date: str, results: list, summary: dict, pattern_desc: str
 
   <div class='footer'>
     生成时间 {_h(__import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S"))} CST
-    · pattern_01_long1_natural · ALIAS_TO_CANONICAL 细分粒度
+    · {pattern_module} · ALIAS_TO_CANONICAL 细分粒度
   </div>
 </body>
 </html>"""
 
 
-async def gen_one(trade_date: str) -> str:
+async def gen_one(trade_date: str, pattern_key: str = "1") -> str:
     """生成一日报告，返回 HTML 路径。"""
-    pattern = Pattern01()
-    print(f"\n=== 生成 {trade_date} 报告 ===")
+    pattern = PATTERNS[pattern_key]()
+    print(f"\n=== 生成 {trade_date} pattern{pattern_key} 报告 ===")
     async with async_session() as s:
         sigs = await pattern.find_signals(s, trade_date)
     print(f"  信号数: {len(sigs)}")
 
     results = []  # (idx, trade, sec_info, consensus)
-    # 同一标的当日只下一笔单（与 test_pattern_backtest.py 同步，commit 155ce1d）。
+    # 同一标的当日只下一笔单（与 test_pattern_backtest.py 同步）。
     #   - 一次性进场（long1 / shadow / follower_cb）：key = (trade_date, pick_code)
     #     不论被多少个板块同时识别为 L1/L2/跟风，只买一次（避免 5/11 富春染织转债
     #     同分钟被"纺织"+"机器人"两个板块各发一次债，造成同票买两次的 bug）
-    #   - 买回（follower_cb_rebuy）：key = (trade_date, pick_code, buy_anchor_time)
-    #     保留时刻区分，让早盘 C 止损后下午板块重燃的买回能独立成交
+    #   - 买回（follower_cb_rebuy）：key = (trade_date, pick_code, "rebuy")
+    #     允许同一只 CB 当天有 1 次进场 + 1 次买回（不同 key 类别），但跨板块的
+    #     多次买回也只算一次（修 5/6 Pattern2 华兴源创转债被"芯片"+"国产芯片"
+    #     两个板块在不同时刻各买回一次的 bug）
     traded_today: set[tuple] = set()
     wins: list[float] = []
     losses: list[float] = []
@@ -617,7 +627,7 @@ async def gen_one(trade_date: str) -> str:
     async with async_session() as s_conn:
         for i, sig in enumerate(sigs, 1):
             if sig.pick_role == "follower_cb_rebuy":
-                key = (sig.trade_date, sig.pick_code, sig.buy_anchor_time)
+                key = (sig.trade_date, sig.pick_code, "rebuy")
             else:
                 key = (sig.trade_date, sig.pick_code)
             if key in traded_today:
@@ -688,11 +698,15 @@ async def gen_one(trade_date: str) -> str:
           f"投入 ¥{cost:.0f} / SKIP {skipped}")
 
     # render_html 内部按"已成交 / SKIP"自动分两表，传完整 results
-    html_str = render_html(trade_date, results, summary, pattern.description)
+    pattern_module = type(pattern).__module__.split(".")[-1]
+    html_str = render_html(trade_date, results, summary, pattern.description,
+                           pattern_key=pattern_key, pattern_module=pattern_module)
 
-    out_dir = Path(__file__).resolve().parents[2] / "reports" / "backtest"
+    # 按 pattern + preset 分子目录：reports/backtest/pattern{N}/<preset>/backtest_YYYYMMDD.html
+    out_dir = (Path(__file__).resolve().parents[2]
+               / "reports" / "backtest" / f"pattern{pattern_key}" / PRESET_NAME)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"backtest_{trade_date}_pattern1.html"
+    out_path = out_dir / f"backtest_{trade_date}.html"
     out_path.write_text(html_str, encoding="utf-8")
     print(f"  → {out_path}")
     return str(out_path)
@@ -701,11 +715,13 @@ async def gen_one(trade_date: str) -> str:
 async def main():
     p = argparse.ArgumentParser()
     p.add_argument("dates", nargs="+", help="trade dates YYYYMMDD ...")
+    p.add_argument("--pattern", default="1", choices=list(PATTERNS.keys()),
+                   help="模式编号: 1=自然涨停启动 / 2=一字涨停启动（默认 1）")
     args = p.parse_args()
 
     paths = []
     for td in args.dates:
-        paths.append(await gen_one(td))
+        paths.append(await gen_one(td, args.pattern))
 
     print("\n=== 生成完成 ===")
     for p in paths:
