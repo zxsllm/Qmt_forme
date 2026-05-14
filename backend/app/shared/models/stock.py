@@ -189,6 +189,7 @@ class SimOrder(Base):
     order_id: Mapped[str] = mapped_column(
         PG_UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4())
     )
+    strategy_name: Mapped[str] = mapped_column(String(32), default="default", index=True)
     signal_id: Mapped[str] = mapped_column(PG_UUID(as_uuid=False), index=True)
     ts_code: Mapped[str] = mapped_column(String(16), index=True)
     side: Mapped[str] = mapped_column(String(4))            # BUY / SELL
@@ -227,6 +228,7 @@ class SimTrade(Base):
     trade_id: Mapped[str] = mapped_column(
         PG_UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid4())
     )
+    strategy_name: Mapped[str] = mapped_column(String(32), default="default", index=True)
     order_id: Mapped[str] = mapped_column(PG_UUID(as_uuid=False), index=True)
     ts_code: Mapped[str] = mapped_column(String(16), index=True)
     side: Mapped[str] = mapped_column(String(4))
@@ -244,6 +246,7 @@ class SimPosition(Base):
     __tablename__ = "sim_positions"
 
     lot_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    strategy_name: Mapped[str] = mapped_column(String(32), default="default", index=True)
     ts_code: Mapped[str] = mapped_column(String(16), index=True)
     qty: Mapped[int] = mapped_column(Integer, default=0)
     available_qty: Mapped[int] = mapped_column(Integer, default=0)
@@ -268,10 +271,10 @@ class SimPosition(Base):
 
 
 class SimAccount(Base):
-    """Single-row account snapshot.  id=1 always."""
+    """Per-strategy account snapshot.  PK is strategy_name."""
     __tablename__ = "sim_account"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    strategy_name: Mapped[str] = mapped_column(String(32), primary_key=True, default="default")
     total_asset: Mapped[float] = mapped_column(Float, default=1_000_000.0)
     cash: Mapped[float] = mapped_column(Float, default=1_000_000.0)
     frozen: Mapped[float] = mapped_column(Float, default=0.0)

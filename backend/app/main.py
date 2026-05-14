@@ -101,9 +101,12 @@ async def _redis_ws_worker(channel: str) -> None:
 @app.on_event("startup")
 async def startup_event():
     from app.core.startup import startup_checks
+    from app.execution.cron import start_cron
     app.state.startup_result = await startup_checks()
     asyncio.create_task(_redis_ws_worker(REDIS_CHANNEL))
     asyncio.create_task(_redis_ws_worker(NEWS_CHANNEL))
+    # 每日 09:25 自动启 Pattern1/2 + 15:05 对账报告
+    start_cron()
 
 
 @app.websocket("/ws/market")

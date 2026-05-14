@@ -3,12 +3,16 @@ import type { ColumnsType } from 'antd/es/table';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, type SimPosition } from '../services/api';
 
-export default function PositionTable() {
+interface Props {
+  strategy?: string;
+}
+
+export default function PositionTable({ strategy = 'default' }: Props) {
   const qc = useQueryClient();
 
   const { data } = useQuery({
-    queryKey: ['positions'],
-    queryFn: api.getPositions,
+    queryKey: ['positions', strategy],
+    queryFn: () => api.getPositions(strategy),
     refetchInterval: 5000,
   });
 
@@ -19,12 +23,12 @@ export default function PositionTable() {
         side: 'SELL',
         order_type: 'MARKET',
         qty: pos.qty,
-      }),
+      }, strategy),
     onSuccess: () => {
       message.success('平仓订单已提交');
-      qc.invalidateQueries({ queryKey: ['positions'] });
-      qc.invalidateQueries({ queryKey: ['orders'] });
-      qc.invalidateQueries({ queryKey: ['account'] });
+      qc.invalidateQueries({ queryKey: ['positions', strategy] });
+      qc.invalidateQueries({ queryKey: ['orders', strategy] });
+      qc.invalidateQueries({ queryKey: ['account', strategy] });
     },
     onError: (e: Error) => message.error(e.message),
   });
@@ -38,22 +42,58 @@ export default function PositionTable() {
           side: 'SELL',
           order_type: 'MARKET',
           qty: pos.qty,
-        });
+        }, strategy);
       }
     },
     onSuccess: () => {
       message.success('全部清仓订单已提交');
-      qc.invalidateQueries({ queryKey: ['positions'] });
-      qc.invalidateQueries({ queryKey: ['orders'] });
-      qc.invalidateQueries({ queryKey: ['account'] });
+      qc.invalidateQueries({ queryKey: ['positions', strategy] });
+      qc.invalidateQueries({ queryKey: ['orders', strategy] });
+      qc.invalidateQueries({ queryKey: ['account', strategy] });
     },
     onError: (e: Error) => message.error(e.message),
   });
 
   const positions = data?.data ?? [];
 
+  const sellAnchorTag = (anchor?: string) => {
+    if (!anchor) return null;
+    const map: Record<string, { c: string; t: string }> = {
+      next_open: { c: 'blue', t: 'T+1 开盘' },
+      today_close: { c: 'orange', t: '当日收盘' },
+      intraday_at: { c: 'purple', t: '盘中定时' },
+    };
+    const s = map[anchor] ?? { c: 'default', t: anchor };
+    return <Tag color={s.c} variant="filled" style={{ fontSize: 11, margin: 0 }}>{s.t}</Tag>;
+  };
+
+  const pickRoleTag = (role?: string) => {
+    if (!role) return null;
+    const map: Record<string, string> = {
+      long1: '龙1',
+      shadow: '影子',
+      follower_cb: 'CB跟风',
+      follower_cb_rebuy: 'CB买回',
+    };
+    return (
+      <Tag color="cyan" variant="filled" style={{ fontSize: 11, margin: 0 }}>
+        {map[role] ?? role}
+      </Tag>
+    );
+  };
+
   const columns: ColumnsType<SimPosition> = [
+    {
+      title: 'Lot', dataIndex: 'lot_id', width: 80,
+      render: (v?: string) => v ? (
+        <span style={{ color: '#93a9bc', fontSize: 11, fontFamily: 'monospace' }}>{v.slice(0, 8)}</span>
+      ) : '-',
+    },
     { title: '代码', dataIndex: 'ts_code', width: 100 },
+    {
+      title: '角色', dataIndex: 'pick_role', width: 80,
+      render: (v?: string) => pickRoleTag(v),
+    },
     { title: '持仓', dataIndex: 'qty', width: 70, align: 'right' },
     {
       title: '成本', dataIndex: 'avg_cost', width: 80, align: 'right',
@@ -80,7 +120,15 @@ export default function PositionTable() {
       ),
     },
     {
-      title: '操作', width: 70, align: 'center',
+      title: '出场方式', dataIndex: 'sell_anchor', width: 110,
+      render: (v?: string) => sellAnchorTag(v),
+    },
+    {
+      title: '出场日期', dataIndex: 'sell_anchor_date', width: 100,
+      render: (v?: string) => v ? <span style={{ fontSize: 11, color: '#93a9bc' }}>{v}</span> : '-',
+    },
+    {
+      title: '操作', width: 70, align: 'center', fixed: 'right',
       render: (_: unknown, record: SimPosition) =>
         record.qty > 0 ? (
           <Popconfirm
@@ -116,9 +164,10 @@ export default function PositionTable() {
       <Table
         columns={columns}
         dataSource={positions}
-        rowKey="ts_code"
+        rowKey={(record) => record.lot_id || record.ts_code}
         size="small"
         pagination={false}
+        scroll={{ x: 'max-content' }}
       />
     </div>
   );

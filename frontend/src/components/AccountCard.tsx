@@ -20,20 +20,24 @@ interface StatItem {
   subColor?: string;
 }
 
-export default function AccountCard() {
+interface Props {
+  strategy?: string;
+}
+
+export default function AccountCard({ strategy = 'default' }: Props) {
   const qc = useQueryClient();
   const { data: acct } = useQuery({
-    queryKey: ['account'],
-    queryFn: api.getAccount,
+    queryKey: ['account', strategy],
+    queryFn: () => api.getAccount(strategy),
     refetchInterval: 5000,
   });
   const { data: posData } = useQuery({
-    queryKey: ['positions'],
-    queryFn: api.getPositions,
+    queryKey: ['positions', strategy],
+    queryFn: () => api.getPositions(strategy),
     refetchInterval: 5000,
   });
   const resetMut = useMutation({
-    mutationFn: () => api.resetAccount(),
+    mutationFn: () => api.resetAccount(strategy),
     onSuccess: () => {
       message.success('账户已重置');
       qc.invalidateQueries();

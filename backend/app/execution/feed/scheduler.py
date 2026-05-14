@@ -73,6 +73,12 @@ INTRADAY_GRANULARITY_SEC = 5  # one data point per 5 seconds (~2880 points/day)
 
 _intraday_prev_amt: dict[str, float] = {}  # cumulative amount tracker
 
+# ── 1min batch publish 状态（Pattern1/2 走 MINUTE_BARS_CHANNEL）──
+# per-code 当前分钟的 OHLC 状态
+_intraday_1min_state: dict[str, dict] = {}  # ts_code → {minute, open, high, low, close, vol, amount, pre_close}
+_last_published_minute: str = ""             # "HH:MM" 上一次 publish 的分钟
+_open_preview_published: bool = False        # 09:30 早发标记（一天一次）
+
 
 def _aggregate_minute_bars(snap: dict) -> None:
     """Called every rt_k tick (~1.2s). Aggregate into 5-second bars for smooth intraday chart."""
@@ -123,6 +129,100 @@ def _aggregate_minute_bars(snap: dict) -> None:
 
         _intraday_prev_vol[code] = cum_vol
         _intraday_prev_amt[code] = cum_amt
+
+
+def _aggregate_and_publish_1min(snap: dict, watched_codes: list[str]) -> None:
+    """Per rt_k tick: incremental 1min OHLC for watched codes; publish on minute rollover.
+
+    工作流（每个 rt_k tick 调一次，~1.2s 间隔）:
+      1. 当前 HH:MM = now
+      2. 对每只 watched code:
+         - 若 state.minute != HH:MM：上一分钟刚结束，把旧 state 暂存到 _to_publish；
+           state 重置为新分钟（open = 当前 rt_k close）
+         - 否则：更新 high/low/close
+      3. 09:30 早发：当天第一次见到 HH:MM = 09:30 时，立即用当前状态构造 bar 发一次
+         （is_open_preview=True），让 Pattern02 在 09:30:0X 就能下单
+      4. 09:31 时检测到分钟翻转 → publish 09:30 final（_last_published_minute 切换）
+
+    注：vol/amount 取 rt_k row 的累计值，1min bar 中存的是当前累计（不是 delta），
+    Pattern1/2 不依赖 vol/amount，先粗糙处理。
+    """
+    global _last_published_minute, _open_preview_published
+    if not watched_codes:
+        return
+    now = datetime.now()
+    cur_minute = now.strftime("%H:%M")
+
+    # 一天开始时（HH:MM < 09:30 或新交易日）重置 09:30 早发标记
+    if cur_minute < "09:30" or (_last_published_minute and cur_minute < _last_published_minute):
+        _open_preview_published = False
+
+    # 第一步：更新每只 watched code 当前分钟 OHLC，并收集翻分钟前的"前一分钟 bar"
+    prev_minute_bars: list[BarData] = []
+    for code in watched_codes:
+        row = snap.get(code)
+        if not row:
+            continue
+        price = float(row.get("close", 0) or 0)
+        if price <= 0:
+            continue
+        st = _intraday_1min_state.get(code)
+        if st is None or st.get("minute") != cur_minute:
+            # 分钟翻转：把旧 state 转成 BarData 入队
+            if st is not None:
+                prev_minute_bars.append(_state_to_bar(code, st))
+            # 重置新分钟（open = 当前 rt_k row 的 open；若该 row 没 open，回退 price）
+            base_dt = now.replace(second=0, microsecond=0)
+            o = float(row.get("open", price) or price)
+            _intraday_1min_state[code] = {
+                "minute": cur_minute,
+                "minute_dt": base_dt,
+                "open": o,
+                "high": max(o, price),
+                "low": min(o, price),
+                "close": price,
+                "vol": float(row.get("vol", 0) or 0),
+                "amount": float(row.get("amount", 0) or 0),
+                "pre_close": float(row.get("pre_close", 0) or 0) or None,
+            }
+        else:
+            st["high"] = max(st["high"], price)
+            st["low"] = min(st["low"], price)
+            st["close"] = price
+            st["vol"] = float(row.get("vol", st["vol"]) or st["vol"])
+            st["amount"] = float(row.get("amount", st["amount"]) or st["amount"])
+
+    # 第二步：上一分钟有 bar 收齐 → publish
+    if prev_minute_bars:
+        asyncio.create_task(market_feed.publish_minute_batch(prev_minute_bars))
+        _last_published_minute = prev_minute_bars[0].timestamp.strftime("%H:%M")
+
+    # 第三步：09:30 早发（盘前预览版 — 用现有 09:30 state 构造一次 bar）
+    if cur_minute == "09:30" and not _open_preview_published:
+        preview_bars: list[BarData] = []
+        for code, st in _intraday_1min_state.items():
+            if st.get("minute") == "09:30":
+                preview_bars.append(_state_to_bar(code, st))
+        if preview_bars:
+            asyncio.create_task(
+                market_feed.publish_minute_batch(preview_bars, is_open_preview=True)
+            )
+            _open_preview_published = True
+
+
+def _state_to_bar(ts_code: str, st: dict) -> BarData:
+    return BarData(
+        ts_code=ts_code,
+        timestamp=st["minute_dt"],
+        open=st["open"],
+        high=st["high"],
+        low=st["low"],
+        close=st["close"],
+        vol=st.get("vol", 0.0),
+        amount=st.get("amount", 0.0),
+        pre_close=st.get("pre_close"),
+        freq="1min",
+    )
 
 
 def get_intraday_minutes(ts_code: str) -> list[dict]:
@@ -673,6 +773,10 @@ class MarketDataScheduler:
                         from app.execution.feed.monitor_engine import monitor_engine
                         monitor_engine.on_tick(snapshot, _cached_sector_rankings)
 
+                        # Pattern1/2 走 MINUTE_BARS_CHANNEL — 每分钟一次 batch publish
+                        # 09:30 第一次 tick 早发一次（is_open_preview=True）
+                        _aggregate_and_publish_1min(snapshot, self._watch_codes)
+
                         if watched_bars:
                             self._update_limits_from_bars(watched_bars)
                             await market_feed.publish_batch(watched_bars)
@@ -685,6 +789,16 @@ class MarketDataScheduler:
                                             len(filled), len(snapshot), elapsed)
                                 # Position changed → refresh monitor context immediately
                                 await self._push_monitor_context()
+
+                            # Auto-close hook: 扫到期 lot 自动派 SELL（每 tick 调一次）
+                            try:
+                                closed = trading_engine.auto_close_check(
+                                    datetime.now(), snapshot,
+                                )
+                                if closed:
+                                    logger.info("auto_close: %d SELL orders submitted", len(closed))
+                            except Exception:
+                                logger.exception("auto_close_check error")
 
                     sleep = max(0.1, POLL_INTERVAL - elapsed)
                     await asyncio.sleep(sleep)

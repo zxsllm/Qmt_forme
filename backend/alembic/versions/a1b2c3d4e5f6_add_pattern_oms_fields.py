@@ -26,41 +26,64 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # --- sim_orders: add pattern-aware columns ---
-    op.add_column('sim_orders', sa.Column('sell_anchor', sa.String(length=24), nullable=False, server_default=''))
-    op.add_column('sim_orders', sa.Column('sell_anchor_time', sa.String(length=8), nullable=True))
-    op.add_column('sim_orders', sa.Column('sell_reason', sa.String(length=64), nullable=False, server_default=''))
-    op.add_column('sim_orders', sa.Column('pick_kind', sa.String(length=8), nullable=False, server_default='stock'))
-    op.add_column('sim_orders', sa.Column('pick_role', sa.String(length=32), nullable=False, server_default=''))
-    op.add_column('sim_orders', sa.Column('buy_anchor', sa.String(length=24), nullable=False, server_default='market'))
-    op.add_column('sim_orders', sa.Column('buy_anchor_time', sa.String(length=8), nullable=True))
-    op.add_column('sim_orders', sa.Column('underlying_code', sa.String(length=16), nullable=True))
-    op.add_column('sim_orders', sa.Column('lot_id', sa.String(length=36), nullable=False, server_default=''))
-    op.add_column('sim_orders', sa.Column('extra', postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default=sa.text("'{}'::jsonb")))
+    # 幂等：用 ADD COLUMN IF NOT EXISTS 处理 schema drift（available_qty 等列可能已存在）
+    sim_orders_cols = [
+        ("sell_anchor",        "VARCHAR(24)  NOT NULL DEFAULT ''"),
+        ("sell_anchor_time",   "VARCHAR(8)"),
+        ("sell_reason",        "VARCHAR(64)  NOT NULL DEFAULT ''"),
+        ("pick_kind",          "VARCHAR(8)   NOT NULL DEFAULT 'stock'"),
+        ("pick_role",          "VARCHAR(32)  NOT NULL DEFAULT ''"),
+        ("buy_anchor",         "VARCHAR(24)  NOT NULL DEFAULT 'market'"),
+        ("buy_anchor_time",    "VARCHAR(8)"),
+        ("underlying_code",    "VARCHAR(16)"),
+        ("lot_id",             "VARCHAR(36)  NOT NULL DEFAULT ''"),
+        ("extra",              "JSONB NOT NULL DEFAULT '{}'::jsonb"),
+    ]
+    for col, decl in sim_orders_cols:
+        op.execute(f"ALTER TABLE sim_orders ADD COLUMN IF NOT EXISTS {col} {decl}")
 
-    # --- sim_positions: switch to lot-based PK ---
-    # Add new columns first
-    op.add_column('sim_positions', sa.Column('lot_id', sa.String(length=36), nullable=True))
-    op.add_column('sim_positions', sa.Column('available_qty', sa.Integer(), nullable=False, server_default='0'))
-    op.add_column('sim_positions', sa.Column('sell_anchor', sa.String(length=24), nullable=False, server_default=''))
-    op.add_column('sim_positions', sa.Column('sell_anchor_date', sa.String(length=10), nullable=False, server_default=''))
-    op.add_column('sim_positions', sa.Column('sell_anchor_time', sa.String(length=8), nullable=False, server_default=''))
-    op.add_column('sim_positions', sa.Column('sell_reason', sa.String(length=64), nullable=False, server_default=''))
-    op.add_column('sim_positions', sa.Column('pick_role', sa.String(length=32), nullable=False, server_default=''))
-    op.add_column('sim_positions', sa.Column('pick_kind', sa.String(length=8), nullable=False, server_default='stock'))
-    op.add_column('sim_positions', sa.Column('underlying_code', sa.String(length=16), nullable=True))
-    op.add_column('sim_positions', sa.Column('settlement_rule', sa.String(length=8), nullable=False, server_default='T+1'))
-    op.add_column('sim_positions', sa.Column('entry_date', sa.String(length=10), nullable=False, server_default=''))
-    op.add_column('sim_positions', sa.Column('pending_sell_qty', sa.Integer(), nullable=False, server_default='0'))
+    sim_positions_cols = [
+        ("lot_id",             "VARCHAR(36)"),
+        ("available_qty",      "INTEGER NOT NULL DEFAULT 0"),
+        ("sell_anchor",        "VARCHAR(24)  NOT NULL DEFAULT ''"),
+        ("sell_anchor_date",   "VARCHAR(10)  NOT NULL DEFAULT ''"),
+        ("sell_anchor_time",   "VARCHAR(8)   NOT NULL DEFAULT ''"),
+        ("sell_reason",        "VARCHAR(64)  NOT NULL DEFAULT ''"),
+        ("pick_role",          "VARCHAR(32)  NOT NULL DEFAULT ''"),
+        ("pick_kind",          "VARCHAR(8)   NOT NULL DEFAULT 'stock'"),
+        ("underlying_code",    "VARCHAR(16)"),
+        ("settlement_rule",    "VARCHAR(8)   NOT NULL DEFAULT 'T+1'"),
+        ("entry_date",         "VARCHAR(10)  NOT NULL DEFAULT ''"),
+        ("pending_sell_qty",   "INTEGER NOT NULL DEFAULT 0"),
+    ]
+    for col, decl in sim_positions_cols:
+        op.execute(f"ALTER TABLE sim_positions ADD COLUMN IF NOT EXISTS {col} {decl}")
 
-    # Backfill lot_id for existing rows (use generated UUIDs)
-    op.execute("UPDATE sim_positions SET lot_id = gen_random_uuid()::text WHERE lot_id IS NULL OR lot_id = ''")
-    op.alter_column('sim_positions', 'lot_id', existing_type=sa.String(length=36), nullable=False)
+    # Backfill lot_id（仅对未填的）
+    op.execute(
+        "UPDATE sim_positions SET lot_id = gen_random_uuid()::text "
+        "WHERE lot_id IS NULL OR lot_id = ''"
+    )
+    op.execute("ALTER TABLE sim_positions ALTER COLUMN lot_id SET NOT NULL")
 
-    # Switch primary key: drop old (ts_code), make lot_id PK, add index on ts_code
-    op.drop_constraint('sim_positions_pkey', 'sim_positions', type_='primary')
-    op.create_primary_key('sim_positions_pkey', 'sim_positions', ['lot_id'])
-    op.create_index('ix_sim_positions_ts_code', 'sim_positions', ['ts_code'], unique=False)
+    # 幂等切 PK：先看现在 PK 是不是 ts_code
+    op.execute("""
+        DO $$
+        DECLARE
+            pk_cols TEXT;
+        BEGIN
+            SELECT string_agg(a.attname, ',') INTO pk_cols
+            FROM pg_index i
+            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+            WHERE i.indrelid = 'sim_positions'::regclass AND i.indisprimary;
+
+            IF pk_cols <> 'lot_id' THEN
+                ALTER TABLE sim_positions DROP CONSTRAINT sim_positions_pkey;
+                ALTER TABLE sim_positions ADD PRIMARY KEY (lot_id);
+            END IF;
+        END $$;
+    """)
+    op.execute("CREATE INDEX IF NOT EXISTS ix_sim_positions_ts_code ON sim_positions (ts_code)")
 
 
 def downgrade() -> None:

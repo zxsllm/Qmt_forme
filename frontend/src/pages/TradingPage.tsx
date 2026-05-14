@@ -46,14 +46,20 @@ const historyColumns: ColumnsType<SimOrder> = [
   },
 ];
 
-export default function TradingPage() {
+const STRATEGY_TABS: { key: string; label: string }[] = [
+  { key: 'default', label: '默认账户（手动）' },
+  { key: 'pattern_01', label: 'Pattern01' },
+  { key: 'pattern_02', label: 'Pattern02' },
+];
+
+function StrategyAccountView({ strategy }: { strategy: string }) {
   const [showForm, setShowForm] = useState(false);
   const [filter, setFilter] = useState<string>('all');
   void filter;
 
   const { data: historyData } = useQuery({
-    queryKey: ['orders', 'history'],
-    queryFn: () => api.listOrders(),
+    queryKey: ['orders', strategy, 'history'],
+    queryFn: () => api.listOrders(undefined, strategy),
     refetchInterval: 5000,
     select: (res) => ({
       ...res,
@@ -62,13 +68,13 @@ export default function TradingPage() {
   });
 
   return (
-    <div className="flex flex-col h-full" style={{ padding: 18, gap: 12 }}>
-      <AccountCard />
+    <div className="flex flex-col h-full" style={{ gap: 12 }}>
+      <AccountCard strategy={strategy} />
       <Panel className="flex-1" noPadding>
         <Tabs
           defaultActiveKey="positions"
           style={{ height: '100%', padding: '0 10px' }}
-          tabBarExtraContent={
+          tabBarExtraContent={strategy === 'default' ? (
             <Button
               type="primary"
               size="small"
@@ -78,12 +84,12 @@ export default function TradingPage() {
             >
               新建订单
             </Button>
-          }
+          ) : null}
           items={[
             {
               key: 'positions',
               label: '持仓',
-              children: <PositionTable />,
+              children: <PositionTable strategy={strategy} />,
             },
             {
               key: 'orders',
@@ -103,7 +109,7 @@ export default function TradingPage() {
                       <Radio.Button value="canceled">已撤/拒</Radio.Button>
                     </Radio.Group>
                   </Space>
-                  <OrderTable />
+                  <OrderTable strategy={strategy} />
                 </div>
               ),
             },
@@ -130,6 +136,24 @@ export default function TradingPage() {
         />
       </Panel>
       <OrderSubmitForm open={showForm} onClose={() => setShowForm(false)} />
+    </div>
+  );
+}
+
+export default function TradingPage() {
+  const [strategy, setStrategy] = useState<string>('default');
+  return (
+    <div className="flex flex-col h-full" style={{ padding: 18, gap: 12 }}>
+      <Tabs
+        activeKey={strategy}
+        onChange={setStrategy}
+        type="card"
+        size="small"
+        items={STRATEGY_TABS.map(t => ({ key: t.key, label: t.label }))}
+      />
+      <div className="flex-1" style={{ minHeight: 0 }}>
+        <StrategyAccountView strategy={strategy} />
+      </div>
     </div>
   );
 }

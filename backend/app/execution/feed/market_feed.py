@@ -20,6 +20,10 @@ REDIS_CHANNEL = "market:bars"
 REDIS_LATEST_KEY_PREFIX = "market:latest:"
 FEED_INTERVAL_SECONDS = 60
 
+# Pattern1/2 走 1min batch channel — 与老的 rt_k 单 bar channel 分开，避免
+# 老策略（MA/OvernightGap）每秒收到 1min batch 也跑一遍。strategy_runner 双订阅。
+MINUTE_BARS_CHANNEL = "market:minute_bars"
+
 
 class MarketFeed:
     """Polls data source and publishes BarData to Redis pub/sub + cache."""
@@ -55,6 +59,37 @@ class MarketFeed:
             pipe.set(f"{REDIS_LATEST_KEY_PREFIX}{bar.ts_code}", msg, ex=300)
         pipe.execute()
         logger.debug("published %d bars to Redis", len(bars))
+
+    async def publish_minute_batch(
+        self,
+        bars: list[BarData],
+        *,
+        is_open_preview: bool = False,
+    ) -> None:
+        """Publish 1min bars batch to MINUTE_BARS_CHANNEL (Pattern1/2 channel).
+
+        Single Redis message — strategy_runner 一次性 dispatch 给 batch-mode 策略，
+        避免 5400 只票每分钟 5400 次 publish + 5400 次 on_bar 调用。
+
+        is_open_preview: 09:30 那根 K 线的早发标记（Pattern 内部按分钟幂等）。
+        """
+        if not bars:
+            return
+        payload = {
+            "minute": bars[0].timestamp.isoformat(),
+            "is_open_preview": is_open_preview,
+            "bars": [
+                {**b.model_dump(mode="json"),
+                 "timestamp": b.timestamp.isoformat()}
+                for b in bars
+            ],
+        }
+        redis_client.publish(MINUTE_BARS_CHANNEL, json.dumps(payload))
+        logger.info(
+            "published 1min batch: %d bars @ %s%s",
+            len(bars), bars[0].timestamp.strftime("%H:%M"),
+            " [open-preview]" if is_open_preview else "",
+        )
 
     def get_latest(self, ts_code: str) -> BarData | None:
         """Get cached latest bar from Redis."""

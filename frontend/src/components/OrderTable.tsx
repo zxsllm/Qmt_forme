@@ -13,23 +13,27 @@ const statusMap: Record<string, { color: string; text: string }> = {
   REJECTED: { color: 'red', text: '已拒绝' },
 };
 
-export default function OrderTable() {
+interface Props {
+  strategy?: string;
+}
+
+export default function OrderTable({ strategy = 'default' }: Props) {
   const qc = useQueryClient();
   const [modifyTarget, setModifyTarget] = useState<SimOrder | null>(null);
   const [form] = Form.useForm();
 
   const { data } = useQuery({
-    queryKey: ['orders'],
-    queryFn: () => api.listOrders(),
+    queryKey: ['orders', strategy],
+    queryFn: () => api.listOrders(undefined, strategy),
     refetchInterval: 3000,
   });
 
   const cancelMut = useMutation({
-    mutationFn: (id: string) => api.cancelOrder(id),
+    mutationFn: (id: string) => api.cancelOrder(id, strategy),
     onSuccess: () => {
       message.success('撤单成功');
-      qc.invalidateQueries({ queryKey: ['orders'] });
-      qc.invalidateQueries({ queryKey: ['account'] });
+      qc.invalidateQueries({ queryKey: ['orders', strategy] });
+      qc.invalidateQueries({ queryKey: ['account', strategy] });
     },
     onError: (e: Error) => message.error(e.message),
   });
@@ -38,19 +42,19 @@ export default function OrderTable() {
     mutationFn: async ({ oldOrder, newPrice, newQty }: {
       oldOrder: SimOrder; newPrice: number; newQty: number;
     }) => {
-      await api.cancelOrder(oldOrder.order_id);
+      await api.cancelOrder(oldOrder.order_id, strategy);
       return api.submitOrder({
         ts_code: oldOrder.ts_code,
         side: oldOrder.side,
         order_type: 'LIMIT',
         price: newPrice,
         qty: newQty,
-      });
+      }, strategy);
     },
     onSuccess: () => {
       message.success('改单成功');
-      qc.invalidateQueries({ queryKey: ['orders'] });
-      qc.invalidateQueries({ queryKey: ['account'] });
+      qc.invalidateQueries({ queryKey: ['orders', strategy] });
+      qc.invalidateQueries({ queryKey: ['account', strategy] });
       setModifyTarget(null);
     },
     onError: (e: Error) => message.error(e.message),
@@ -87,6 +91,30 @@ export default function OrderTable() {
     },
     { title: '委托', dataIndex: 'qty', width: 60, align: 'right' },
     { title: '成交', dataIndex: 'filled_qty', width: 60, align: 'right' },
+    {
+      title: '角色', dataIndex: 'pick_role', width: 90,
+      render: (v?: string) => {
+        if (!v) return null;
+        const map: Record<string, string> = {
+          long1: '龙1', shadow: '影子',
+          follower_cb: 'CB跟风', follower_cb_rebuy: 'CB买回',
+        };
+        return <Tag color="cyan" variant="filled" style={{ fontSize: 11, margin: 0 }}>{map[v] ?? v}</Tag>;
+      },
+    },
+    {
+      title: '出场', dataIndex: 'sell_anchor', width: 90,
+      render: (v?: string) => {
+        if (!v) return null;
+        const map: Record<string, { c: string; t: string }> = {
+          next_open: { c: 'blue', t: 'T+1' },
+          today_close: { c: 'orange', t: '当日收' },
+          intraday_at: { c: 'purple', t: '盘中' },
+        };
+        const s = map[v] ?? { c: 'default', t: v };
+        return <Tag color={s.c} variant="filled" style={{ fontSize: 11, margin: 0 }}>{s.t}</Tag>;
+      },
+    },
     {
       title: '状态', dataIndex: 'status', width: 90,
       render: (v: string) => {
@@ -128,6 +156,7 @@ export default function OrderTable() {
         rowKey="order_id"
         size="small"
         pagination={false}
+        scroll={{ x: 'max-content' }}
       />
       <Modal
         title={`改单 · ${modifyTarget?.ts_code ?? ''}`}

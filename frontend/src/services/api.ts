@@ -174,6 +174,16 @@ export interface SimOrder {
   fee: number;
   slippage: number;
   reject_reason: string;
+  // OMS Pattern fields
+  lot_id?: string;
+  sell_anchor?: string;
+  sell_anchor_time?: string | null;
+  sell_reason?: string;
+  pick_kind?: string;
+  pick_role?: string;
+  buy_anchor?: string;
+  buy_anchor_time?: string | null;
+  underlying_code?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -181,10 +191,23 @@ export interface SimOrder {
 export interface SimPosition {
   ts_code: string;
   qty: number;
+  available_qty?: number;
   avg_cost: number;
   market_price: number;
   unrealized_pnl: number;
   realized_pnl: number;
+  // OMS lot-level fields
+  lot_id?: string;
+  sell_anchor?: string;
+  sell_anchor_date?: string;
+  sell_anchor_time?: string;
+  sell_reason?: string;
+  pick_role?: string;
+  pick_kind?: string;
+  underlying_code?: string | null;
+  settlement_rule?: string;
+  entry_date?: string;
+  pending_sell_qty?: number;
 }
 
 export interface SimAccount {
@@ -341,38 +364,42 @@ export const api = {
       `/api/v1/market/holdertrade-recent?days=${days}&trade_type=${tradeType}`,
     ),
 
-  // Trading (Phase 3)
-  submitOrder: (body: SubmitOrderBody) =>
-    postJson<SimOrder>('/api/v1/orders', body),
+  // Trading (Phase 3) — strategy='default' / 'pattern_01' / 'pattern_02'
+  submitOrder: (body: SubmitOrderBody, strategy = 'default') =>
+    postJson<SimOrder>(`/api/v1/orders?strategy=${strategy}`, body),
 
-  cancelOrder: (orderId: string) =>
-    deleteJson<SimOrder>(`/api/v1/orders/${orderId}`),
+  cancelOrder: (orderId: string, strategy = 'default') =>
+    deleteJson<SimOrder>(`/api/v1/orders/${orderId}?strategy=${strategy}`),
 
-  listOrders: (status?: string) =>
-    fetchJson<ApiList<SimOrder>>(
-      `/api/v1/orders${status ? `?status=${status}` : ''}`,
-    ),
+  listOrders: (status?: string, strategy = 'default') => {
+    const q = new URLSearchParams();
+    if (status) q.set('status', status);
+    q.set('strategy', strategy);
+    return fetchJson<ApiList<SimOrder>>(`/api/v1/orders?${q.toString()}`);
+  },
 
-  getPositions: () =>
-    fetchJson<ApiList<SimPosition>>('/api/v1/positions'),
+  getPositions: (strategy = 'default') =>
+    fetchJson<ApiList<SimPosition>>(`/api/v1/positions?strategy=${strategy}`),
 
-  getAccount: () =>
-    fetchJson<SimAccount>('/api/v1/account'),
+  getAccount: (strategy = 'default') =>
+    fetchJson<SimAccount>(`/api/v1/account?strategy=${strategy}`),
 
-  getRiskStatus: () =>
-    fetchJson<RiskStatus>('/api/v1/risk/status'),
+  getRiskStatus: (strategy = 'default') =>
+    fetchJson<RiskStatus>(`/api/v1/risk/status?strategy=${strategy}`),
 
   getRiskAlerts: () =>
     fetchJson<RiskAlertsResponse>('/api/v1/risk/alerts'),
 
-  activateKillSwitch: (reason = 'manual') =>
-    postJson('/api/v1/risk/kill-switch', { reason }),
+  activateKillSwitch: (reason = 'manual', strategy = 'default') =>
+    postJson(`/api/v1/risk/kill-switch?strategy=${strategy}`, { reason }),
 
-  deactivateKillSwitch: () =>
-    deleteJson('/api/v1/risk/kill-switch'),
+  deactivateKillSwitch: (strategy = 'default') =>
+    deleteJson(`/api/v1/risk/kill-switch?strategy=${strategy}`),
 
-  resetAccount: () =>
-    postJson<{ status: string; message: string }>('/api/v1/account/reset', {}),
+  resetAccount: (strategy = 'default') =>
+    postJson<{ status: string; message: string }>(
+      `/api/v1/account/reset?strategy=${strategy}`, {},
+    ),
 
   // Strategy runner
   getRunningStrategies: () =>

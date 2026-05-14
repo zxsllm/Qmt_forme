@@ -25,8 +25,8 @@ from app.execution.risk.kill_switch import KillSwitch
 from app.execution.matcher import SimMatcher
 
 
-def _next_trade_date(entry_date: str) -> str:
-    """Naive next-trade-date: +1 day, skip Sat/Sun. For holidays, use trade_cal later."""
+def _next_trade_date_naive(entry_date: str) -> str:
+    """Naive fallback: +1 day, skip Sat/Sun. Doesn't know holidays."""
     d = datetime.strptime(entry_date, "%Y-%m-%d").date()
     d += timedelta(days=1)
     while d.weekday() >= 5:  # Sat=5, Sun=6
@@ -37,7 +37,8 @@ logger = logging.getLogger(__name__)
 
 
 class TradingEngine:
-    def __init__(self, initial_capital: float = 1_000_000.0):
+    def __init__(self, initial_capital: float = 1_000_000.0, strategy_name: str = "default"):
+        self.strategy_name = strategy_name
         self.order_mgr = OrderManager()
         self.position_book = PositionBook()
         self.account_mgr = AccountManager(initial_capital)
@@ -47,6 +48,32 @@ class TradingEngine:
         self.matcher = SimMatcher()
         self._audit_buffer: list[AuditEvent] = []
         self._price_limits: dict[str, tuple[float, float]] = {}
+        # trade_cal 缓存（begin_day 时异步刷新）— 用于 next_trade_date 准确避开节假日
+        self._trade_dates_cache: list[str] = []  # YYYY-MM-DD 顺序排列
+
+    def _next_trade_date(self, entry_date: str) -> str:
+        """优先查 trade_cal 缓存；缓存未命中或未刷新时回退到 naive（仅跳周末）。
+
+        缓存在 begin_day() 时由 _refresh_trade_dates_cache 异步刷新；首日启动时
+        如果填单发生在刷新完成前，会用 naive 兜底。准确性优先于实时性。
+        """
+        from app.shared.data.trade_cal import next_trade_date_from_cache
+        nd = next_trade_date_from_cache(entry_date, self._trade_dates_cache)
+        if nd:
+            return nd
+        return _next_trade_date_naive(entry_date)
+
+    def _refresh_trade_dates_cache(self) -> None:
+        """异步刷新交易日缓存（begin_day 调用，非阻塞）。"""
+        async def _load():
+            try:
+                from app.shared.data.trade_cal import get_trade_dates_from
+                today = datetime.now().strftime("%Y%m%d")
+                self._trade_dates_cache = await get_trade_dates_from(today, n=60)
+                logger.info("trade_cal cache: %d dates loaded", len(self._trade_dates_cache))
+            except Exception:
+                logger.exception("trade_cal cache refresh failed")
+        self._persist(_load())
 
     def set_price_limits(self, limits: dict[str, tuple[float, float]]) -> None:
         """Set today's up/down limits (called by scheduler on new trade day).
@@ -116,6 +143,7 @@ class TradingEngine:
 
         from app.execution.persistence import save_batch
         self._persist(save_batch(
+            self.strategy_name,
             orders=[order.model_copy()],
             account=self.account_mgr.account.model_copy(),
         ))
@@ -142,6 +170,7 @@ class TradingEngine:
 
         from app.execution.persistence import save_batch
         self._persist(save_batch(
+            self.strategy_name,
             orders=[order.model_copy()],
             account=self.account_mgr.account.model_copy(),
         ))
@@ -189,7 +218,7 @@ class TradingEngine:
                 entry_date = order.created_at.strftime("%Y-%m-%d")
                 settlement = "T+0" if order.pick_kind == "cb" or is_cb_code(order.ts_code) else "T+1"
                 sell_anchor_date = (
-                    _next_trade_date(entry_date) if order.sell_anchor == "next_open" else ""
+                    self._next_trade_date(entry_date) if order.sell_anchor == "next_open" else ""
                 )
                 new_lot = self.position_book.apply_fill(
                     order.ts_code, order.side,
@@ -241,6 +270,7 @@ class TradingEngine:
                 affected_lots.extend(self.position_book.get_active_lots(code))
             from app.execution.persistence import save_batch
             self._persist(save_batch(
+                self.strategy_name,
                 orders=[o.model_copy() for o in filled_orders],
                 positions=[lot.model_copy() for lot in affected_lots],
                 account=self.account_mgr.account.model_copy(),
@@ -305,6 +335,8 @@ class TradingEngine:
         self.account_mgr.begin_day()
         self.pre_trade.reset_daily()
         self.realtime_risk.reset()
+        # trade_cal 缓存（用于 next_trade_date 准确避开节假日）
+        self._refresh_trade_dates_cache()
 
     def end_day(self) -> Account:
         acct = self.account_mgr.end_day(self.position_book)
@@ -314,6 +346,7 @@ class TradingEngine:
         from app.execution.persistence import save_batch
         all_positions = self.position_book.get_all_including_closed()
         self._persist(save_batch(
+            self.strategy_name,
             positions=[p.model_copy() for p in all_positions],
             account=acct.model_copy(),
         ))
@@ -323,7 +356,7 @@ class TradingEngine:
         """Rebuild in-memory OMS state from DB (called at startup)."""
         from app.execution.persistence import load_all_state
 
-        orders, positions, account = await load_all_state()
+        orders, positions, account = await load_all_state(self.strategy_name)
 
         self.order_mgr = OrderManager()
         for o in orders:

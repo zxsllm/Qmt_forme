@@ -8,7 +8,29 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, type BacktestRunResult, type BacktestStats, type TradeRecord } from '../services/api';
 import Panel from '../components/Panel';
 
-const AVAILABLE = [
+type StrategyEntry = {
+  name: string;
+  label: string;
+  desc: string;
+  /** Pattern 类: 一键启动（warm_up + universe 由后端算），无需参数表单 */
+  is_pattern?: boolean;
+  /** 老策略: Modal 弹出参数配置 */
+  params?: Record<string, number>;
+};
+
+const AVAILABLE: StrategyEntry[] = [
+  {
+    name: 'pattern_01',
+    label: 'Pattern01 · 龙头隔夜（自然涨停启动）',
+    desc: '盘前 warm_up 加载题材+成分股，盘中 L1/L2 触发买 CB+follower；T+1 09:30 自动平仓 / 当日 today_close / VWAP 出场',
+    is_pattern: true,
+  },
+  {
+    name: 'pattern_02',
+    label: 'Pattern02 · 龙头隔夜（一字涨停启动）',
+    desc: '09:30 一字涨停启动 + D 规则(T-1 一字保留)；与 Pattern01 共享 OMS、互不冲突',
+    is_pattern: true,
+  },
   {
     name: 'ma_crossover',
     label: 'MA 金叉/死叉',
@@ -21,7 +43,7 @@ const AVAILABLE = [
 
 function StrategyManageTab() {
   const qc = useQueryClient();
-  const [configTarget, setConfigTarget] = useState<typeof AVAILABLE[0] | null>(null);
+  const [configTarget, setConfigTarget] = useState<StrategyEntry | null>(null);
   const [form] = Form.useForm();
 
   const { data: status } = useQuery({
@@ -107,13 +129,26 @@ function StrategyManageTab() {
                   >
                     停止
                   </Button>
+                ) : s.is_pattern ? (
+                  <Button
+                    size="small" type="primary"
+                    icon={<PlayCircleOutlined />}
+                    loading={startMut.isPending && startMut.variables?.strategy_name === s.name}
+                    onClick={() => startMut.mutate({
+                      strategy_name: s.name,
+                      params: {},
+                      codes: [],
+                    })}
+                  >
+                    一键启动
+                  </Button>
                 ) : (
                   <Button
                     size="small" type="primary"
                     icon={<PlayCircleOutlined />}
                     onClick={() => {
                       setConfigTarget(s);
-                      form.setFieldsValue({ ...s.params, codes: '000001.SZ' });
+                      form.setFieldsValue({ ...(s.params ?? {}), codes: '000001.SZ' });
                     }}
                   >
                     配置启动
