@@ -45,13 +45,16 @@ class OrderManager:
     def signal_to_request(self, signal: Signal) -> OrderRequest | None:
         """Convert a Signal into an OrderRequest, applying dedup rules.
 
+        Dedup key is (ts_code, side, pick_role) so that follower_cb_rebuy doesn't
+        collide with follower_cb on the same CB within the same window.
+
         Returns None if the signal is a duplicate.
         """
         if signal.signal_id in self._signal_index:
             logger.info("signal %s already submitted, skipping", signal.signal_id)
             return None
 
-        key = f"{signal.ts_code}|{signal.side.value}"
+        key = f"{signal.ts_code}|{signal.side.value}|{signal.pick_role}"
         last = self._recent_signals.get(key)
         if last and (signal.timestamp - last) < self._dedup_window:
             logger.info("duplicate direction signal for %s within window", key)
@@ -68,6 +71,16 @@ class OrderManager:
             price=signal.price,
             qty=signal.qty,
             created_at=signal.timestamp,
+            lot_id=signal.metadata.get("lot_id", "") if signal.metadata else "",
+            sell_anchor=signal.sell_anchor,
+            sell_anchor_time=signal.sell_anchor_time,
+            sell_reason=signal.sell_reason,
+            pick_kind=signal.pick_kind,
+            pick_role=signal.pick_role,
+            buy_anchor=signal.buy_anchor,
+            buy_anchor_time=signal.buy_anchor_time,
+            underlying_code=signal.underlying_code,
+            extra=dict(signal.metadata),
         )
         return req
 
@@ -84,6 +97,16 @@ class OrderManager:
             status=OrderStatus.SUBMITTED,
             created_at=req.created_at,
             updated_at=datetime.now(),
+            lot_id=req.lot_id,
+            sell_anchor=req.sell_anchor,
+            sell_anchor_time=req.sell_anchor_time,
+            sell_reason=req.sell_reason,
+            pick_kind=req.pick_kind,
+            pick_role=req.pick_role,
+            buy_anchor=req.buy_anchor,
+            buy_anchor_time=req.buy_anchor_time,
+            underlying_code=req.underlying_code,
+            extra=dict(req.extra),
         )
         self._orders[order.order_id] = order
         self._signal_index[order.signal_id] = order.order_id

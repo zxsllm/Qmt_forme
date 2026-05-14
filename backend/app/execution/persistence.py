@@ -24,7 +24,10 @@ logger = logging.getLogger(__name__)
 # Pydantic ↔ ORM row conversion
 # ---------------------------------------------------------------------------
 
-def _order_to_row(o: Order) -> dict:
+def _order_to_row(o: Order, *, signal_extras: dict | None = None) -> dict:
+    """Convert Order → DB row. signal_extras carries pattern-aware fields
+    (sell_anchor / pick_kind / etc.) since they live on Signal, not Order."""
+    extras = signal_extras or {}
     return {
         "order_id": str(o.order_id),
         "signal_id": str(o.signal_id),
@@ -39,6 +42,16 @@ def _order_to_row(o: Order) -> dict:
         "fee": o.fee,
         "slippage": o.slippage,
         "reject_reason": o.reject_reason,
+        "sell_anchor": extras.get("sell_anchor", ""),
+        "sell_anchor_time": extras.get("sell_anchor_time"),
+        "sell_reason": extras.get("sell_reason", ""),
+        "pick_kind": extras.get("pick_kind", "stock"),
+        "pick_role": extras.get("pick_role", ""),
+        "buy_anchor": extras.get("buy_anchor", "market"),
+        "buy_anchor_time": extras.get("buy_anchor_time"),
+        "underlying_code": extras.get("underlying_code"),
+        "lot_id": extras.get("lot_id", ""),
+        "extra": extras.get("extra", {}),
         "created_at": o.created_at,
         "updated_at": o.updated_at,
     }
@@ -66,6 +79,7 @@ def _row_to_order(row: SimOrder) -> Order:
 
 def _position_to_row(p: Position) -> dict:
     return {
+        "lot_id": p.lot_id or p.ts_code,  # legacy fallback
         "ts_code": p.ts_code,
         "qty": p.qty,
         "available_qty": p.available_qty,
@@ -73,6 +87,16 @@ def _position_to_row(p: Position) -> dict:
         "market_price": p.market_price,
         "unrealized_pnl": p.unrealized_pnl,
         "realized_pnl": p.realized_pnl,
+        "sell_anchor": p.sell_anchor,
+        "sell_anchor_date": p.sell_anchor_date,
+        "sell_anchor_time": p.sell_anchor_time,
+        "sell_reason": p.sell_reason,
+        "pick_role": p.pick_role,
+        "pick_kind": p.pick_kind,
+        "underlying_code": p.underlying_code,
+        "settlement_rule": p.settlement_rule,
+        "entry_date": p.entry_date,
+        "pending_sell_qty": p.pending_sell_qty,
     }
 
 
@@ -85,6 +109,17 @@ def _row_to_position(row: SimPosition) -> Position:
         market_price=row.market_price,
         unrealized_pnl=row.unrealized_pnl,
         realized_pnl=row.realized_pnl,
+        lot_id=row.lot_id,
+        sell_anchor=row.sell_anchor,
+        sell_anchor_date=row.sell_anchor_date,
+        sell_anchor_time=row.sell_anchor_time,
+        sell_reason=row.sell_reason,
+        pick_role=row.pick_role,
+        pick_kind=row.pick_kind,
+        underlying_code=row.underlying_code,
+        settlement_rule=row.settlement_rule,
+        entry_date=row.entry_date,
+        pending_sell_qty=row.pending_sell_qty,
     )
 
 
@@ -120,13 +155,19 @@ async def save_batch(
     orders: list[Order] | None = None,
     positions: list[Position] | None = None,
     account: Account | None = None,
+    order_extras: dict[str, dict] | None = None,
 ) -> None:
-    """Persist orders/positions/account in one transaction (non-blocking)."""
+    """Persist orders/positions/account in one transaction (non-blocking).
+
+    order_extras: optional {order_id_str → {sell_anchor, pick_kind, ...}} to attach
+    pattern-aware fields to SimOrder rows (these live on the Signal, not Order).
+    """
     try:
         async with async_session() as session:
             if orders:
                 for o in orders:
-                    row = _order_to_row(o)
+                    extras = (order_extras or {}).get(str(o.order_id))
+                    row = _order_to_row(o, signal_extras=extras)
                     stmt = pg_insert(SimOrder).values(**row).on_conflict_do_update(
                         index_elements=["order_id"],
                         set_={k: v for k, v in row.items() if k != "order_id"},
@@ -136,8 +177,8 @@ async def save_batch(
                 for p in positions:
                     row = _position_to_row(p)
                     stmt = pg_insert(SimPosition).values(**row).on_conflict_do_update(
-                        index_elements=["ts_code"],
-                        set_={k: v for k, v in row.items() if k != "ts_code"},
+                        index_elements=["lot_id"],
+                        set_={k: v for k, v in row.items() if k != "lot_id"},
                     )
                     await session.execute(stmt)
             if account:

@@ -849,11 +849,18 @@ class MarketDataScheduler:
 
     @staticmethod
     def _update_limits_from_bars(bars: list[BarData]) -> None:
-        """Use rt_k pre_close to compute accurate intraday limits."""
+        """Use rt_k pre_close to compute accurate intraday limits.
+
+        CB (11*.SH / 12*.SZ) are skipped — CB has ±20% bands not enforced by matcher
+        (Pattern1/2 backtest aligns).
+        """
         from app.execution.engine import trading_engine
         from app.execution.api import _limit_pct
+        from app.shared.data.data_loader import is_cb_code
 
         for bar in bars:
+            if is_cb_code(bar.ts_code):
+                continue
             if bar.pre_close and bar.ts_code not in trading_engine._price_limits:
                 pct = _limit_pct(bar.ts_code)
                 up = round(bar.pre_close * (1 + pct), 2)

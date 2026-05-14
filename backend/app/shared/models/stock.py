@@ -201,6 +201,17 @@ class SimOrder(Base):
     fee: Mapped[float] = mapped_column(Float, default=0.0)
     slippage: Mapped[float] = mapped_column(Float, default=0.0)
     reject_reason: Mapped[str] = mapped_column(Text, default="")
+    # Pattern-aware fields
+    sell_anchor: Mapped[str] = mapped_column(String(24), default="")
+    sell_anchor_time: Mapped[str | None] = mapped_column(String(8))
+    sell_reason: Mapped[str] = mapped_column(String(64), default="")
+    pick_kind: Mapped[str] = mapped_column(String(8), default="stock")
+    pick_role: Mapped[str] = mapped_column(String(32), default="")
+    buy_anchor: Mapped[str] = mapped_column(String(24), default="market")
+    buy_anchor_time: Mapped[str | None] = mapped_column(String(8))
+    underlying_code: Mapped[str | None] = mapped_column(String(16))
+    lot_id: Mapped[str] = mapped_column(String(36), default="")
+    extra: Mapped[dict | None] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=text("NOW()")
     )
@@ -229,16 +240,28 @@ class SimTrade(Base):
 
 
 class SimPosition(Base):
-    """Per-stock position snapshot, one row per ts_code."""
+    """Per-lot position snapshot — PK is lot_id (multi-lot per ts_code)."""
     __tablename__ = "sim_positions"
 
-    ts_code: Mapped[str] = mapped_column(String(16), primary_key=True)
+    lot_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    ts_code: Mapped[str] = mapped_column(String(16), index=True)
     qty: Mapped[int] = mapped_column(Integer, default=0)
     available_qty: Mapped[int] = mapped_column(Integer, default=0)
     avg_cost: Mapped[float] = mapped_column(Float, default=0.0)
     market_price: Mapped[float] = mapped_column(Float, default=0.0)
     unrealized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
     realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    # Lot metadata (Pattern1/2 auto-close)
+    sell_anchor: Mapped[str] = mapped_column(String(24), default="")
+    sell_anchor_date: Mapped[str] = mapped_column(String(10), default="")
+    sell_anchor_time: Mapped[str] = mapped_column(String(8), default="")
+    sell_reason: Mapped[str] = mapped_column(String(64), default="")
+    pick_role: Mapped[str] = mapped_column(String(32), default="")
+    pick_kind: Mapped[str] = mapped_column(String(8), default="stock")
+    underlying_code: Mapped[str | None] = mapped_column(String(16))
+    settlement_rule: Mapped[str] = mapped_column(String(8), default="T+1")
+    entry_date: Mapped[str] = mapped_column(String(10), default="")
+    pending_sell_qty: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=text("NOW()"), onupdate=datetime.now
     )

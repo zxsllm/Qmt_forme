@@ -15,6 +15,7 @@ from uuid import UUID
 
 from app.shared.interfaces.types import OrderSide, OrderStatus, OrderType
 from app.shared.interfaces.models import BarData, FeeConfig, Order
+from app.shared.data.data_loader import is_cb_code
 from app.execution.fee import calc_fee
 from app.execution.slippage import calc_slippage, apply_slippage
 
@@ -107,7 +108,15 @@ class SimMatcher:
         up_limit: float | None,
         down_limit: float | None,
     ) -> bool:
-        """Check A-share tradability rules against the bar."""
+        """Check A-share tradability rules against the bar.
+
+        CB (11*.SH / 12*.SZ) skip all price-limit checks — CB has ±20% bands
+        + dynamic intraday halts that don't map cleanly to bar-level rules.
+        Pattern1/2 backtest aligns: it never blocks CB by price limits.
+        """
+        if is_cb_code(order.ts_code):
+            return True
+
         if up_limit and down_limit:
             is_one_board = (
                 abs(bar.high - bar.low) < 0.01

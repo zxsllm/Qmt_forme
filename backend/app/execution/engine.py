@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
-from uuid import UUID
+from datetime import datetime, timedelta
+from uuid import UUID, uuid4
 
-from app.shared.interfaces.types import OrderSide, OrderStatus, RiskAction, AuditAction
+from app.shared.interfaces.types import OrderSide, OrderStatus, OrderType, RiskAction, AuditAction
 from app.shared.interfaces.models import (
     Account, AuditEvent, BarData, FeeConfig, Order, Position, Signal,
 )
+from app.shared.data.data_loader import is_cb_code
 from app.execution.oms.order_manager import OrderManager
 from app.execution.oms.position_book import PositionBook
 from app.execution.oms.account import AccountManager
@@ -22,6 +23,15 @@ from app.execution.risk.pre_trade import PreTradeRiskChecker
 from app.execution.risk.realtime import RealtimeRiskMonitor
 from app.execution.risk.kill_switch import KillSwitch
 from app.execution.matcher import SimMatcher
+
+
+def _next_trade_date(entry_date: str) -> str:
+    """Naive next-trade-date: +1 day, skip Sat/Sun. For holidays, use trade_cal later."""
+    d = datetime.strptime(entry_date, "%Y-%m-%d").date()
+    d += timedelta(days=1)
+    while d.weekday() >= 5:  # Sat=5, Sun=6
+        d += timedelta(days=1)
+    return d.strftime("%Y-%m-%d")
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +49,21 @@ class TradingEngine:
         self._price_limits: dict[str, tuple[float, float]] = {}
 
     def set_price_limits(self, limits: dict[str, tuple[float, float]]) -> None:
-        """Set today's up/down limits (called by scheduler on new trade day)."""
-        self._price_limits = limits
-        logger.info("price limits loaded for %d stocks", len(limits))
+        """Set today's up/down limits (called by scheduler on new trade day).
+
+        CB ts_codes (11*.SH / 12*.SZ) are skipped — CB price limits are ±20%
+        and not enforced by matcher (Pattern1/2 backtest aligns with this).
+        """
+        clean = {ts: lim for ts, lim in limits.items() if not is_cb_code(ts)}
+        self._price_limits = clean
+        logger.info("price limits loaded for %d codes (CB skipped)", len(clean))
+
+    def set_risk_limits(self, **kwargs) -> None:
+        """Reconfigure pre-trade risk limits at runtime (e.g. max_daily_buys for Pattern1/2)."""
+        for k, v in kwargs.items():
+            if hasattr(self.pre_trade.limits, k):
+                setattr(self.pre_trade.limits, k, v)
+                logger.info("risk limit updated: %s=%s", k, v)
 
     # ------------------------------------------------------------------
     # Persistence bridge (sync → async, non-blocking)
@@ -162,9 +184,36 @@ class TradingEngine:
                 self.account_mgr.on_sell_fill(
                     result.fill_price * result.fill_qty, result.fee)
 
-            self.position_book.apply_fill(
-                order.ts_code, order.side,
-                result.fill_qty, result.fill_price, result.fee)
+            # Lot metadata propagation: BUY creates a new lot, SELL matches lot_id (auto_close) or FIFO
+            if order.side == OrderSide.BUY:
+                entry_date = order.created_at.strftime("%Y-%m-%d")
+                settlement = "T+0" if order.pick_kind == "cb" or is_cb_code(order.ts_code) else "T+1"
+                sell_anchor_date = (
+                    _next_trade_date(entry_date) if order.sell_anchor == "next_open" else ""
+                )
+                new_lot = self.position_book.apply_fill(
+                    order.ts_code, order.side,
+                    result.fill_qty, result.fill_price, result.fee,
+                    lot_id=order.lot_id or str(uuid4()),
+                    sell_anchor=order.sell_anchor,
+                    sell_anchor_date=sell_anchor_date,
+                    sell_anchor_time=order.sell_anchor_time or "",
+                    sell_reason=order.sell_reason,
+                    pick_role=order.pick_role,
+                    pick_kind=order.pick_kind if order.pick_kind else ("cb" if is_cb_code(order.ts_code) else "stock"),
+                    underlying_code=order.underlying_code,
+                    settlement_rule=settlement,
+                    entry_date=entry_date,
+                )
+                # Persist the new lot's lot_id back onto the order so persistence sees it
+                if not order.lot_id:
+                    order.lot_id = new_lot.lot_id
+            else:
+                self.position_book.apply_fill(
+                    order.ts_code, order.side,
+                    result.fill_qty, result.fill_price, result.fee,
+                    lot_id=order.lot_id or None,
+                )
 
             self._audit(AuditAction.ORDER_FILL, order_id=order.order_id,
                         ts_code=order.ts_code,
@@ -187,18 +236,65 @@ class TradingEngine:
             self._audit(AuditAction.KILL_SWITCH_ON, detail=rt_state.halt_reason)
 
         if filled_orders:
-            affected_positions = [
-                p for code in affected_codes
-                if (p := self.position_book.get(code)) is not None
-            ]
+            affected_lots: list[Position] = []
+            for code in affected_codes:
+                affected_lots.extend(self.position_book.get_active_lots(code))
             from app.execution.persistence import save_batch
             self._persist(save_batch(
                 orders=[o.model_copy() for o in filled_orders],
-                positions=[p.model_copy() for p in affected_positions],
+                positions=[lot.model_copy() for lot in affected_lots],
                 account=self.account_mgr.account.model_copy(),
             ))
 
         return filled_orders
+
+    # ------------------------------------------------------------------
+    # Auto-close (called by scheduler every rt_k tick)
+    # ------------------------------------------------------------------
+
+    def auto_close_check(self, now_dt: datetime, snapshot: dict[str, dict]) -> list[Order]:
+        """Submit SELL orders for lots whose sell_anchor has triggered.
+
+        snapshot: rt_k market snapshot {ts_code → {close, ...}}.
+        Lots with pending_sell_qty > 0 are skipped (already-pending SELL).
+        """
+        if self.kill_switch.is_active:
+            return []
+        due_lots = self.position_book.iter_lots_due_for_close(now_dt)
+        if not due_lots:
+            return []
+
+        out_orders: list[Order] = []
+        for lot in due_lots:
+            available_to_sell = lot.available_qty - lot.pending_sell_qty
+            if available_to_sell <= 0:
+                continue
+            row = snapshot.get(lot.ts_code)
+            price_est = (row or {}).get("close", lot.market_price) if row else lot.market_price
+            sell_signal = Signal(
+                ts_code=lot.ts_code,
+                side=OrderSide.SELL,
+                order_type=OrderType.MARKET,
+                price=price_est or None,
+                qty=available_to_sell,
+                reason=f"auto_close:{lot.sell_anchor}:{lot.sell_reason}",
+                sell_anchor=lot.sell_anchor,
+                sell_anchor_time=lot.sell_anchor_time or None,
+                sell_reason=lot.sell_reason,
+                pick_kind=lot.pick_kind,
+                pick_role=lot.pick_role,
+                buy_anchor="auto_close",
+                underlying_code=lot.underlying_code,
+                metadata={"lot_id": lot.lot_id},
+            )
+            result = self.submit_signal(sell_signal)
+            if isinstance(result, Order):
+                lot.pending_sell_qty += available_to_sell
+                out_orders.append(result)
+            else:
+                logger.warning("auto_close SELL rejected for lot %s %s: %s",
+                               lot.lot_id[:8], lot.ts_code, result)
+        return out_orders
 
     # ------------------------------------------------------------------
     # Day lifecycle
@@ -236,7 +332,7 @@ class TradingEngine:
 
         self.position_book = PositionBook()
         for p in positions:
-            self.position_book._positions[p.ts_code] = p
+            self.position_book._lots.setdefault(p.ts_code, []).append(p)
 
         if account:
             self.account_mgr._account = account

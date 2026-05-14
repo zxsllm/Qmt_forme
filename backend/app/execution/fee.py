@@ -1,9 +1,10 @@
-"""Fee calculator — A-share commission, stamp tax, transfer fee."""
+"""Fee calculator — A-share + 可转债 (CB) commission, stamp tax, transfer fee."""
 
 from __future__ import annotations
 
 from app.shared.interfaces.types import OrderSide
 from app.shared.interfaces.models import FeeConfig
+from app.shared.data.data_loader import is_cb_code
 
 
 def calc_fee(
@@ -18,12 +19,21 @@ def calc_fee(
     A-share rules:
     - Commission: max(amount * rate, min_commission), both sides
     - Stamp tax: amount * 0.05%, sell only
-    - Transfer fee: amount * 0.001%, SSE only (code ends with .SH), both sides
+    - Transfer fee: amount * 0.001%, SSE only (.SH), both sides
+
+    可转债 (CB, 11*.SH / 12*.SZ) rules:
+    - Commission: max(amount * rate, min_commission), both sides (broker rate same)
+    - Stamp tax: NONE (exempt by regulation)
+    - Transfer fee: NONE (exempt)
     """
     cfg = config or FeeConfig()
     amount = price * qty
 
     commission = max(amount * cfg.commission_rate, cfg.min_commission)
+
+    if is_cb_code(ts_code):
+        # CB: no stamp tax, no transfer fee
+        return round(commission, 2)
 
     stamp = amount * cfg.stamp_tax_rate if side == OrderSide.SELL else 0.0
 

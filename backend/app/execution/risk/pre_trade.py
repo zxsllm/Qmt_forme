@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from app.shared.interfaces.types import OrderSide, RiskAction
 from app.shared.interfaces.models import OrderRequest, RiskCheckResult, Account, Position
+from app.shared.data.data_loader import is_cb_code
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 class RiskLimits:
     max_position_pct: float = 0.20      # single stock <= 20% of total asset
     max_single_order: float = 200_000   # single order amount cap
-    max_daily_buys: int = 20            # max buy orders per day
+    max_daily_buys: int = 80            # max buy orders per day (Pattern1+2 may emit 25+/day)
     min_cash_reserve: float = 0.0       # minimum cash to keep
 
 
@@ -49,8 +50,11 @@ class PreTradeRiskChecker:
         if is_suspended:
             return self._reject(f"{req.ts_code} is suspended")
 
+        # CB (11*.SH / 12*.SZ): skip price-limit checks (±20% bands, dynamic halts)
+        cb = is_cb_code(req.ts_code)
+
         if req.side == OrderSide.BUY:
-            if up_limit and price_est >= up_limit:
+            if up_limit and price_est >= up_limit and not cb:
                 return self._reject(f"{req.ts_code} at up-limit {up_limit}, buy blocked")
 
             if self._daily_buy_count >= self.limits.max_daily_buys:
@@ -74,7 +78,7 @@ class PreTradeRiskChecker:
             self._daily_buy_count += 1
 
         elif req.side == OrderSide.SELL:
-            if down_limit and price_est and price_est <= down_limit:
+            if down_limit and price_est and price_est <= down_limit and not cb:
                 return self._reject(f"{req.ts_code} at down-limit {down_limit}, sell blocked")
 
             available = position.available_qty if position else 0

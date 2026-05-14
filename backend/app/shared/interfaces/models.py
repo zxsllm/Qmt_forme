@@ -54,6 +54,17 @@ class Signal(BaseModel):
     reason: str = ""
     timestamp: datetime = Field(default_factory=datetime.now)
 
+    # Pattern-aware fields (default-empty for legacy strategies)
+    sell_anchor: str = ""               # "next_open" | "today_close" | "intraday_at" | ""
+    sell_anchor_time: str | None = None # HHMMSS when sell_anchor == "intraday_at"
+    sell_reason: str = ""               # "A_overnight" | "B_window_timeout" | ...
+    pick_kind: str = "stock"            # "stock" | "cb"
+    pick_role: str = ""                 # "long1"/"shadow"/"follower_cb"/"follower_cb_rebuy"/...
+    buy_anchor: str = "market"          # "market"/"limit"/"intraday_at"/"skip"
+    buy_anchor_time: str | None = None  # HHMMSS when buy_anchor is time-based
+    underlying_code: str | None = None  # CB → 正股 ts_code
+    metadata: dict = Field(default_factory=dict)  # sector/long1_*/sector_size/extra
+
 
 class OrderRequest(BaseModel):
     """Post-risk-check order, ready for submission to matcher/broker."""
@@ -65,6 +76,18 @@ class OrderRequest(BaseModel):
     price: float | None = None
     qty: int
     created_at: datetime = Field(default_factory=datetime.now)
+
+    # Pattern-aware fields (mirror Signal)
+    lot_id: str = ""
+    sell_anchor: str = ""
+    sell_anchor_time: str | None = None
+    sell_reason: str = ""
+    pick_kind: str = "stock"
+    pick_role: str = ""
+    buy_anchor: str = "market"
+    buy_anchor_time: str | None = None
+    underlying_code: str | None = None
+    extra: dict = Field(default_factory=dict)
 
 
 class Order(BaseModel):
@@ -85,20 +108,45 @@ class Order(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 
+    # Pattern-aware fields (mirror Signal — propagate from submit_signal through fill)
+    lot_id: str = ""                    # for SELL: target lot to decrement; for BUY: lot to create
+    sell_anchor: str = ""
+    sell_anchor_time: str | None = None
+    sell_reason: str = ""
+    pick_kind: str = "stock"
+    pick_role: str = ""
+    buy_anchor: str = "market"
+    buy_anchor_time: str | None = None
+    underlying_code: str | None = None
+    extra: dict = Field(default_factory=dict)
+
 
 # ---------------------------------------------------------------------------
 # Position & Account
 # ---------------------------------------------------------------------------
 
 class Position(BaseModel):
-    """Single stock holding."""
+    """Single lot of holding (multi-lot OMS — see PositionBook.list_lots)."""
     ts_code: str
-    qty: int = 0                        # current shares held
+    qty: int = 0                        # current shares held in this lot
     available_qty: int = 0              # T+1: shares available for selling today
     avg_cost: float = 0.0               # average cost per share (incl. fees)
     market_price: float = 0.0           # latest market price
     unrealized_pnl: float = 0.0
     realized_pnl: float = 0.0
+
+    # Lot-level metadata (Pattern1/2 auto-close support)
+    lot_id: str = ""                    # unique per BUY fill — empty for legacy aggregated view
+    sell_anchor: str = ""               # "next_open" | "today_close" | "intraday_at" | ""
+    sell_anchor_date: str = ""          # YYYY-MM-DD computed at fill time (trade_cal aware)
+    sell_anchor_time: str = ""          # HHMMSS for intraday_at
+    sell_reason: str = ""
+    pick_role: str = ""
+    pick_kind: str = "stock"            # "stock" | "cb"
+    underlying_code: str | None = None
+    settlement_rule: str = "T+1"        # "T+0" for CB
+    entry_date: str = ""                # YYYY-MM-DD when BUY filled
+    pending_sell_qty: int = 0           # already-submitted SELL order qty, prevents repeat auto_close
 
 
 class Account(BaseModel):
